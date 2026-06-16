@@ -32,13 +32,17 @@ added to the runtime base of `libil2cpp.so`.
 | RecordManager | `0xB0` |
 
 ## PathElement (instance fields)
-| Field | Offset |
-|---|---|
-| Type | `0x30` |
-| Level | `0x34` |
-| Obstacles (enum) | `0x38` |
+| Field | Offset | | Field | Offset |
+|---|---|---|---|---|
+| Type | `0x30` | | PathNorth | `0x50` |
+| Level | `0x34` | | PathEast | `0x58` |
+| Obstacles (enum) | `0x38` | | PathWest | `0x60` |
+| | | | PathSouth | `0x68` |
 
 `must_jump` = `Obstacles ∈ {1 hole, 4 treeJump}` · `must_slide` = `Obstacles ∈ {5 treeSlide, 6 flameTower}`.
+`PathDirection` enum (= `CharacterPlayer.Facing`): None 0, North 1, East 2, South 3, West 4.
+Turn availability at the nearest element is read via the game's own methods (below), with `origin` = the
+player's `Facing`.
 
 ## Method RVAs
 | Method | RVA | | Method | RVA |
@@ -51,7 +55,8 @@ added to the runtime base of `libil2cpp.so`.
 | DeserializeRecordManager | `0x128AF58` | | TurnRight | `0x1298A14` |
 | SerializeRecordManager | `0x128BDC8` | | SetPlayerLevelForUpgradeType | `0x128D7BC` |
 | GetPlayerLevelForUpgradeType | `0x128D568` | | GetStoreItemMaxLevel | `0x128E5D8` |
-| PlayerPrefs.GetInt(string,int) | `0x24B37B8` | | | |
+| PlayerPrefs.GetInt(string,int) | `0x24B37B8` | | PathElement.IsTurn() | `0x12E28B0` |
+| PathElement.CanTurnLeft(dir) | `0x12E2E88` | | PathElement.CanTurnRight(dir) | `0x12E2F44` |
 
 `Il2CppString` layout (used by the PlayerPrefs hook): length @ `0x10`, UTF-16 chars @ `0x14`.
 Instance-method native ABI: first arg = `this`, trailing arg = `MethodInfo*` (pass NULL).

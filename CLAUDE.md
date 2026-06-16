@@ -84,13 +84,15 @@ The script: resolves `libil2cpp.so` base, installs hooks, maxes upgrades once, s
 listens for actions on 9998.
 
 ### Protocol
-- **State (port 9999):** newline-delimited JSON ~10 Hz, **19 fields**:
-  the 17 spec fields — `is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling, has_invincibility,
-  has_angel_wings, has_vacuum, has_boost, is_mega_boost, score, velocity, path_type, path_level,
-  must_jump, must_slide, is_game_over` — plus `is_strafing` and `facing` (player heading, for turn
-  verification). `velocity` = `CharacterPlayer.GetRunVelocity()` sampled on the main (Update) thread.
-  `must_jump/must_slide` are derived from `PathElement.Obstacles` (the tile's obstacle type), which
-  encodes the same jump/slide requirement as `Obstacle.MustJumpOver/MustSlideUnder`.
+- **State (port 9999):** newline-delimited JSON, broadcast every `POLL_MS=100` ms (**measured ~101 ms,
+  9.9 Hz**), **22 fields**: the 17 original — `is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling,
+  has_invincibility, has_angel_wings, has_vacuum, has_boost, is_mega_boost, score, velocity, path_type,
+  path_level, must_jump, must_slide, is_game_over` — plus `is_strafing`, `facing` (PathDirection N=1..W=4),
+  and the turn cues `can_turn_left`, `can_turn_right`, `is_turn`.
+  `velocity` = `CharacterPlayer.GetRunVelocity()` sampled on the main (Update) thread.
+  `must_jump/must_slide` are derived from `PathElement.Obstacles`. `can_turn_left/right` call the game's
+  own `PathElement.CanTurnLeft/CanTurnRight(facing)` on the nearest element, `is_turn` = `PathElement.IsTurn()`
+  — all cached on the main thread in the Update hook (verified flipping correctly at corners/T-junctions).
 - **Actions (port 9998):** one byte per action, **over a single PERSISTENT connection**.
   `0`=StrafeLeft `1`=StrafeRight `2`=Jump `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp
   `7`=RestartGame (logic-only, leaves run in limbo) `8`=RunAgainClicked (starts a real run; env reset uses this).
@@ -114,8 +116,10 @@ CommonPlayer) `0x78`, GameOverInterface(EndGameUI*) `0x1A0`.
 **GameController (instance):** TutorialID `0x48`, GamePlayer `0x70`, IsGameOver `0xDE`,
 IsTutorialMode `0x104`, NearestElement(PathElement*) `0x88`, RecordManager `0xB0`.
 
-**PathElement (instance):** Type `0x30`, Level `0x34`, Obstacles(enum) `0x38`
+**PathElement (instance):** Type `0x30`, Level `0x34`, Obstacles(enum) `0x38`; directional neighbors
+PathNorth `0x50` / PathEast `0x58` / PathWest `0x60` / PathSouth `0x68`
 (must_jump = Obstacles∈{1 hole,4 treeJump}; must_slide = {5 treeSlide,6 flameTower}).
+**PathDirection enum:** None 0, North 1, East 2, South 3, West 4 (= `CharacterPlayer.Facing`).
 
 **RVAs:** Start `0x1269CE8`, Update `0x126C60C`, RestartGame `0x126B5B8`,
 EndGameUI.RunAgainClicked `0x12BCCF0`, GetRunVelocity `0x12982D8`, Jump `0x1297B80`, Slide `0x1298768`,
@@ -123,7 +127,8 @@ StrafeLeft `0x1298874`, StrafeRight `0x1298908`, TurnLeft `0x129899C`, TurnRight
 DeserializeRecordManager `0x128AF58`, SerializeRecordManager `0x128BDC8`,
 SetPlayerLevelForUpgradeType `0x128D7BC`, GetPlayerLevelForUpgradeType `0x128D568`,
 GetStoreItemMaxLevel `0x128E5D8`, PlayerPrefs.GetInt(string,int) `0x24B37B8`
-(Il2CppString: len@0x10, UTF-16 chars@0x14).
+(Il2CppString: len@0x10, UTF-16 chars@0x14),
+PathElement.CanTurnLeft(dir) `0x12E2E88`, CanTurnRight(dir) `0x12E2F44`, IsTurn() `0x12E28B0`.
 
 **StoreItemType (upgrade indices):** AngelWings 0, HeadStart 1, HeadStartMega 2, Vacuum 5,
 Invincibility 6, CoinBonus 7, CoinValue 8, Boost 9. Leveled ones (have a max>0): 5,6,7,8,9.
@@ -209,18 +214,18 @@ richer observation (one-hot enums, a `valid` flag for the -1 sentinels); reward 
 phone = one env**, real-time ~10 Hz, no simulator, no parallelism. Defaults live in `constants.py`;
 encoding in `obs.py`; the env in `env.py`.
 
-### Observation — `Box(0.0, 1.0, (18,), float32)`
-18 features, all normalized to [0,1] by `state_to_obs()`. The **raw 19-field state dict is always in
+### Observation — `Box(0.0, 1.0, (21,), float32)`
+21 features, all normalized to [0,1] by `state_to_obs()`. The **raw 22-field state dict is always in
 `info["raw_state"]`**. Raw `score` is **excluded** from the obs (unbounded/accumulating → it drives the
 reward instead).
 
 | idx | feature | transform |
 |---|---|---|
-| 0–13 | the 14 bool flags | `float(bool)` → 0/1 — is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling, has_invincibility, has_angel_wings, has_vacuum, has_boost, is_mega_boost, is_strafing, must_jump, must_slide, is_game_over |
-| 14 | velocity | `clip((v-100)/120, 0, 1)`  (VEL_MIN 100, VEL_MAX 220) |
-| 15 | path_type | `0 if <0 else clip(pt,0,37)/37` |
-| 16 | path_level | `0 if <0 else clip(pl,0,4)/4` |
-| 17 | facing | `0 if <0 else clip(fc,0,3)/3` |
+| 0–16 | the 17 bool flags | `float(bool)` → 0/1 — is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling, has_invincibility, has_angel_wings, has_vacuum, has_boost, is_mega_boost, is_strafing, must_jump, must_slide, is_game_over, **can_turn_left, can_turn_right, is_turn** |
+| 17 | velocity | `clip((v-100)/120, 0, 1)`  (VEL_MIN 100, VEL_MAX 220) |
+| 18 | path_type | `0 if <0 else clip(pt,0,37)/37` |
+| 19 | path_level | `0 if <0 else clip(pl,0,4)/4` |
+| 20 | facing | `0 if <0 else clip(fc,0,4)/4`  (PathDirection N=1..W=4) |
 
 The `-1` "none" sentinel on the three enums maps to `0.0` (aliases real value 0 at junction edges —
 acceptable for v0; a `valid` companion flag is the documented future tweak).

@@ -65,9 +65,12 @@ STATE_FIELDS = (
     "must_jump",
     "must_slide",
     "is_game_over",
+    "can_turn_left",
+    "can_turn_right",
+    "is_turn",
 )
 
-# The 14 boolean flags (everything except score/velocity/path_type/path_level/facing).
+# The 17 boolean flags (everything except score/velocity/path_type/path_level/facing).
 BOOL_FIELDS = (
     "is_dead",
     "is_jumping",
@@ -83,6 +86,9 @@ BOOL_FIELDS = (
     "must_jump",
     "must_slide",
     "is_game_over",
+    "can_turn_left",
+    "can_turn_right",
+    "is_turn",
 )
 INT_FIELDS = ("score", "path_type", "path_level", "facing")
 FLOAT_FIELDS = ("velocity",)

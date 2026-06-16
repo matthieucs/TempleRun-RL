@@ -1,6 +1,6 @@
 """Observation encoding: raw game-state dict -> normalized float32 vector.
 
-The policy sees an 18-element ``Box(0, 1)`` vector. We deliberately exclude the raw
+The policy sees a 21-element ``Box(0, 1)`` vector. We deliberately exclude the raw
 ``score`` (unbounded / accumulating -> would break MlpPolicy normalization); it feeds
 the reward instead and is always available in ``info["raw_state"]``.
 """
@@ -16,13 +16,14 @@ VEL_MIN = 100.0   # run velocity starts ~100
 VEL_MAX = 220.0   # ramps to ~210; 220 leaves headroom
 PATH_TYPE_MAX = 37.0
 PATH_LEVEL_MAX = 4.0
-FACING_MAX = 3.0
+FACING_MAX = 4.0   # PathDirection: None=0, N=1, E=2, S=3, W=4
 
-# Observation vector layout (18 dims): the 14 bools, then 4 normalized scalars.
+# Observation vector layout (21 dims): the 17 bools, then 4 normalized scalars.
 OBS_BOOL_FIELDS = (
     "is_dead", "is_jumping", "is_sliding", "is_on_ground", "is_stumbling",
     "has_invincibility", "has_angel_wings", "has_vacuum", "has_boost",
     "is_mega_boost", "is_strafing", "must_jump", "must_slide", "is_game_over",
+    "can_turn_left", "can_turn_right", "is_turn",
 )
 OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS  # length 18

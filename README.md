@@ -69,8 +69,9 @@ obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
 ```
 
 ## Environment spec
-- **Observation** — `Box(0, 1, (18,), float32)`: 14 boolean state flags + normalized
-  `velocity`, `path_type`, `path_level`, `facing`. Raw, unbounded `score` is **not** in the
+- **Observation** — `Box(0, 1, (21,), float32)`: 17 boolean state flags (player state, power-ups,
+  obstacle cues `must_jump`/`must_slide`, and turn cues `can_turn_left`/`can_turn_right`/`is_turn`) +
+  normalized `velocity`, `path_type`, `path_level`, `facing`. Raw, unbounded `score` is **not** in the
   observation (it drives the reward); the full raw state dict is always in `info["raw_state"]`.
 - **Action** — `Discrete(7)`: `0` StrafeLeft · `1` StrafeRight · `2` Jump · `3` Slide ·
   `4` TurnLeft · `5` TurnRight · `6` NoOp. (Bytes `7`/`8` are reset-only and never emitted by the

@@ -61,6 +61,10 @@ const RVA = {
   RunAgainClicked: 0x12BCCF0,   // EndGameUI "Rejouer" button handler (full UI restart)
   GetRunVelocity: 0x12982D8,    // CharacterPlayer.GetRunVelocity() -> float (forward run speed)
   PlayerPrefs_GetInt: 0x24B37B8, // PlayerPrefs.GetInt(string key, int default) -> int
+  // PathElement turn queries (origin = player's PathDirection / Facing):
+  CanTurnLeft: 0x12E2E88,        // bool PathElement.CanTurnLeft(PathDirection origin)
+  CanTurnRight: 0x12E2F44,       // bool PathElement.CanTurnRight(PathDirection origin)
+  IsTurn: 0x12E28B0,             // bool PathElement.IsTurn()
 };
 
 // StoreItemType values to max out: AngelWings,HeadStart,HeadStartMega,Vacuum,Invincibility,CoinBonus,CoinValue,Boost
@@ -88,6 +92,7 @@ const NULLPTR = ptr(0);
 let updateTicks = 0;   // increments every GameController.Update — proves the main loop is ticking
 let upgradesMaxed = false;
 let cachedRunVel = 0;  // GetRunVelocity() sampled on the main thread (Update), read by the broadcast thread
+let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn availability at the nearest element
 
 function log(m) { console.log('[TR] ' + m); }
 function dbg() { try { send({ tr: Array.prototype.slice.call(arguments) }); } catch (_) {} }
@@ -143,6 +148,9 @@ function resolve() {
   fn.RestartGame = new NativeFunction(base.add(RVA.RestartGame), 'void', ['pointer', 'pointer']);
   fn.RunAgainClicked = new NativeFunction(base.add(RVA.RunAgainClicked), 'void', ['pointer', 'pointer']); // (EndGameUI*, mi)
   fn.GetRunVelocity = new NativeFunction(base.add(RVA.GetRunVelocity), 'float', ['pointer', 'pointer']);   // (CharacterPlayer*, mi) -> float
+  fn.CanTurnLeft = new NativeFunction(base.add(RVA.CanTurnLeft), 'bool', ['pointer', 'int', 'pointer']);   // (PathElement*, origin, mi) -> bool
+  fn.CanTurnRight = new NativeFunction(base.add(RVA.CanTurnRight), 'bool', ['pointer', 'int', 'pointer']); // (PathElement*, origin, mi) -> bool
+  fn.IsTurn = new NativeFunction(base.add(RVA.IsTurn), 'bool', ['pointer', 'pointer']);                    // (PathElement*, mi) -> bool
   return true;
 }
 
@@ -192,7 +200,19 @@ function installHooks() {
       updateTicks++;
       if (!upgradesMaxed && maxAllUpgrades(gcInstance)) upgradesMaxed = true; // one-shot, on main thread
       const cp = gcInstance.add(OFF.GamePlayer).readPointer(); // CharacterPlayer*
-      if (!cp.isNull()) { try { cachedRunVel = fn.GetRunVelocity(cp, NULLPTR); } catch (_) {} } // main-thread sample
+      if (!cp.isNull()) {
+        try { cachedRunVel = fn.GetRunVelocity(cp, NULLPTR); } catch (_) {} // main-thread sample
+        // turn availability at the nearest element, via the game's own queries (origin = player Facing)
+        try {
+          const pe = gcInstance.add(OFF.NearestElement).readPointer();
+          if (!pe.isNull()) {
+            const facing = cp.add(OFF.Facing).readS32();
+            cachedCanLeft = !!fn.CanTurnLeft(pe, facing, NULLPTR);
+            cachedCanRight = !!fn.CanTurnRight(pe, facing, NULLPTR);
+            cachedIsTurn = !!fn.IsTurn(pe, NULLPTR);
+          } else { cachedCanLeft = cachedCanRight = cachedIsTurn = false; }
+        } catch (_) {}
+      }
       if (pendingActions.length === 0) return;
       while (pendingActions.length) {
         const a = pendingActions.shift();
@@ -255,6 +275,7 @@ function snapshot() {
     has_vacuum: false, has_boost: false, is_mega_boost: false, is_strafing: false,
     score: 0, velocity: 0.0, path_type: -1, path_level: -1, facing: -1,
     must_jump: false, must_slide: false, is_game_over: false,
+    can_turn_left: false, can_turn_right: false, is_turn: false,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
 
@@ -286,6 +307,10 @@ function snapshot() {
     s.must_jump = MUST_JUMP_TYPES.indexOf(obs) !== -1;
     s.must_slide = MUST_SLIDE_TYPES.indexOf(obs) !== -1;
   }
+  // turn availability (computed on the main thread in the Update hook via the game's queries)
+  s.can_turn_left = cachedCanLeft;
+  s.can_turn_right = cachedCanRight;
+  s.is_turn = cachedIsTurn;
   return s;
 }
 
