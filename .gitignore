@@ -1,0 +1,37 @@
+# --- Copyrighted / large game artifacts — NEVER commit ---
+*.apk
+TempleRun-gadget.apk
+Temple+Run_*/
+il2cpp_work/
+dump.cs
+global-metadata.dat
+libil2cpp.so
+libunity.so
+libgadget.so
+frida-server*
+*.keystore
+tr-debug.keystore
+*.png
+
+# --- RL run outputs ---
+runs/
+*.zip
+tb/
+tensorboard/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store

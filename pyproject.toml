@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "templerun-rl"
+version = "0.1.0"
+description = "A Gymnasium environment for training RL agents on Temple Run via Frida instrumentation on a physical Android phone."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "gymnasium",
+    "numpy",
+]
+
+[project.optional-dependencies]
+train = ["stable-baselines3", "tensorboard"]
+tools = ["frida==17.14.0", "frida-tools", "lief==0.17.6"]
+
+# The scripts/ helpers are run directly (e.g. `python scripts/train.py`), not as console entry points.
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

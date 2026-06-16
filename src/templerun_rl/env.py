@@ -1,0 +1,173 @@
+"""Gymnasium environment wrapping the live Temple Run instrumentation.
+
+This env talks to a *real phone* in real time over two TCP sockets exposed by the
+Frida gadget (state on 9999, actions on 9998). One physical phone == one env; there
+is no simulator and no parallelism (use multiple phones/hosts to scale).
+
+Observation: ``Box(0, 1, (18,))`` (see ``obs.py``).
+Action:      ``Discrete(7)`` -> action bytes 0..6 (7 is reserved for reset).
+Reward:      score-delta * reward_scale, minus death_penalty on the terminal step.
+"""
+from __future__ import annotations
+
+import time
+from typing import Any, Optional
+
+import gymnasium as gym
+import numpy as np
+
+from . import constants as C
+from . import obs as O
+from .client import ActionClient, StateClient
+
+
+class TempleRunEnv(gym.Env):
+    metadata = {"render_modes": []}
+
+    def __init__(
+        self,
+        host: str = C.STATE_HOST,
+        state_port: int = C.STATE_PORT,
+        action_port: int = C.ACTION_PORT,
+        step_dt: float = C.DEFAULT_STEP_DT,
+        max_episode_steps: int = C.DEFAULT_MAX_EPISODE_STEPS,
+        reward_scale: float = C.DEFAULT_REWARD_SCALE,
+        death_penalty: float = C.DEFAULT_DEATH_PENALTY,
+        reset_settle_steps: int = C.DEFAULT_RESET_SETTLE_STEPS,
+        reset_timeout: float = C.DEFAULT_RESET_TIMEOUT,
+        connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT,
+        auto_connect: bool = True,
+    ):
+        super().__init__()
+        self.observation_space = O.make_observation_space()
+        self.action_space = gym.spaces.Discrete(C.N_ACTIONS)
+
+        self.step_dt = float(step_dt)
+        self.max_episode_steps = int(max_episode_steps)
+        self.reward_scale = float(reward_scale)
+        self.death_penalty = float(death_penalty)
+        self.reset_settle_steps = int(reset_settle_steps)
+        self.reset_timeout = float(reset_timeout)
+
+        self._state = StateClient(host, state_port, connect_timeout)
+        self._action = ActionClient(host, action_port, connect_timeout)
+        self._connected = False
+
+        self._prev_score = 0
+        self._elapsed_steps = 0
+        self._last_seq = 0
+
+        if auto_connect:
+            self.connect()
+
+    # -- connection -----------------------------------------------------------
+    def connect(self) -> None:
+        if self._connected:
+            return
+        self._state.connect()
+        self._action.connect()
+        self._connected = True
+
+    def _require_connection(self) -> None:
+        if not self._connected:
+            self.connect()
+
+    @staticmethod
+    def _alive(s: dict) -> bool:
+        return not bool(s.get("is_game_over")) and not bool(s.get("is_dead"))
+
+    # -- gym API --------------------------------------------------------------
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
+        self._require_connection()
+
+        state = self._restart_and_wait()
+        self._prev_score = int(state.get("score", 0))
+        self._elapsed_steps = 0
+        _, self._last_seq = self._state.latest()
+        obs = O.state_to_obs(state)
+        info = {"raw_state": state, "score": self._prev_score}
+        return obs, info
+
+    def _restart_and_wait(self) -> dict:
+        """Send RestartGame (byte 7) and wait for a stable fresh run; one retry on timeout."""
+        for attempt in range(2):
+            self._action.send(int(C.Action.RESTART))
+            try:
+                return self._wait_for_fresh_run()
+            except TimeoutError:
+                if attempt == 1:
+                    raise RuntimeError(
+                        "Reset failed: no fresh run after RestartGame. "
+                        "Is the game in the foreground and a run/game-over screen active? See docs/SETUP.md."
+                    )
+        raise AssertionError("unreachable")
+
+    def _wait_for_fresh_run(self) -> dict:
+        deadline = time.monotonic() + self.reset_timeout
+        _, seq = self._state.latest()
+        consecutive = 0
+        last_alive: Optional[dict] = None
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            state, seq = self._state.wait_fresh(seq, timeout=remaining)
+            if self._alive(state):
+                consecutive += 1
+                last_alive = state
+                if consecutive >= self.reset_settle_steps:
+                    return state
+            else:
+                consecutive = 0
+        if last_alive is not None:
+            return last_alive
+        raise TimeoutError("no fresh run within reset_timeout")
+
+    def step(self, action: int):
+        self._require_connection()
+        a = int(action)
+        if a == int(C.Action.RESTART):
+            raise ValueError("action 7 (RESTART) is reserved for reset(); the policy must emit 0..6")
+        self._action.send(a)
+
+        state = self._wait_one_tick()
+        score = int(state.get("score", self._prev_score))
+
+        reward = (score - self._prev_score) * self.reward_scale
+        terminated = bool(state.get("is_dead") or state.get("is_game_over"))
+        if terminated:
+            reward -= self.death_penalty
+        self._prev_score = score
+
+        self._elapsed_steps += 1
+        truncated = self._elapsed_steps >= self.max_episode_steps
+
+        obs = O.state_to_obs(state)
+        info = {"raw_state": state, "score": score, "elapsed_steps": self._elapsed_steps}
+        return obs, float(reward), terminated, truncated, info
+
+    def _wait_one_tick(self) -> dict:
+        """Return the newest state produced after the action, honoring step_dt."""
+        t0 = time.monotonic()
+        # at least one fresh frame
+        state, seq = self._state.wait_fresh(self._last_seq, timeout=max(self.step_dt, 1.0) + 2.0)
+        # keep draining to the newest frame until step_dt elapses
+        while True:
+            remaining = self.step_dt - (time.monotonic() - t0)
+            if remaining <= 0:
+                break
+            try:
+                state, seq = self._state.wait_fresh(seq, timeout=remaining)
+            except TimeoutError:
+                break
+        self._last_seq = seq
+        return state
+
+    def render(self):
+        return None
+
+    def close(self):
+        try:
+            self._action.close()
+        finally:
+            self._state.close()
+        self._connected = False

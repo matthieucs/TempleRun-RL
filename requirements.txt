@@ -1,0 +1,9 @@
+# Host-side RL + tooling deps. frida and lief are pinned to the exact versions the
+# pipeline was verified with; gymnasium/stable-baselines3 pin to whatever you install.
+gymnasium
+stable-baselines3
+numpy
+tensorboard
+frida==17.14.0
+frida-tools
+lief==0.17.6

@@ -1,0 +1,196 @@
+# Temple Run RL — project memory
+
+Goal: turn **Temple Run** (`com.imangi.templerun`, v1.39.0) into a reinforcement-learning
+environment by instrumenting the running game with **Frida** — read game state and inject
+actions through TCP sockets, no screen-scraping, no synthetic input.
+
+This file is the durable record of how the pipeline was built and the non-obvious gotchas.
+Re-read it before changing the instrumentation.
+
+---
+
+## 1. The game
+
+| Fact | Value |
+|---|---|
+| Engine | **Unity 2022.3.62f2**, scripting backend **IL2CPP** |
+| Native code | `libil2cpp.so` (42 MB) + `libunity.so`, **arm64-v8a only** (also armeabi-v7a) — **no x86/x86_64** |
+| Package / launch activity | `com.imangi.templerun` / `com.imangi.unityactivity.ImangiUnityActivity` |
+| Distribution | split-APK bundle: base `com.imangi.templerun.apk` + `config.arm64_v8a.apk`. **No OBB** — data is in-APK (Addressables under `assets/aa`, `assets/bin/Data`). |
+| Local player id | `PlayerManager.GetActivePlayer()` is hard-coded **`1`** — every per-player record/upgrade call uses `playerId = 1`. |
+
+### Reverse engineering
+- Tool: **Il2CppDumper v6.7.46** (run via `dotnet`/its `.exe`) on `libil2cpp.so` + `global-metadata.dat`.
+- Output: `il2cpp_work/output/dump.cs` (17 MB, full C# signatures with field offsets + method RVAs) and
+  `il2cpp_work/output/DummyDll/Assembly-CSharp.dll` (browsable in dnSpy/ILSpy).
+- IL2CPP means **no readable C# source** — only signatures/offsets. Method bodies are native arm64.
+- Instance-method native ABI: first arg = `this`, **trailing arg = `MethodInfo*`** (pass `NULL`/`ptr(0)`).
+  Float args follow the arm64 convention (Frida `NativeFunction` handles it).
+
+---
+
+## 2. Why a real phone, not an emulator (important)
+
+- **x86_64 emulator (android-34, google_apis):** runs the game via **ndk-translation** (ARM→x86).
+  Frida attaches but **cannot hook** — `Process.findModuleByName("libil2cpp.so")` returns `null`
+  because the arm64 lib is mapped by the translation guest linker (`libndk_translation*.so`), invisible
+  to Frida's host (x86_64) module API. Good for *playing/inspection*, useless for Frida.
+- **arm64 emulator on this x86_64 Windows host:** **impossible** — QEMU2 aborts:
+  `FATAL | Avd's CPU Architecture 'arm64' is not supported by the QEMU2 emulator on x86_64 host`.
+  (Modern Android Emulator only runs guest-arch == host-arch.)
+- **Conclusion:** Frida instrumentation requires **native arm64** — a real phone (used here) or an
+  arm64 cloud host (Ampere/Graviton) for parallel instances. Docker does **not** help
+  (`--platform linux/arm64` = qemu-user, no Android + Frida ptrace broken).
+
+The android-34 x86_64 AVD `TempleRunAVD` and an unusable `TempleRunARM0` AVD still exist in the SDK.
+
+---
+
+## 3. Target device & Frida transport
+
+- Device: **Redmi (model 23021RAA2Y), arm64-v8a, Android 15 (SDK 35)**, serial `e4de25a1`. **NOT rooted.**
+- No root ⇒ **`frida-server` can't attach** to another app. Use **Frida Gadget** (loads inside the app).
+- Frida version pinned everywhere: **17.14.0** (host `frida-tools`; gadget; server binaries).
+
+### Gadget injection (no smali editing)
+Built by `build_gadget_apk.py`:
+1. **Merge** the splits → one universal APK with `APKEditor.jar m` (sets `extractNativeLibs=true`).
+2. **LIEF**: add `DT_NEEDED "libgadget.so"` to `lib/arm64-v8a/libmain.so` (Unity loads `libmain` early,
+   so the linker auto-loads the gadget). Add `libgadget.so` + `libgadget.config.so`
+   (`{"interaction":{"type":"listen","address":"127.0.0.1","port":27042,"on_load":"resume"}}`).
+3. Drop the old signature, **zipalign + apksigner** (debug key `tr-debug.keystore`, alias `trkey`, pass `android`).
+4. Output: **`TempleRun-gadget.apk`**.
+
+Result: gadget listens on **127.0.0.1:27042** inside the phone; logcat shows `Frida: Listening on ... 27042`.
+
+---
+
+## 4. Running it
+
+```bash
+# env for adb (Git Bash): device paths get mangled unless MSYS_NO_PATHCONV=1
+ADB="D:/Users/AppData/Local/platform-tools/adb.exe"; S="-s e4de25a1"
+# forward gadget + state + action ports to host
+"$ADB" $S forward tcp:27042 tcp:27042
+"$ADB" $S forward tcp:9999 tcp:9999      # state stream
+"$ADB" $S forward tcp:9998 tcp:9998      # action sink
+# launch game on the phone, then inject:
+python frida/gadget_inject.py frida/temple_run_hook.js 127.0.0.1:27042
+```
+(All of the above is automated by `python scripts/setup_device.py` — forwards the 3 ports + injects.)
+
+`gadget_inject.py` connects to the gadget (remote device) and loads `temple_run_hook.js`.
+The script: resolves `libil2cpp.so` base, installs hooks, maxes upgrades once, serves state on 9999,
+listens for actions on 9998.
+
+### Protocol
+- **State (port 9999):** newline-delimited JSON ~10 Hz, **19 fields**:
+  the 17 spec fields — `is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling, has_invincibility,
+  has_angel_wings, has_vacuum, has_boost, is_mega_boost, score, velocity, path_type, path_level,
+  must_jump, must_slide, is_game_over` — plus `is_strafing` and `facing` (player heading, for turn
+  verification). `velocity` = `CharacterPlayer.GetRunVelocity()` sampled on the main (Update) thread.
+  `must_jump/must_slide` are derived from `PathElement.Obstacles` (the tile's obstacle type), which
+  encodes the same jump/slide requirement as `Obstacle.MustJumpOver/MustSlideUnder`.
+- **Actions (port 9998):** one byte per action, **over a single PERSISTENT connection**.
+  `0`=StrafeLeft `1`=StrafeRight `2`=Jump `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp `7`=RestartGame.
+- **Hooks:** `GameController.Start` (force IsTutorialMode=false @0x104, TutorialID=999 @0x48);
+  `PlayerPrefs.GetInt` (return 999 for key `"TR Tutorial"`); `GameController.Update` (capture instance,
+  sample run velocity, drain action queue on main thread, one-shot max-upgrades);
+  `DeserializeRecordManager` onLeave (max upgrades at load). All 6 actions + the full
+  read→act→respond→RestartGame→new-run loop are verified on the device.
+
+---
+
+## 5. Key offsets / RVAs (this build only — re-dump if APK changes)
+
+All from `dump.cs`. Field = instance byte offset; RVA = offset added to `libil2cpp.so` base.
+
+**CharacterPlayer (instance):** IsDead `0xD8`, IsJumping `0xF8`, IsSliding `0x100`, IsOnGround `0x130`,
+IsStumbling `0x10C`, IsStrafing `0x125`, HasInvincibility `0x154`, HasAngelWings `0x161`, HasVacuum `0x16C`,
+HasBoost `0x174`, IsMegaBoost `0x175`, Score `0x138`, Velocity(Vec3) `0x34`, Facing(PathDirection, from
+CommonPlayer) `0x78`, GameOverInterface(EndGameUI*) `0x1A0`.
+
+**GameController (instance):** TutorialID `0x48`, GamePlayer `0x70`, IsGameOver `0xDE`,
+IsTutorialMode `0x104`, NearestElement(PathElement*) `0x88`, RecordManager `0xB0`.
+
+**PathElement (instance):** Type `0x30`, Level `0x34`, Obstacles(enum) `0x38`
+(must_jump = Obstacles∈{1 hole,4 treeJump}; must_slide = {5 treeSlide,6 flameTower}).
+
+**RVAs:** Start `0x1269CE8`, Update `0x126C60C`, RestartGame `0x126B5B8`,
+EndGameUI.RunAgainClicked `0x12BCCF0`, GetRunVelocity `0x12982D8`, Jump `0x1297B80`, Slide `0x1298768`,
+StrafeLeft `0x1298874`, StrafeRight `0x1298908`, TurnLeft `0x129899C`, TurnRight `0x1298A14`,
+DeserializeRecordManager `0x128AF58`, SerializeRecordManager `0x128BDC8`,
+SetPlayerLevelForUpgradeType `0x128D7BC`, GetPlayerLevelForUpgradeType `0x128D568`,
+GetStoreItemMaxLevel `0x128E5D8`, PlayerPrefs.GetInt(string,int) `0x24B37B8`
+(Il2CppString: len@0x10, UTF-16 chars@0x14).
+
+**StoreItemType (upgrade indices):** AngelWings 0, HeadStart 1, HeadStartMega 2, Vacuum 5,
+Invincibility 6, CoinBonus 7, CoinValue 8, Boost 9. Leveled ones (have a max>0): 5,6,7,8,9.
+Maxed to: Vacuum/Invincibility/CoinBonus/Boost = 8, CoinValue = 5. (0/1/2 are consumable counts, max 0.)
+
+---
+
+## 6. Gotchas (cost real debugging — keep these in mind)
+
+- **MIUI/HyperOS blocks `adb install`** (`INSTALL_FAILED_USER_RESTRICTED`) and **`adb input`**
+  (`SecurityException: INJECT_EVENTS`) unless "Install via USB" / "USB debugging (Security settings)"
+  are enabled (needs Mi-account sign-in). **Workarounds:** install the merged APK by tapping it in the
+  Files app; **never needs `adb input`** because actions are in-process Frida calls (this is the whole point).
+- **Actions need ONE persistent socket to 9998.** Per-action connect/close races the reader on close —
+  only the first byte arrives. The server accept loop must be `async while(true){ await accept() }`
+  (the recursive-accept pattern wedged after the first connection).
+- **Restart:** `RestartGame()` only resets game logic (UI stays on game-over panel). The real "Rejouer"
+  is **`EndGameUI.RunAgainClicked()`**, reached via `CharacterPlayer.GameOverInterface` @ `0x1A0`.
+  It occasionally routes through an **interstitial ad**, so restart isn't 100% frame-deterministic —
+  for robust RL resets, also suppress the ad or wait-and-retry on post-restart state.
+- An **un-steered run dies in ~2 s** (hits the first obstacle). To demo/inject an action, keep the
+  character alive and inject reactively.
+- **Gadget `console.log` is flaky** over the remote channel — use Frida `send()` for diagnostics
+  (`gadget_inject.py` prints `type:'send'` as `DBG:`).
+- The upgrade-max only auto-ran via the `DeserializeRecordManager` startup hook; since we inject after
+  startup, it's now also triggered **once from the `Update` hook** (main thread) via `GameController.RecordManager`.
+- **Git Bash:** Windows Python doesn't share bash `/tmp` → use `cygpath -w`; quote device paths with
+  `MSYS_NO_PATHCONV=1`.
+
+---
+
+## 7. Files & tool paths
+
+After the repo reorg, source lives in subfolders (the big artifacts below stay at root, git-ignored):
+
+| File | Purpose |
+|---|---|
+| `frida/temple_run_hook.js` | Frida agent: hooks, state server (9999), action server (9998), upgrade-max |
+| `frida/gadget_inject.py` | connect to gadget @27042 and load the agent |
+| `frida/inject.py` | same, but attach by pid (for a rooted/frida-server target) |
+| `frida/diag.js` | one-shot module/arch diagnostic |
+| `tools/build_gadget_apk.py` | merge splits + LIEF DT_NEEDED + add gadget → unsigned patched APK |
+| `src/templerun_rl/` | the Gymnasium env (`env.py`, `client.py`, `obs.py`, `constants.py`) |
+| `scripts/` | `setup_device.py`, `train.py`, `evaluate.py`, `smoke_test.py` |
+| `docs/` | `SETUP.md`, `GADGET.md`, `OFFSETS.md` |
+| `TempleRun-gadget.apk` | the installable gadget build (git-ignored) |
+| `il2cpp_work/output/dump.cs` | full IL2CPP signature dump, source of all offsets (git-ignored) |
+
+- **Android SDK:** `D:\Users\AppData\Local` (cmdline-tools installed manually under `cmdline-tools\latest`).
+- **JDK:** `D:\Logiciel\Android Studio\jbr` (no system Java). **Python:** `G:\python312\python.exe`.
+- **Frida:** 17.14.0. Build-tools: `D:\Users\AppData\Local\build-tools\37.0.0` (apksigner/zipalign).
+- arm64 `frida-server` and `frida-gadget` are pulled from `github.com/frida/frida/releases/<ver>`.
+
+---
+
+## 8. Status
+
+**Fully validated end-to-end on the Redmi (zero `adb input` — all in-process Frida calls):**
+- 19-field state stream on 9999.
+- All 6 actions confirmed: Jump/Slide/StrafeLeft/StrafeRight via their state flags, TurnLeft/TurnRight
+  via `facing` change (note: forcing a turn mid-path kills the run — turns only make sense at junctions).
+- Full loop: read state → Jump (response) → RestartGame (action 7) → fresh run (`over=false, score=0`).
+- All leveled upgrades maxed (8/8/8/5/8) and persisted to disk.
+- Tutorial neutralized (Start patch + PlayerPrefs `"TR Tutorial"`→999).
+
+**Built (this repo):** the Gymnasium env `TempleRun-v0` (`src/templerun_rl/`) wrapping the two sockets
+(Box(18) obs, Discrete(7) actions, score-delta reward, RestartGame-based reset), plus SB3 PPO
+`scripts/train.py` / `scripts/evaluate.py` / `scripts/smoke_test.py`, packaging, and docs. See `README.md`.
+
+Possible next steps: robust reset that suppresses the occasional interstitial ad in `EndGameUI`;
+richer observation (one-hot enums, a `valid` flag for the -1 sentinels); reward shaping.
