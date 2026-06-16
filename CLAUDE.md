@@ -187,7 +187,8 @@ After the repo reorg, source lives in subfolders (the big artifacts below stay a
 - 19-field state stream on 9999.
 - All 6 actions confirmed: Jump/Slide/StrafeLeft/StrafeRight via their state flags, TurnLeft/TurnRight
   via `facing` change (note: forcing a turn mid-path kills the run — turns only make sense at junctions).
-- Full loop: read state → Jump (response) → RestartGame (action 7) → fresh run (`over=false, score=0`).
+- Full loop: read state → Jump (response) → reset → fresh run. NB: in the env, reset uses **byte 8
+  (RunAgainClicked)** — byte 7 (RestartGame) only resets logic and leaves the run in limbo (see §6/§9).
 - All leveled upgrades maxed (8/8/8/5/8) and persisted to disk.
 - Tutorial neutralized (Start patch + PlayerPrefs `"TR Tutorial"`→999).
 
@@ -199,3 +200,53 @@ fresh resets). See `README.md`.
 
 Possible next steps: robust reset that suppresses the occasional interstitial ad in `EndGameUI`;
 richer observation (one-hot enums, a `valid` flag for the -1 sentinels); reward shaping.
+
+---
+
+## 9. The RL environment (`TempleRun-v0`)
+
+`src/templerun_rl/` wraps the two sockets as a Gymnasium env (`gym.make("TempleRun-v0")`). **One physical
+phone = one env**, real-time ~10 Hz, no simulator, no parallelism. Defaults live in `constants.py`;
+encoding in `obs.py`; the env in `env.py`.
+
+### Observation — `Box(0.0, 1.0, (18,), float32)`
+18 features, all normalized to [0,1] by `state_to_obs()`. The **raw 19-field state dict is always in
+`info["raw_state"]`**. Raw `score` is **excluded** from the obs (unbounded/accumulating → it drives the
+reward instead).
+
+| idx | feature | transform |
+|---|---|---|
+| 0–13 | the 14 bool flags | `float(bool)` → 0/1 — is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling, has_invincibility, has_angel_wings, has_vacuum, has_boost, is_mega_boost, is_strafing, must_jump, must_slide, is_game_over |
+| 14 | velocity | `clip((v-100)/120, 0, 1)`  (VEL_MIN 100, VEL_MAX 220) |
+| 15 | path_type | `0 if <0 else clip(pt,0,37)/37` |
+| 16 | path_level | `0 if <0 else clip(pl,0,4)/4` |
+| 17 | facing | `0 if <0 else clip(fc,0,3)/3` |
+
+The `-1` "none" sentinel on the three enums maps to `0.0` (aliases real value 0 at junction edges —
+acceptable for v0; a `valid` companion flag is the documented future tweak).
+
+### Action — `Discrete(7)`
+Policy emits **0–6**: `0` StrafeLeft · `1` StrafeRight · `2` Jump · `3` Slide · `4` TurnLeft · `5` TurnRight ·
+`6` NoOp. Bytes `7`/`8` are **reset-only** (never sampled by the policy): `7` RestartGame (limbo),
+`8` RunAgainClicked (what `reset()` sends). The env raises if asked to `step()` an action ≥ 7.
+
+### Reward
+```
+reward = (score - prev_score) * reward_scale          # per step
+if terminated (is_dead or is_game_over): reward -= death_penalty
+```
+Defaults `reward_scale = 0.01`, `death_penalty = 1.0`. Empirically: a typical alive step ≈ **+0.27**
+(~27 score/step at run start), coin/boost pickups give larger jumps (e.g. +0.5–1.6), and the terminal
+step is ≈ **−1**. `prev_score` is set from the reset frame (~162), so the first delta is well-behaved.
+
+### Episode / step mechanics
+- **`reset()`** — send byte 8 (RunAgainClicked); poll until the player is actually on the track
+  (`is_on_ground or path_type ≥ 0`) for `reset_settle_steps` (3) consecutive frames within
+  `reset_timeout` (5 s), with one retry; returns a *started* run (skips the ~7-frame UI-transition limbo).
+- **`step(a)`** — send the action byte on the persistent socket; wait one control tick (`step_dt` 0.1 s,
+  reading the newest frame *after* the action — never stale); `terminated = is_dead or is_game_over`;
+  `truncated` at `max_episode_steps` (1000).
+- **Tunable ctor args:** `step_dt, max_episode_steps, reward_scale, death_penalty, reset_settle_steps,
+  reset_timeout, connect_timeout, auto_connect` (+ `host`/ports).
+- **Connection layer (`client.py`):** `StateClient` reader thread keeps only the latest frame (`seq`
+  counter); `ActionClient` holds one persistent `TCP_NODELAY` socket.
