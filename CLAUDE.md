@@ -92,7 +92,8 @@ listens for actions on 9998.
   `must_jump/must_slide` are derived from `PathElement.Obstacles` (the tile's obstacle type), which
   encodes the same jump/slide requirement as `Obstacle.MustJumpOver/MustSlideUnder`.
 - **Actions (port 9998):** one byte per action, **over a single PERSISTENT connection**.
-  `0`=StrafeLeft `1`=StrafeRight `2`=Jump `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp `7`=RestartGame.
+  `0`=StrafeLeft `1`=StrafeRight `2`=Jump `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp
+  `7`=RestartGame (logic-only, leaves run in limbo) `8`=RunAgainClicked (starts a real run; env reset uses this).
 - **Hooks:** `GameController.Start` (force IsTutorialMode=false @0x104, TutorialID=999 @0x48);
   `PlayerPrefs.GetInt` (return 999 for key `"TR Tutorial"`); `GameController.Update` (capture instance,
   sample run velocity, drain action queue on main thread, one-shot max-upgrades);
@@ -139,10 +140,12 @@ Maxed to: Vacuum/Invincibility/CoinBonus/Boost = 8, CoinValue = 5. (0/1/2 are co
 - **Actions need ONE persistent socket to 9998.** Per-action connect/close races the reader on close —
   only the first byte arrives. The server accept loop must be `async while(true){ await accept() }`
   (the recursive-accept pattern wedged after the first connection).
-- **Restart:** `RestartGame()` only resets game logic (UI stays on game-over panel). The real "Rejouer"
-  is **`EndGameUI.RunAgainClicked()`**, reached via `CharacterPlayer.GameOverInterface` @ `0x1A0`.
-  It occasionally routes through an **interstitial ad**, so restart isn't 100% frame-deterministic —
-  for robust RL resets, also suppress the ad or wait-and-retry on post-restart state.
+- **Restart:** `RestartGame()` (byte 7) only resets game logic and leaves the run in **game-over LIMBO**
+  — the player is never placed on the track, so it never scores or dies (verified: a NoOp rollout stays
+  at score 0, `ground=0`, `path_type=-1`). The real restart is **`EndGameUI.RunAgainClicked()`** (byte 8),
+  reached via `CharacterPlayer.GameOverInterface` @ `0x1A0` — it starts a real, progressing run (~7-frame
+  UI-transition first). **`env.reset()` uses byte 8.** Caveat: `RunAgainClicked` occasionally routes
+  through an **interstitial ad** that would stall a reset (can't tap via adb on MIUI) — future: suppress it.
 - An **un-steered run dies in ~2 s** (hits the first obstacle). To demo/inject an action, keep the
   character alive and inject reactively.
 - **Gadget `console.log` is flaky** over the remote channel — use Frida `send()` for diagnostics
@@ -189,8 +192,10 @@ After the repo reorg, source lives in subfolders (the big artifacts below stay a
 - Tutorial neutralized (Start patch + PlayerPrefs `"TR Tutorial"`→999).
 
 **Built (this repo):** the Gymnasium env `TempleRun-v0` (`src/templerun_rl/`) wrapping the two sockets
-(Box(18) obs, Discrete(7) actions, score-delta reward, RestartGame-based reset), plus SB3 PPO
-`scripts/train.py` / `scripts/evaluate.py` / `scripts/smoke_test.py`, packaging, and docs. See `README.md`.
+(Box(18) obs, Discrete(7) actions, score-delta reward, **RunAgainClicked/byte-8 reset** — RestartGame
+alone leaves the run in limbo), plus SB3 PPO `scripts/train.py` / `scripts/evaluate.py` /
+`scripts/smoke_test.py`, packaging, and docs. Smoke-tested live (50 random steps → reward, deaths,
+fresh resets). See `README.md`.
 
 Possible next steps: robust reset that suppresses the occasional interstitial ad in `EndGameUI`;
 richer observation (one-hot enums, a `valid` flag for the -1 sentinels); reward shaping.

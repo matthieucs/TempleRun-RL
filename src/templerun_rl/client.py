@@ -135,7 +135,7 @@ class ActionClient:
         return s
 
     def send(self, action: int) -> None:
-        if not (0 <= int(action) <= 7):
+        if not (0 <= int(action) <= 8):
             raise ValueError(f"action byte out of range: {action}")
         data = bytes([int(action)])
         try:

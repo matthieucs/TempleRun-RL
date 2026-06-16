@@ -47,10 +47,15 @@ boot an arm64 image on an x86_64 host. Net: use a real arm64 phone (or an arm64 
 ## Gotchas worth remembering
 - **Actions need ONE persistent socket.** Per-action connect/close races the server's reader on close, so
   only the first byte survives — the host `ActionClient` keeps a single socket open (`src/templerun_rl/client.py`).
-- **Reset = `RestartGame()` (byte 7), not `RunAgainClicked()`.** `RestartGame` resets game *logic*
-  deterministically and **doesn't show an ad**; the UI "Rejouer" button (`RunAgainClicked`) occasionally
-  routes through an interstitial ad. The env uses byte 7 for reliable resets (the game-over UI panel may
-  stay on screen — irrelevant to a memory-based agent).
+- **Reset = `RunAgainClicked()` (byte 8), not `RestartGame()` (byte 7).** Verified empirically:
+  `RestartGame()` resets game *logic* (score→0, alive) but leaves the run in **game-over limbo** — the
+  player is never placed on the track, so it never scores or dies (no learning signal). The UI "Rejouer"
+  handler **`EndGameUI.RunAgainClicked()`** (reached via `CharacterPlayer.GameOverInterface` @ `0x1A0`)
+  actually starts a fresh, *progressing* run, so `env.reset()` uses byte 8. After it there's a ~7-frame
+  transition (UI sliding out) before the run starts; `reset()` waits until the player is on a track tile.
+  Caveat: `RunAgainClicked` occasionally routes through an **interstitial ad**, which would stall a reset
+  until dismissed (can't be tapped via adb on MIUI) — a known limitation; future work is to hook and
+  suppress the ad. Byte 7 (`RestartGame`) is kept exposed per the original action spec.
 - **Actions are in-process calls — no `adb input`.** MIUI blocks synthetic input (`INJECT_EVENTS`); we never
   use it. This is the whole point of the approach.
 - **Diagnostics use `send()`, not `console.log`** (the gadget's console is flaky over the remote channel);

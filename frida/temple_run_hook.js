@@ -231,8 +231,15 @@ function dispatchAction(a, gc, cp) {
     case 4: if (!cp.isNull()) fn.TurnLeft(cp, NULLPTR); break;
     case 5: if (!cp.isNull()) fn.TurnRight(cp, NULLPTR); break;
     case 6: /* NoOp */ break;
-    case 7: // RestartGame() per spec (resets game logic; see RunAgainClicked for full UI "Rejouer" flow)
+    case 7: // RestartGame() per spec (resets game LOGIC only; the run stays in game-over limbo)
       if (!gc.isNull()) { fn.RestartGame(gc, NULLPTR); dbg('restartgame'); }
+      break;
+    case 8: // RunAgainClicked() — the "Rejouer" flow that actually STARTS a fresh run (used by env.reset)
+      if (!cp.isNull()) {
+        const egui = cp.add(OFF.GameOverInterface).readPointer();
+        if (!egui.isNull()) { fn.RunAgainClicked(egui, NULLPTR); dbg('runagain'); }
+        else if (!gc.isNull()) { fn.RestartGame(gc, NULLPTR); dbg('runagain_fallback'); }
+      }
       break;
     default: log('unknown action ' + a);
   }
@@ -328,8 +335,8 @@ function startActionServer() {
             dbg('recv', Array.prototype.slice.call(bytes), 'ticks', updateTicks);
             for (let i = 0; i < bytes.length; i++) {
               let b = bytes[i];
-              if (b >= 0x30 && b <= 0x37) b -= 0x30; // ASCII '0'..'7'
-              if (b >= 0 && b <= 7) pendingActions.push(b);
+              if (b >= 0x30 && b <= 0x38) b -= 0x30; // ASCII '0'..'8'
+              if (b >= 0 && b <= 8) pendingActions.push(b);
             }
           }
         } catch (e) { dbg('read_err', String(e)); }

@@ -73,7 +73,9 @@ obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
   `velocity`, `path_type`, `path_level`, `facing`. Raw, unbounded `score` is **not** in the
   observation (it drives the reward); the full raw state dict is always in `info["raw_state"]`.
 - **Action** — `Discrete(7)`: `0` StrafeLeft · `1` StrafeRight · `2` Jump · `3` Slide ·
-  `4` TurnLeft · `5` TurnRight · `6` NoOp. (Byte `7` = RestartGame is reserved for `reset()`.)
+  `4` TurnLeft · `5` TurnRight · `6` NoOp. (Bytes `7`/`8` are reset-only and never emitted by the
+  policy: `7`=RestartGame resets game logic but leaves the run in game-over limbo, so `reset()` uses
+  `8`=RunAgainClicked — the "Rejouer" flow that actually starts a fresh, progressing run.)
 - **Reward** — `(score - prev_score) * reward_scale` each step, minus `death_penalty` on the
   terminal step. Defaults `reward_scale=0.01`, `death_penalty=1.0` (configurable in the constructor).
 - **Episode** — `terminated` when `is_dead`/`is_game_over`; `truncated` at `max_episode_steps` (default 1000).

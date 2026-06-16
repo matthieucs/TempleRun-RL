@@ -76,6 +76,13 @@ class TempleRunEnv(gym.Env):
     def _alive(s: dict) -> bool:
         return not bool(s.get("is_game_over")) and not bool(s.get("is_dead"))
 
+    @staticmethod
+    def _run_started(s: dict) -> bool:
+        # After RunAgainClicked there's a brief alive-but-not-running limbo (game-over UI
+        # sliding out); the run has truly started once the player is on a track tile.
+        return (not bool(s.get("is_game_over")) and not bool(s.get("is_dead"))
+                and (bool(s.get("is_on_ground")) or int(s.get("path_type", -1)) >= 0))
+
     # -- gym API --------------------------------------------------------------
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -90,9 +97,9 @@ class TempleRunEnv(gym.Env):
         return obs, info
 
     def _restart_and_wait(self) -> dict:
-        """Send RestartGame (byte 7) and wait for a stable fresh run; one retry on timeout."""
+        """Send the reset action (RunAgainClicked) and wait for a stable fresh run; one retry."""
         for attempt in range(2):
-            self._action.send(int(C.Action.RESTART))
+            self._action.send(int(C.RESET_ACTION))
             try:
                 return self._wait_for_fresh_run()
             except TimeoutError:
@@ -107,26 +114,26 @@ class TempleRunEnv(gym.Env):
         deadline = time.monotonic() + self.reset_timeout
         _, seq = self._state.latest()
         consecutive = 0
-        last_alive: Optional[dict] = None
+        last_started: Optional[dict] = None
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
             state, seq = self._state.wait_fresh(seq, timeout=remaining)
-            if self._alive(state):
+            if self._run_started(state):
                 consecutive += 1
-                last_alive = state
+                last_started = state
                 if consecutive >= self.reset_settle_steps:
                     return state
             else:
                 consecutive = 0
-        if last_alive is not None:
-            return last_alive
+        if last_started is not None:
+            return last_started
         raise TimeoutError("no fresh run within reset_timeout")
 
     def step(self, action: int):
         self._require_connection()
         a = int(action)
-        if a == int(C.Action.RESTART):
-            raise ValueError("action 7 (RESTART) is reserved for reset(); the policy must emit 0..6")
+        if a >= C.N_ACTIONS:
+            raise ValueError(f"action {a} is reserved for reset(); the policy must emit 0..{C.N_ACTIONS - 1}")
         self._action.send(a)
 
         state = self._wait_one_tick()

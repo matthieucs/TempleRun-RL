@@ -22,8 +22,10 @@ GADGET_PORT = 27042        # Frida gadget control channel (for injection)
 class Action(IntEnum):
     """Action bytes understood by the gadget's action server.
 
-    0..5 are gameplay moves, 6 is a no-op, 7 restarts the run. The policy only
-    ever emits 0..6 (``Discrete(N_ACTIONS)``); byte 7 is reserved for ``reset()``.
+    0..5 are gameplay moves, 6 is a no-op. 7 (RESTART = RestartGame) resets game
+    *logic* only and leaves the run in game-over limbo; 8 (RUN_AGAIN =
+    EndGameUI.RunAgainClicked) actually STARTS a fresh, progressing run — that's what
+    ``reset()`` uses. The policy only ever emits 0..6 (``Discrete(N_ACTIONS)``).
     """
 
     STRAFE_LEFT = 0
@@ -33,10 +35,12 @@ class Action(IntEnum):
     TURN_LEFT = 4
     TURN_RIGHT = 5
     NOOP = 6
-    RESTART = 7
+    RESTART = 7      # RestartGame(): logic reset only (run does not start)
+    RUN_AGAIN = 8    # RunAgainClicked(): starts a real run (used for episode reset)
 
 
-N_ACTIONS = 7  # policy action space size: bytes 0..6 (7 = reset, not a policy action)
+N_ACTIONS = 7          # policy action space size: bytes 0..6
+RESET_ACTION = Action.RUN_AGAIN  # what reset() sends to begin a fresh, progressing run
 
 
 # --- State contract ----------------------------------------------------------

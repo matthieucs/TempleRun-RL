@@ -77,6 +77,8 @@ A pass means the env is usable to train. Then see the README for `train.py` / `e
 - **`Cannot reach state/action ... 127.0.0.1:99xx`** — `setup_device.py` isn't running, or the game/gadget
   isn't loaded. Check the injector printed `ready: ...` and the game is in the foreground.
 - **Reset fails / no fresh run** — make sure the game is actually in a run or on the game-over screen, not
-  in a menu/cutscene. `reset()` sends `RestartGame` and waits up to `reset_timeout`.
+  in a menu/cutscene, and that the **phone screen is on** (a locked screen pauses Unity so resets can't
+  start). `reset()` sends `RunAgainClicked` (byte 8) and waits up to `reset_timeout`. If an interstitial
+  ad pops up on restart it will stall (can't be dismissed via adb on MIUI) — just tap it on the phone.
 - **adb input/tap "needs INJECT_EVENTS"** — expected on MIUI and irrelevant: actions are in-process Frida
   calls, never synthetic input.

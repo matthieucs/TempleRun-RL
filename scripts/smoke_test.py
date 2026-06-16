@@ -30,12 +30,23 @@ def main() -> int:
         return 2
 
     try:
-        print("[2/4] gymnasium check_env (space/contract conformance)...")
-        from gymnasium.utils.env_checker import check_env
+        print("[2/4] API-contract checks...")
+        # NB: gymnasium's full check_env also asserts step *determinism* (same seed+action ->
+        # identical obs), which a live real-time game cannot satisfy. We check the rest of the
+        # contract explicitly instead.
+        import gymnasium as gym
 
-        # check_env runs its own reset/step against the live device.
-        check_env(env, skip_render_check=True)
-        print("      check_env OK")
+        assert isinstance(env.observation_space, gym.spaces.Box), "obs space must be Box"
+        assert isinstance(env.action_space, gym.spaces.Discrete), "action space must be Discrete"
+        obs, info = env.reset(seed=0)
+        assert env.observation_space.contains(obs), "reset obs not in observation_space"
+        assert isinstance(info, dict), "reset info must be a dict"
+        obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+        assert env.observation_space.contains(obs), "step obs not in observation_space"
+        assert isinstance(reward, float) and np.isfinite(reward), "reward must be a finite float"
+        assert isinstance(terminated, bool) and isinstance(truncated, bool), "term/trunc must be bool"
+        assert isinstance(info, dict), "step info must be a dict"
+        print("      contract OK (determinism check intentionally skipped — real-time env)")
 
         print("[3/4] 50 random steps...")
         obs, info = env.reset()
