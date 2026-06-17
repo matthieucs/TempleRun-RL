@@ -113,26 +113,35 @@ class TempleRunEnv(gym.Env):
         return obs, info
 
     def _restart_and_wait(self) -> dict:
-        """Start a fresh run and wait until it's actually progressing; one retry.
+        """Start a fresh run and wait until it's actually progressing.
 
-        Sends both reset bytes each attempt: 8 (RunAgainClicked) starts from the game-over
+        Sends both reset bytes each round: 8 (RunAgainClicked) starts from the game-over
         screen, 9 (PlayFromMenu) starts from the main menu. Each is gated gadget-side to a
         no-op on the wrong screen, so whichever screen the phone is on, exactly one fires —
-        this makes reset robust to the game landing on the menu (e.g. after an interstitial ad).
+        robust to the game landing on the menu (e.g. after an interstitial ad).
+
+        Freeze-tolerant: if the device crashes/freezes mid-reset, the app/gadget can be down
+        for ~30 s while the watchdog relaunches + re-injects it. So we keep re-sending the
+        start bytes for up to ``freeze_timeout`` (re-sending matters: a relaunched app comes
+        back at the menu, which byte 9 then starts) rather than giving up after one short wait.
         """
-        for attempt in range(2):
+        deadline = time.monotonic() + self.freeze_timeout
+        while True:
             for action in C.RESET_ACTIONS:
-                self._action.send(int(action))
+                try:
+                    self._action.send(int(action))
+                except Exception:  # noqa: BLE001  action sink briefly down (re-injection) -> retry next round
+                    pass
             try:
                 return self._wait_for_fresh_run()
             except TimeoutError:
-                if attempt == 1:
+                if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        "Reset failed: no fresh run from either the game-over screen or the main menu. "
-                        "Is the game in the foreground? If it's stuck on a non-gameplay screen (e.g. an ad), "
-                        "it may need a manual tap. See docs/SETUP.md."
+                        "Reset failed: no fresh run within freeze_timeout. The device may be stuck on a "
+                        "non-gameplay screen that needs a manual tap (e.g. a full-screen ad), or the "
+                        "app/gadget is down and the watchdog could not recover it. See docs/SETUP.md."
                     )
-        raise AssertionError("unreachable")
+                continue
 
     def _wait_for_fresh_run(self) -> dict:
         deadline = time.monotonic() + self.reset_timeout
