@@ -42,6 +42,7 @@ class TempleRunEnv(gym.Env):
         reset_settle_steps: int = C.DEFAULT_RESET_SETTLE_STEPS,
         reset_timeout: float = C.DEFAULT_RESET_TIMEOUT,
         connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT,
+        freeze_timeout: float = C.DEFAULT_FREEZE_TIMEOUT,
         grow_episode_steps: bool = C.DEFAULT_GROW_EPISODE_STEPS,
         max_episode_steps_growth: float = C.DEFAULT_MAX_EPISODE_STEPS_GROWTH,
         max_episode_steps_ceiling: int = C.DEFAULT_MAX_EPISODE_STEPS_CEILING,
@@ -57,6 +58,7 @@ class TempleRunEnv(gym.Env):
         self.death_penalty = float(death_penalty)
         self.reset_settle_steps = int(reset_settle_steps)
         self.reset_timeout = float(reset_timeout)
+        self.freeze_timeout = float(freeze_timeout)
 
         # Adaptive episode-length ratchet (see module docstring / constants).
         self.grow_episode_steps = bool(grow_episode_steps)
@@ -191,10 +193,16 @@ class TempleRunEnv(gym.Env):
         return False
 
     def _wait_one_tick(self) -> dict:
-        """Return the newest state produced after the action, honoring step_dt."""
+        """Return the newest state produced after the action, honoring step_dt.
+
+        The first wait uses ``freeze_timeout`` (not a few seconds): if the phone briefly
+        freezes (screen blip, watchdog re-injecting the gadget), the StateClient reconnects
+        and frames resume, so this call just *blocks* (pausing the episode) instead of
+        crashing the worker. Only a freeze longer than ``freeze_timeout`` raises.
+        """
         t0 = time.monotonic()
-        # at least one fresh frame
-        state, seq = self._state.wait_fresh(self._last_seq, timeout=max(self.step_dt, 1.0) + 2.0)
+        # at least one fresh frame (tolerant of transient freezes / reconnects)
+        state, seq = self._state.wait_fresh(self._last_seq, timeout=self.freeze_timeout)
         # keep draining to the newest frame until step_dt elapses
         while True:
             remaining = self.step_dt - (time.monotonic() - t0)

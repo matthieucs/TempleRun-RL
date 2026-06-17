@@ -154,6 +154,12 @@ Maxed to: Vacuum/Invincibility/CoinBonus/Boost = 8, CoinValue = 5. (0/1/2 are co
   actually sticks there: `appops set com.android.shell android:write_settings allow` then
   `settings put system screen_off_timeout 2147483647` (~25 days). `adb input keyevent WAKEUP` is blocked
   (INJECT_EVENTS), so an already-asleep screen needs a physical tap; the timeout fix prevents recurrence.
+  **Resilience layer (so one phone's hiccup doesn't kill a multi-hour run):** `StateClient` auto-reconnects
+  + `ActionClient` retries through a gap + the env waits up to `freeze_timeout` (90 s) → a transient
+  freeze *pauses* the worker instead of crashing `SubprocVecEnv`. `scripts/watchdog.py` runs alongside
+  training and self-heals silent devices (keep-awake → `am start` → re-inject on app restart). **Not
+  auto-healable:** a phone parked on the **main menu** (no `GameController` → `Update` doesn't tick → no
+  frames; `RunAgainClicked`/byte-8 only restarts from the **game-over** screen) — needs a physical tap.
 - **Actions need ONE persistent socket to 9998.** Per-action connect/close races the reader on close —
   only the first byte arrives. The server accept loop must be `async while(true){ await accept() }`
   (the recursive-accept pattern wedged after the first connection).

@@ -114,6 +114,20 @@ way to collect faster is to run more phones in parallel. The plumbing supports t
   serializing. Each phone needs the gadget APK installed, the game open, and `svc power stayon true`.
   A powered USB hub helps once you have several devices.
 
+## Staying up over long runs (resilience)
+Real hardware drops out (screen sleep, app relaunch, the occasional interstitial ad), and one phone
+freezing must not take the whole run down. Two layers guard against this:
+- **Resilient clients + freeze tolerance.** `StateClient` auto-reconnects, `ActionClient` retries
+  through a gap, and the env waits up to `freeze_timeout` (default 90 s) for the stream to resume — so a
+  transient freeze *pauses* the worker instead of crashing the `SubprocVecEnv` run.
+- **Watchdog.** Run alongside training to self-heal silent devices (re-apply keep-awake, wake/foreground,
+  and re-inject the agent if the app restarted):
+  ```bash
+  python scripts/watchdog.py --serials SERIAL_A,SERIAL_B     # position = device index
+  ```
+  Note: a phone stuck on a *non-gameplay* screen (main menu) still needs a manual tap — `adb` input is
+  blocked on MIUI, and `reset()` can only restart from the game-over screen.
+
 ## Caveats
 - The instrumentation offsets are specific to **Temple Run v1.39.0**; a different version needs a
   re-dump (see [docs/OFFSETS.md](docs/OFFSETS.md)). The Python layer keys only on JSON field names,

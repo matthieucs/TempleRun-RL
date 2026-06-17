@@ -28,10 +28,12 @@ class StateClient:
     """Background reader that exposes the most recent state dict and a sequence counter."""
 
     def __init__(self, host: str = C.STATE_HOST, port: int = C.STATE_PORT,
-                 connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT):
+                 connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT,
+                 reconnect_backoff: float = 1.0):
         self.host = host
         self.port = port
         self.connect_timeout = connect_timeout
+        self.reconnect_backoff = reconnect_backoff
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -42,6 +44,9 @@ class StateClient:
         self._running = False
 
     def connect(self) -> "StateClient":
+        # Fail fast on the *first* connect (clear error if ports aren't forwarded); after
+        # that the reader thread reconnects on its own so a phone hiccup / app relaunch /
+        # gadget re-injection doesn't kill the stream — it just resumes when frames return.
         try:
             self._sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
         except OSError as e:
@@ -52,17 +57,42 @@ class StateClient:
         self._thread.start()
         return self
 
+    def _drop_sock(self) -> None:
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except OSError:
+            pass
+        self._sock = None
+
+    def _reconnect(self) -> bool:
+        """Best-effort reconnect with backoff; returns True once connected. Stays responsive to close()."""
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
+            sock.settimeout(None)
+            self._sock = sock
+            return True
+        except OSError:
+            end = time.monotonic() + self.reconnect_backoff
+            while self._running and time.monotonic() < end:
+                time.sleep(0.1)
+            return False
+
     def _reader(self) -> None:
         buf = b""
-        sock = self._sock
-        assert sock is not None
         while self._running:
+            if self._sock is None:
+                if not self._reconnect():
+                    continue
+                buf = b""
             try:
-                chunk = sock.recv(65536)
+                chunk = self._sock.recv(65536)  # type: ignore[union-attr]
             except OSError:
-                break
-            if not chunk:
-                break
+                self._drop_sock()
+                continue
+            if not chunk:           # peer closed (app relaunch / gadget reload) -> reconnect
+                self._drop_sock()
+                continue
             buf += chunk
             # Parse every complete line; keep only the last valid one.
             *lines, buf = buf.split(b"\n")
@@ -85,6 +115,11 @@ class StateClient:
     def latest(self) -> Tuple[Optional[dict], int]:
         with self._lock:
             return self._latest, self._seq
+
+    def staleness(self) -> float:
+        """Seconds since the last frame arrived (``inf`` if none yet). For health monitors."""
+        with self._lock:
+            return float("inf") if self._last_recv == 0.0 else time.monotonic() - self._last_recv
 
     def wait_fresh(self, after_seq: int, timeout: float) -> Tuple[dict, int]:
         """Block until a state frame newer than ``after_seq`` arrives; return (state, seq)."""
@@ -115,10 +150,13 @@ class ActionClient:
     """Single persistent socket to the action server; sends one byte per action."""
 
     def __init__(self, host: str = C.STATE_HOST, port: int = C.ACTION_PORT,
-                 connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT):
+                 connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT,
+                 retry_timeout: float = 30.0, retry_backoff: float = 0.5):
         self.host = host
         self.port = port
         self.connect_timeout = connect_timeout
+        self.retry_timeout = retry_timeout      # keep retrying a send for this long (covers re-injection)
+        self.retry_backoff = retry_backoff
         self._sock: Optional[socket.socket] = None
 
     def connect(self) -> "ActionClient":
@@ -134,17 +172,33 @@ class ActionClient:
         s.settimeout(self.connect_timeout)
         return s
 
+    def _drop(self) -> None:
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except OSError:
+            pass
+        self._sock = None
+
     def send(self, action: int) -> None:
         if not (0 <= int(action) <= 8):
             raise ValueError(f"action byte out of range: {action}")
         data = bytes([int(action)])
-        try:
-            assert self._sock is not None
-            self._sock.sendall(data)
-        except (OSError, AssertionError):
-            # One reconnect-and-resend attempt.
-            self._sock = self._open()
-            self._sock.sendall(data)
+        deadline = time.monotonic() + self.retry_timeout
+        last_err: Optional[Exception] = None
+        while True:
+            try:
+                if self._sock is None:
+                    self._sock = self._open()
+                self._sock.sendall(data)
+                return
+            except (OSError, RuntimeError) as e:  # _open wraps OSError in RuntimeError
+                last_err = e
+                self._drop()
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(self.retry_backoff)
+        raise _conn_error(self.host, self.port, "action sink") from last_err
 
     def close(self) -> None:
         try:

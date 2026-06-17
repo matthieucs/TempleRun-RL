@@ -124,6 +124,10 @@ DEFAULT_DEATH_PENALTY = 1.0     # subtracted on the terminal (death / game-over)
 DEFAULT_RESET_SETTLE_STEPS = 3  # consecutive "alive" frames required before reset() returns
 DEFAULT_RESET_TIMEOUT = 5.0     # seconds to wait for a fresh run after RestartGame
 DEFAULT_CONNECT_TIMEOUT = 5.0
+# How long step() will wait for the stream to resume before treating the device as dead.
+# A brief freeze (screen blip, gadget re-injection by the watchdog) should PAUSE the worker,
+# not crash it -- so this is generous. Only a freeze longer than this raises (truly gone).
+DEFAULT_FREEZE_TIMEOUT = 90.0
 
 # Adaptive episode-length "ratchet" (off by default -> fixed cap). When enabled, the cap
 # is raised only when an episode ends *alive at the limit* (truncation, not death): the
