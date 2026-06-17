@@ -113,16 +113,24 @@ class TempleRunEnv(gym.Env):
         return obs, info
 
     def _restart_and_wait(self) -> dict:
-        """Send the reset action (RunAgainClicked) and wait for a stable fresh run; one retry."""
+        """Start a fresh run and wait until it's actually progressing; one retry.
+
+        Sends both reset bytes each attempt: 8 (RunAgainClicked) starts from the game-over
+        screen, 9 (PlayFromMenu) starts from the main menu. Each is gated gadget-side to a
+        no-op on the wrong screen, so whichever screen the phone is on, exactly one fires —
+        this makes reset robust to the game landing on the menu (e.g. after an interstitial ad).
+        """
         for attempt in range(2):
-            self._action.send(int(C.RESET_ACTION))
+            for action in C.RESET_ACTIONS:
+                self._action.send(int(action))
             try:
                 return self._wait_for_fresh_run()
             except TimeoutError:
                 if attempt == 1:
                     raise RuntimeError(
-                        "Reset failed: no fresh run after RestartGame. "
-                        "Is the game in the foreground and a run/game-over screen active? See docs/SETUP.md."
+                        "Reset failed: no fresh run from either the game-over screen or the main menu. "
+                        "Is the game in the foreground? If it's stuck on a non-gameplay screen (e.g. an ad), "
+                        "it may need a manual tap. See docs/SETUP.md."
                     )
         raise AssertionError("unreachable")
 

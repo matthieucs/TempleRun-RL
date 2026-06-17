@@ -11,7 +11,8 @@
  *   - Hooks RecordManager.DeserializeRecordManager() -> on return, maxes every upgrade powerup level.
  *   - Hooks GameController.Update() -> drains the action queue ON THE GAME MAIN THREAD (thread-safe input).
  *   - Every 100 ms: reads game state (memory reads only) and broadcasts JSON over TCP 0.0.0.0:9999.
- *   - Listens on TCP 0.0.0.0:9998 for 1-byte action commands (0..7, raw byte or ASCII digit).
+ *   - Listens on TCP 0.0.0.0:9998 for 1-byte action commands (0..9, raw byte or ASCII digit).
+ *     0..6 gameplay/NoOp; 7 RestartGame; 8 RunAgainClicked (game-over restart); 9 OnPlayClicked (menu start).
  *
  * Host wiring (ports live on the emulator, so forward them):
  *   adb forward tcp:9999 tcp:9999      # state stream  (host connects, reads JSON lines)
@@ -58,7 +59,9 @@ const RVA = {
   TurnLeft: 0x129899C,
   TurnRight: 0x1298A14,
   RestartGame: 0x126B5B8,
-  RunAgainClicked: 0x12BCCF0,   // EndGameUI "Rejouer" button handler (full UI restart)
+  RunAgainClicked: 0x12BCCF0,   // EndGameUI "Rejouer" button handler (full UI restart from game-over)
+  MainMenuUpdate: 0x12C94C8,    // MainMenu.Update() — runs each frame at the menu; used to capture the instance
+  OnPlayClicked: 0x12CA204,     // MainMenu.OnPlayClicked() — the "JOUER"/Play button handler (start a run from the menu)
   GetRunVelocity: 0x12982D8,    // CharacterPlayer.GetRunVelocity() -> float (forward run speed)
   PlayerPrefs_GetInt: 0x24B37B8, // PlayerPrefs.GetInt(string key, int default) -> int
   // PathElement turn queries (origin = player's PathDirection / Facing):
@@ -85,6 +88,8 @@ const MUST_SLIDE_TYPES = [5, 6];  // kObstacleTreeSlide, kObstacleFlameTower
 let base = null;
 let gcInstance = null;   // GameController*
 let rmInstance = null;   // RecordManager*
+let mmInstance = null;   // MainMenu* (captured in MainMenu.Update; valid while at the menu)
+let mmSeenAtTick = -1000; // updateTicks value when MainMenu.Update last ran (recency gate for byte 9)
 const fn = {};           // resolved NativeFunctions
 const pendingActions = []; // action codes queued from the action socket
 const stateClients = []; // SocketConnection output streams subscribed to state
@@ -147,6 +152,7 @@ function resolve() {
   fn.TurnRight = new NativeFunction(base.add(RVA.TurnRight), 'void', ['pointer', 'pointer']);
   fn.RestartGame = new NativeFunction(base.add(RVA.RestartGame), 'void', ['pointer', 'pointer']);
   fn.RunAgainClicked = new NativeFunction(base.add(RVA.RunAgainClicked), 'void', ['pointer', 'pointer']); // (EndGameUI*, mi)
+  fn.OnPlayClicked = new NativeFunction(base.add(RVA.OnPlayClicked), 'void', ['pointer', 'pointer']);     // (MainMenu*, mi) — start a run from the menu
   fn.GetRunVelocity = new NativeFunction(base.add(RVA.GetRunVelocity), 'float', ['pointer', 'pointer']);   // (CharacterPlayer*, mi) -> float
   fn.CanTurnLeft = new NativeFunction(base.add(RVA.CanTurnLeft), 'bool', ['pointer', 'int', 'pointer']);   // (PathElement*, origin, mi) -> bool
   fn.CanTurnRight = new NativeFunction(base.add(RVA.CanTurnRight), 'bool', ['pointer', 'int', 'pointer']); // (PathElement*, origin, mi) -> bool
@@ -191,6 +197,13 @@ function installHooks() {
         log('Maxed upgrades ' + JSON.stringify(UPGRADE_TYPES) + ' on rm=' + rmInstance);
       } catch (e) { log('upgrade-max error: ' + e); }
     }
+  });
+
+  // MainMenu.Update(): runs each frame while at the main menu -> capture the instance so byte 9
+  // (PlayFromMenu) can press "JOUER". mmSeenAtTick gates the call to "currently at the menu" so we
+  // never invoke OnPlayClicked on a stale pointer once a run has started.
+  Interceptor.attach(base.add(RVA.MainMenuUpdate), {
+    onEnter(args) { mmInstance = args[0]; mmSeenAtTick = updateTicks; }
   });
 
   // GameController.Update(): runs every frame on the MAIN thread -> safe place to dispatch actions.
@@ -254,12 +267,19 @@ function dispatchAction(a, gc, cp) {
     case 7: // RestartGame() per spec (resets game LOGIC only; the run stays in game-over limbo)
       if (!gc.isNull()) { fn.RestartGame(gc, NULLPTR); dbg('restartgame'); }
       break;
-    case 8: // RunAgainClicked() — the "Rejouer" flow that actually STARTS a fresh run (used by env.reset)
+    case 8: // RunAgainClicked() — the "Rejouer" flow that STARTS a fresh run from the GAME-OVER screen.
       if (!cp.isNull()) {
         const egui = cp.add(OFF.GameOverInterface).readPointer();
         if (!egui.isNull()) { fn.RunAgainClicked(egui, NULLPTR); dbg('runagain'); }
-        else if (!gc.isNull()) { fn.RestartGame(gc, NULLPTR); dbg('runagain_fallback'); }
+        else { dbg('runagain_no_egui'); } // not at game-over (e.g. at the main menu) -> use byte 9
       }
+      break;
+    case 9: // OnPlayClicked() — press "JOUER" to start a run from the MAIN MENU.
+      // Gated to "currently at the menu": MainMenu.Update must have run within the last few ticks,
+      // else mmInstance is stale (a run is in progress) and calling it could crash.
+      if (mmInstance !== null && !mmInstance.isNull() && (updateTicks - mmSeenAtTick) <= 5) {
+        fn.OnPlayClicked(mmInstance, NULLPTR); dbg('play_from_menu');
+      } else { dbg('play_from_menu_skip', updateTicks - mmSeenAtTick); }
       break;
     default: log('unknown action ' + a);
   }
@@ -360,8 +380,8 @@ function startActionServer() {
             dbg('recv', Array.prototype.slice.call(bytes), 'ticks', updateTicks);
             for (let i = 0; i < bytes.length; i++) {
               let b = bytes[i];
-              if (b >= 0x30 && b <= 0x38) b -= 0x30; // ASCII '0'..'8'
-              if (b >= 0 && b <= 8) pendingActions.push(b);
+              if (b >= 0x30 && b <= 0x39) b -= 0x30; // ASCII '0'..'9'
+              if (b >= 0 && b <= 9) pendingActions.push(b);
             }
           }
         } catch (e) { dbg('read_err', String(e)); }

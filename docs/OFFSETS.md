@@ -57,6 +57,11 @@ player's `Facing`.
 | GetPlayerLevelForUpgradeType | `0x128D568` | | GetStoreItemMaxLevel | `0x128E5D8` |
 | PlayerPrefs.GetInt(string,int) | `0x24B37B8` | | PathElement.IsTurn() | `0x12E28B0` |
 | PathElement.CanTurnLeft(dir) | `0x12E2E88` | | PathElement.CanTurnRight(dir) | `0x12E2F44` |
+| MainMenu.Update() | `0x12C94C8` | | MainMenu.OnPlayClicked() | `0x12CA204` |
+
+`MainMenu` is a singleton (static `Instance` @ field `0x0`); the agent captures the live instance in
+`MainMenu.Update` and calls `OnPlayClicked` (the "JOUER" button) for action byte 9 — starting a run from
+the main menu, the counterpart to `RunAgainClicked` (byte 8) which starts from the game-over screen.
 
 `Il2CppString` layout (used by the PlayerPrefs hook): length @ `0x10`, UTF-16 chars @ `0x14`.
 Instance-method native ABI: first arg = `this`, trailing arg = `MethodInfo*` (pass NULL).

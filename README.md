@@ -74,9 +74,11 @@ obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
   normalized `velocity`, `path_type`, `path_level`, `facing`. Raw, unbounded `score` is **not** in the
   observation (it drives the reward); the full raw state dict is always in `info["raw_state"]`.
 - **Action** — `Discrete(7)`: `0` StrafeLeft · `1` StrafeRight · `2` Jump · `3` Slide ·
-  `4` TurnLeft · `5` TurnRight · `6` NoOp. (Bytes `7`/`8` are reset-only and never emitted by the
-  policy: `7`=RestartGame resets game logic but leaves the run in game-over limbo, so `reset()` uses
-  `8`=RunAgainClicked — the "Rejouer" flow that actually starts a fresh, progressing run.)
+  `4` TurnLeft · `5` TurnRight · `6` NoOp. (Bytes `7`/`8`/`9` are reset-only and never emitted by the
+  policy: `7`=RestartGame resets logic but leaves the run in limbo; `reset()` sends `8`=RunAgainClicked
+  (start from the game-over screen) **and** `9`=OnPlayClicked (start from the main menu, "JOUER") — each a
+  gadget-side no-op on the wrong screen, so a run starts whether the phone is on game-over or the menu,
+  which makes reset robust to the game dropping to the menu after an interstitial ad.)
 - **Reward** — `(score - prev_score) * reward_scale` each step, minus `death_penalty` on the
   terminal step. Defaults `reward_scale=0.01`, `death_penalty=1.0` (configurable in the constructor).
 - **Episode** — `terminated` when `is_dead`/`is_game_over`; `truncated` at `max_episode_steps` (default 1000;

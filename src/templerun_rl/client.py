@@ -181,7 +181,7 @@ class ActionClient:
         self._sock = None
 
     def send(self, action: int) -> None:
-        if not (0 <= int(action) <= 8):
+        if not (0 <= int(action) <= 9):
             raise ValueError(f"action byte out of range: {action}")
         data = bytes([int(action)])
         deadline = time.monotonic() + self.retry_timeout

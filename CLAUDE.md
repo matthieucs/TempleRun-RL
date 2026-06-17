@@ -95,7 +95,9 @@ listens for actions on 9998.
   — all cached on the main thread in the Update hook (verified flipping correctly at corners/T-junctions).
 - **Actions (port 9998):** one byte per action, **over a single PERSISTENT connection**.
   `0`=StrafeLeft `1`=StrafeRight `2`=Jump `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp
-  `7`=RestartGame (logic-only, leaves run in limbo) `8`=RunAgainClicked (starts a real run; env reset uses this).
+  `7`=RestartGame (logic-only, leaves run in limbo) `8`=RunAgainClicked (start from the **game-over** screen)
+  `9`=OnPlayClicked (start from the **main menu**, "JOUER"). `reset()` sends **8 then 9** — each is gated
+  gadget-side to a no-op on the wrong screen, so a run starts from whichever screen the phone is on.
 - **Hooks:** `GameController.Start` (force IsTutorialMode=false @0x104, TutorialID=999 @0x48);
   `PlayerPrefs.GetInt` (return 999 for key `"TR Tutorial"`); `GameController.Update` (capture instance,
   sample run velocity, drain action queue on main thread, one-shot max-upgrades);
@@ -122,7 +124,9 @@ PathNorth `0x50` / PathEast `0x58` / PathWest `0x60` / PathSouth `0x68`
 **PathDirection enum:** None 0, North 1, East 2, South 3, West 4 (= `CharacterPlayer.Facing`).
 
 **RVAs:** Start `0x1269CE8`, Update `0x126C60C`, RestartGame `0x126B5B8`,
-EndGameUI.RunAgainClicked `0x12BCCF0`, GetRunVelocity `0x12982D8`, Jump `0x1297B80`, Slide `0x1298768`,
+EndGameUI.RunAgainClicked `0x12BCCF0`, MainMenu.Update `0x12C94C8`, MainMenu.OnPlayClicked `0x12CA204`
+(MainMenu is a singleton: static `Instance` @ field 0x0; we capture the instance in MainMenu.Update),
+GetRunVelocity `0x12982D8`, Jump `0x1297B80`, Slide `0x1298768`,
 StrafeLeft `0x1298874`, StrafeRight `0x1298908`, TurnLeft `0x129899C`, TurnRight `0x1298A14`,
 DeserializeRecordManager `0x128AF58`, SerializeRecordManager `0x128BDC8`,
 SetPlayerLevelForUpgradeType `0x128D7BC`, GetPlayerLevelForUpgradeType `0x128D568`,
@@ -157,9 +161,11 @@ Maxed to: Vacuum/Invincibility/CoinBonus/Boost = 8, CoinValue = 5. (0/1/2 are co
   **Resilience layer (so one phone's hiccup doesn't kill a multi-hour run):** `StateClient` auto-reconnects
   + `ActionClient` retries through a gap + the env waits up to `freeze_timeout` (90 s) → a transient
   freeze *pauses* the worker instead of crashing `SubprocVecEnv`. `scripts/watchdog.py` runs alongside
-  training and self-heals silent devices (keep-awake → `am start` → re-inject on app restart). **Not
-  auto-healable:** a phone parked on the **main menu** (no `GameController` → `Update` doesn't tick → no
-  frames; `RunAgainClicked`/byte-8 only restarts from the **game-over** screen) — needs a physical tap.
+  training and self-heals silent devices (keep-awake → `am start` → re-inject on app restart). A phone
+  parked on the **main menu** is now recovered by `reset()` itself — byte 9 (`MainMenu.OnPlayClicked`,
+  "JOUER") starts a run from the menu (the menu's background runner keeps `GameController.Update` ticking,
+  so the byte-9 action still dispatches; verified live). Still **not** auto-healable: a fully hung Unity
+  (no ticking `GameController` at all) — needs a physical tap / app relaunch.
 - **Actions need ONE persistent socket to 9998.** Per-action connect/close races the reader on close —
   only the first byte arrives. The server accept loop must be `async while(true){ await accept() }`
   (the recursive-accept pattern wedged after the first connection).
@@ -167,8 +173,11 @@ Maxed to: Vacuum/Invincibility/CoinBonus/Boost = 8, CoinValue = 5. (0/1/2 are co
   — the player is never placed on the track, so it never scores or dies (verified: a NoOp rollout stays
   at score 0, `ground=0`, `path_type=-1`). The real restart is **`EndGameUI.RunAgainClicked()`** (byte 8),
   reached via `CharacterPlayer.GameOverInterface` @ `0x1A0` — it starts a real, progressing run (~7-frame
-  UI-transition first). **`env.reset()` uses byte 8.** Caveat: `RunAgainClicked` occasionally routes
-  through an **interstitial ad** that would stall a reset (can't tap via adb on MIUI) — future: suppress it.
+  UI-transition first). **`env.reset()` sends byte 8 then byte 9** (`MainMenu.OnPlayClicked`) so it starts
+  a run from the game-over screen OR the main menu — the latter recovers from the **interstitial ad** that
+  occasionally drops the game back to the menu after a run (this used to stall the reset; now self-heals,
+  verified live). A genuinely blocking full-screen ad with no menu underneath still can't be tapped via adb
+  on MIUI — future: suppress it at the source (`EndGameUI`/ads hook).
 - An **un-steered run dies in ~2 s** (hits the first obstacle). To demo/inject an action, keep the
   character alive and inject reactively.
 - **Gadget `console.log` is flaky** over the remote channel — use Frida `send()` for diagnostics
@@ -250,8 +259,9 @@ acceptable for v0; a `valid` companion flag is the documented future tweak).
 
 ### Action — `Discrete(7)`
 Policy emits **0–6**: `0` StrafeLeft · `1` StrafeRight · `2` Jump · `3` Slide · `4` TurnLeft · `5` TurnRight ·
-`6` NoOp. Bytes `7`/`8` are **reset-only** (never sampled by the policy): `7` RestartGame (limbo),
-`8` RunAgainClicked (what `reset()` sends). The env raises if asked to `step()` an action ≥ 7.
+`6` NoOp. Bytes `7`/`8`/`9` are **reset-only** (never sampled by the policy): `7` RestartGame (limbo),
+`8` RunAgainClicked (game-over restart), `9` OnPlayClicked (main-menu start). `reset()` sends 8 then 9.
+The env raises if asked to `step()` an action ≥ 7.
 
 ### Reward
 ```
@@ -263,9 +273,11 @@ Defaults `reward_scale = 0.01`, `death_penalty = 1.0`. Empirically: a typical al
 step is ≈ **−1**. `prev_score` is set from the reset frame (~162), so the first delta is well-behaved.
 
 ### Episode / step mechanics
-- **`reset()`** — send byte 8 (RunAgainClicked); poll until the player is actually on the track
-  (`is_on_ground or path_type ≥ 0`) for `reset_settle_steps` (3) consecutive frames within
-  `reset_timeout` (5 s), with one retry; returns a *started* run (skips the ~7-frame UI-transition limbo).
+- **`reset()`** — send byte 8 (RunAgainClicked, from game-over) **then** byte 9 (OnPlayClicked, from the
+  menu); only the one matching the current screen fires (each is gated gadget-side). Poll until the player
+  is actually on the track (`is_on_ground or path_type ≥ 0`) for `reset_settle_steps` (3) consecutive
+  frames within `reset_timeout` (5 s), with one retry; returns a *started* run (skips the UI-transition
+  limbo). This makes reset robust to the game landing on the main menu (e.g. after an interstitial ad).
 - **`step(a)`** — send the action byte on the persistent socket; wait one control tick (`step_dt` 0.1 s,
   reading the newest frame *after* the action — never stale); `terminated = is_dead or is_game_over`;
   `truncated` at `max_episode_steps` (1000).

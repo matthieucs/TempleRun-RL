@@ -53,12 +53,16 @@ class Action(IntEnum):
     TURN_LEFT = 4
     TURN_RIGHT = 5
     NOOP = 6
-    RESTART = 7      # RestartGame(): logic reset only (run does not start)
-    RUN_AGAIN = 8    # RunAgainClicked(): starts a real run (used for episode reset)
+    RESTART = 7        # RestartGame(): logic reset only (run does not start)
+    RUN_AGAIN = 8      # RunAgainClicked(): starts a run from the GAME-OVER screen
+    PLAY_FROM_MENU = 9  # MainMenu.OnPlayClicked(): starts a run from the MAIN MENU ("JOUER")
 
 
 N_ACTIONS = 7          # policy action space size: bytes 0..6
-RESET_ACTION = Action.RUN_AGAIN  # what reset() sends to begin a fresh, progressing run
+# reset() sends both: byte 8 starts from game-over, byte 9 from the main menu. Each is gated
+# gadget-side to a no-op on the wrong screen, so sending both reliably starts a run from either.
+RESET_ACTIONS = (Action.RUN_AGAIN, Action.PLAY_FROM_MENU)
+RESET_ACTION = Action.RUN_AGAIN  # kept for back-compat; reset() iterates RESET_ACTIONS
 
 
 # --- State contract ----------------------------------------------------------
