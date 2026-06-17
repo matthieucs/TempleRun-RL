@@ -43,11 +43,14 @@ class TempleRunEnv(gym.Env):
         reset_timeout: float = C.DEFAULT_RESET_TIMEOUT,
         connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT,
         freeze_timeout: float = C.DEFAULT_FREEZE_TIMEOUT,
+        reset_recover_timeout: float = C.DEFAULT_RESET_RECOVER_TIMEOUT,
+        step_stall_timeout: float = C.DEFAULT_STEP_STALL_TIMEOUT,
         grow_episode_steps: bool = C.DEFAULT_GROW_EPISODE_STEPS,
         max_episode_steps_growth: float = C.DEFAULT_MAX_EPISODE_STEPS_GROWTH,
         max_episode_steps_ceiling: int = C.DEFAULT_MAX_EPISODE_STEPS_CEILING,
         action_cost: float = C.DEFAULT_ACTION_COST,
         reaction_bonus: float = C.DEFAULT_REACTION_BONUS,
+        turn_spam_penalty: float = C.DEFAULT_TURN_SPAM_PENALTY,
         auto_connect: bool = True,
     ):
         super().__init__()
@@ -61,6 +64,9 @@ class TempleRunEnv(gym.Env):
         self.reset_settle_steps = int(reset_settle_steps)
         self.reset_timeout = float(reset_timeout)
         self.freeze_timeout = float(freeze_timeout)
+        self.reset_recover_timeout = float(reset_recover_timeout)
+        self.step_stall_timeout = float(step_stall_timeout)
+        self._degraded = False  # True while this phone is stuck/down (see DEFAULT_RESET_RECOVER_TIMEOUT)
 
         # Reward shaping (both default 0.0 = off -> the documented score-delta reward).
         # action_cost: subtracted on every non-NoOp action -> discourages thrashing / favours
@@ -69,7 +75,13 @@ class TempleRunEnv(gym.Env):
         #   a valid turn at a junction) -> dense signal for the core skill (vs the sparse die/score).
         self.action_cost = float(action_cost)
         self.reaction_bonus = float(reaction_bonus)
+        # turn_spam_penalty: a TURN right after another TURN is the junction-spam exploit the
+        #   policy falls into (no recurrent memory -> it mashes turns to be sure one lands). The
+        #   env supplies the missing memory via _last_action and docks repeats. > reaction_bonus
+        #   so the 2nd+ consecutive turn is net-negative even when it's a "valid" turn frame.
+        self.turn_spam_penalty = float(turn_spam_penalty)
         self._prev_state: Optional[dict] = None  # the state the last action responded to (for shaping)
+        self._last_action: Optional[int] = None  # the action taken on the previous step (for turn-spam)
 
         # Adaptive episode-length ratchet (see module docstring / constants).
         self.grow_episode_steps = bool(grow_episode_steps)
@@ -91,8 +103,10 @@ class TempleRunEnv(gym.Env):
     def connect(self) -> None:
         if self._connected:
             return
-        self._state.connect()
-        self._action.connect()
+        # required=False: tolerate a phone that's down at startup -> the env constructs and runs
+        # DEGRADED (reconnecting in the background) instead of crashing the whole SubprocVecEnv.
+        self._state.connect(required=False)
+        self._action.connect(required=False)
         self._connected = True
 
     def _require_connection(self) -> None:
@@ -115,16 +129,28 @@ class TempleRunEnv(gym.Env):
         super().reset(seed=seed)
         self._require_connection()
 
-        state = self._restart_and_wait()
+        try:
+            state = self._restart_and_wait(budget=self.reset_recover_timeout)
+            self._degraded = False
+        except (TimeoutError, RuntimeError, OSError, ConnectionError):
+            # This phone is stuck (game-over limbo) or down. Do NOT raise — that would kill the
+            # whole SubprocVecEnv and take the healthy phones with it. Go DEGRADED: hand back a
+            # neutral frame; step() keeps probing and the env rejoins once the phone recovers.
+            self._degraded = True
+            state = self._prev_state or {}
         self._prev_score = int(state.get("score", 0))
         self._prev_state = state
+        self._last_action = None
         self._elapsed_steps = 0
-        _, self._last_seq = self._state.latest()
+        try:
+            _, self._last_seq = self._state.latest()
+        except Exception:  # noqa: BLE001  no frame yet while degraded
+            self._last_seq = -1
         obs = O.state_to_obs(state)
-        info = {"raw_state": state, "score": self._prev_score}
+        info = {"raw_state": state, "score": self._prev_score, "degraded": self._degraded}
         return obs, info
 
-    def _restart_and_wait(self) -> dict:
+    def _restart_and_wait(self, budget: Optional[float] = None) -> dict:
         """Start a fresh run and wait until it's actually progressing.
 
         Sends both reset bytes each round: 8 (RunAgainClicked) starts from the game-over
@@ -137,13 +163,10 @@ class TempleRunEnv(gym.Env):
         start bytes for up to ``freeze_timeout`` (re-sending matters: a relaunched app comes
         back at the menu, which byte 9 then starts) rather than giving up after one short wait.
         """
-        deadline = time.monotonic() + self.freeze_timeout
+        deadline = time.monotonic() + (budget if budget is not None else self.freeze_timeout)
         while True:
             for action in C.RESET_ACTIONS:
-                try:
-                    self._action.send(int(action))
-                except Exception:  # noqa: BLE001  action sink briefly down (re-injection) -> retry next round
-                    pass
+                self._action.try_send(int(action))  # non-blocking; sink may be briefly down (re-inject)
             try:
                 return self._wait_for_fresh_run()
             except TimeoutError:
@@ -175,13 +198,30 @@ class TempleRunEnv(gym.Env):
         raise TimeoutError("no fresh run within reset_timeout")
 
     def step(self, action: int):
-        self._require_connection()
         a = int(action)
         if a >= C.N_ACTIONS:
             raise ValueError(f"action {a} is reserved for reset(); the policy must emit 0..{C.N_ACTIONS - 1}")
-        self._action.send(a)
-
-        state = self._wait_one_tick()
+        if self._degraded:
+            return self._degraded_step(a)
+        try:
+            self._require_connection()
+            self._action.send(a)
+            state = self._wait_one_tick()
+        except (TimeoutError, OSError, ConnectionError):
+            # Phone froze / socket dropped mid-episode: end the episode cleanly (terminated) so the
+            # SubprocVecEnv worker survives instead of taking every phone down. VecEnv auto-resets;
+            # reset() then degrades fast if the phone is still stuck.
+            self._degraded = True
+            last = self._prev_state or {}
+            self._last_action = a
+            self._elapsed_steps += 1
+            return (
+                O.state_to_obs(last), 0.0, True, False,
+                {"raw_state": last, "score": self._prev_score, "elapsed_steps": self._elapsed_steps,
+                 "max_episode_steps": self.max_episode_steps, "degraded": True},
+            )
+        if self._degraded and self._run_started(state):
+            self._degraded = False  # phone recovered mid-episode -> rejoin normally
         score = int(state.get("score", self._prev_score))
 
         reward = (score - self._prev_score) * self.reward_scale
@@ -191,6 +231,7 @@ class TempleRunEnv(gym.Env):
             reward -= self.death_penalty
         self._prev_score = score
         self._prev_state = state
+        self._last_action = a
 
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.max_episode_steps
@@ -218,7 +259,7 @@ class TempleRunEnv(gym.Env):
         - reaction_bonus: a bonus when the action matches what ``prev`` called for — JUMP on
           must_jump, SLIDE on must_slide, or a *valid* TURN at a junction (is_turn + can_turn_*).
         """
-        if not self.action_cost and not self.reaction_bonus:
+        if not self.action_cost and not self.reaction_bonus and not self.turn_spam_penalty:
             return 0.0
         r = 0.0
         if self.action_cost and action != int(C.Action.NOOP):
@@ -233,6 +274,11 @@ class TempleRunEnv(gym.Env):
                     r += self.reaction_bonus
                 elif action == int(C.Action.TURN_RIGHT) and prev.get("can_turn_right"):
                     r += self.reaction_bonus
+        # Turn-spam: a turn immediately after another turn is the junction exploit -> dock it.
+        if self.turn_spam_penalty and self._last_action is not None:
+            turns = (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))
+            if action in turns and self._last_action in turns:
+                r -= self.turn_spam_penalty
         return r
 
     def _grow_episode_cap(self) -> bool:
@@ -249,6 +295,38 @@ class TempleRunEnv(gym.Env):
             return True
         return False
 
+    def _degraded_step(self, a: int):
+        """Fast, non-blocking step while this phone is stuck/down.
+
+        Paces at step_dt, keeps nudging the game back into a run, and rejoins the instant a real
+        run reappears. Crucially it never blocks on ``wait_fresh`` — so one frozen phone can't
+        stall the lockstep SubprocVecEnv; the healthy phones keep training and this one feeds
+        neutral frames until it recovers (watchdog re-inject / manual force-restart).
+        """
+        self._last_action = a
+        self._elapsed_steps += 1
+        time.sleep(self.step_dt)
+        state = None
+        try:
+            for action in C.RESET_ACTIONS:           # nudge it back into a run (non-blocking)
+                self._action.try_send(int(action))
+            state, seq = self._state.latest()        # non-blocking peek at the newest frame
+        except Exception:                            # noqa: BLE001  socket down -> stay degraded
+            state, seq = None, self._last_seq
+        if state and self._run_started(state):
+            self._degraded = False                   # recovered -> end neutral episode, rejoin
+            self._prev_state = state
+            self._prev_score = int(state.get("score", 0))
+            self._last_seq = seq
+            return (O.state_to_obs(state), 0.0, True, False,
+                    {"raw_state": state, "score": self._prev_score, "elapsed_steps": self._elapsed_steps,
+                     "max_episode_steps": self.max_episode_steps, "recovered": True, "degraded": False})
+        blank = self._prev_state or {}
+        truncated = self._elapsed_steps >= self.max_episode_steps
+        return (O.state_to_obs(blank), 0.0, False, truncated,
+                {"raw_state": blank, "score": self._prev_score, "elapsed_steps": self._elapsed_steps,
+                 "max_episode_steps": self.max_episode_steps, "degraded": True})
+
     def _wait_one_tick(self) -> dict:
         """Return the newest state produced after the action, honoring step_dt.
 
@@ -258,8 +336,9 @@ class TempleRunEnv(gym.Env):
         crashing the worker. Only a freeze longer than ``freeze_timeout`` raises.
         """
         t0 = time.monotonic()
-        # at least one fresh frame (tolerant of transient freezes / reconnects)
-        state, seq = self._state.wait_fresh(self._last_seq, timeout=self.freeze_timeout)
+        # at least one fresh frame; bounded by step_stall_timeout so a frozen phone soft-deaths
+        # quickly (the caller catches TimeoutError) instead of blocking the lockstep vec-env.
+        state, seq = self._state.wait_fresh(self._last_seq, timeout=self.step_stall_timeout)
         # keep draining to the newest frame until step_dt elapses
         while True:
             remaining = self.step_dt - (time.monotonic() - t0)

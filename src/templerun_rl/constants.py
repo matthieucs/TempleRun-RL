@@ -145,3 +145,16 @@ DEFAULT_MAX_EPISODE_STEPS_CEILING = 6000  # hard ceiling (~10 min at 100 ms) so 
 # Reward shaping (opt-in; both 0.0 = off -> the plain score-delta reward). See env._shaping_reward.
 DEFAULT_ACTION_COST = 0.0      # penalty per non-NoOp action (curb thrashing / favour stillness); try ~0.02-0.05
 DEFAULT_REACTION_BONUS = 0.0   # bonus for the correct reaction (jump/slide/valid-turn); try ~0.1 (> action_cost)
+DEFAULT_TURN_SPAM_PENALTY = 0.0  # extra penalty for a TURN that immediately follows another TURN (curb junction turn-spam); try ~0.15 (> reaction_bonus)
+
+# Per-env resilience: in a SubprocVecEnv any single env that raises kills ALL workers. If a
+# reset can't start a fresh run within this budget (phone wedged in game-over limbo / app down),
+# the env goes DEGRADED instead of raising — it hands back neutral frames and keeps probing, so
+# the other phones keep training and this one rejoins once it recovers (watchdog/force-restart).
+# Kept short so a stuck phone stalls the lockstep vec only briefly per reset (not freeze_timeout).
+DEFAULT_RESET_RECOVER_TIMEOUT = 12.0
+# Per-STEP stall bound. _wait_one_tick waits at most this for the first fresh frame before
+# soft-terminating the episode (then the env goes degraded). Kept short so ONE frozen phone
+# (0 frames) doesn't block the lockstep SubprocVecEnv for the full freeze_timeout each step —
+# the healthy phones keep training while the frozen one degrades and rejoins on recovery.
+DEFAULT_STEP_STALL_TIMEOUT = 5.0

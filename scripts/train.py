@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
                    help="penalty per non-NoOp action (curb thrashing); try ~0.02-0.05")
     p.add_argument("--reaction-bonus", type=float, default=0.0,
                    help="bonus for the correct jump/slide/turn reaction; try ~0.1 (> action-cost)")
+    p.add_argument("--turn-spam-penalty", type=float, default=0.0,
+                   help="penalty for a turn right after another turn (curb junction turn-spam); try ~0.15 (> reaction-bonus)")
     return p.parse_args()
 
 
@@ -93,6 +95,7 @@ def _make_one(args: argparse.Namespace, index: int):
             death_penalty=args.death_penalty,
             action_cost=args.action_cost,
             reaction_bonus=args.reaction_bonus,
+            turn_spam_penalty=args.turn_spam_penalty,
         )
         return Monitor(env)
 
