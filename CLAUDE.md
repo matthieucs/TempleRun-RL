@@ -251,7 +251,17 @@ step is ≈ **−1**. `prev_score` is set from the reset frame (~162), so the fi
 - **`step(a)`** — send the action byte on the persistent socket; wait one control tick (`step_dt` 0.1 s,
   reading the newest frame *after* the action — never stale); `terminated = is_dead or is_game_over`;
   `truncated` at `max_episode_steps` (1000).
+- **Adaptive episode cap (opt-in, default off):** `max_episode_steps` is a *ceiling*, not the usual run
+  end — almost every episode `terminated`s by death first, so the cap is unreached early on. With
+  `grow_episode_steps=True` the env **ratchets** the cap up — only on a *pure truncation* (alive at the
+  limit, `truncated and not terminated`), multiplying by `max_episode_steps_growth` (1.5) up to
+  `max_episode_steps_ceiling` (6000 ≈ 10 min). Never shrinks (incl. on death). Rationale: surviving the
+  cap proves the agent can play that long, so unlock more of the *faster* late game (the runner keeps
+  accelerating) instead of clipping the best runs. Growth is surfaced in `info["episode_cap_grew_to"]`;
+  `info["max_episode_steps"]` carries the current cap every step. `_grow_episode_cap()` does the bump.
 - **Tunable ctor args:** `step_dt, max_episode_steps, reward_scale, death_penalty, reset_settle_steps,
-  reset_timeout, connect_timeout, auto_connect` (+ `host`/ports).
+  reset_timeout, connect_timeout, grow_episode_steps, max_episode_steps_growth,
+  max_episode_steps_ceiling, auto_connect` (+ `host`/ports). `train.py` exposes
+  `--grow-episode-steps`/`--max-episode-steps-growth`/`--max-episode-steps-ceiling`.
 - **Connection layer (`client.py`):** `StateClient` reader thread keeps only the latest frame (`seq`
   counter); `ActionClient` holds one persistent `TCP_NODELAY` socket.

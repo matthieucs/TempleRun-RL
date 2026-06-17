@@ -7,6 +7,12 @@ is no simulator and no parallelism (use multiple phones/hosts to scale).
 Observation: ``Box(0, 1, (18,))`` (see ``obs.py``).
 Action:      ``Discrete(7)`` -> action bytes 0..6 (7 is reserved for reset).
 Reward:      score-delta * reward_scale, minus death_penalty on the terminal step.
+
+The episode length cap (``max_episode_steps``) is a *ceiling*, not the usual end of a
+run -- almost every episode ends earlier by death (``terminated``). With
+``grow_episode_steps=True`` the ceiling auto-grows: each time the agent ends a run *alive
+at the cap* (a pure truncation), the cap is multiplied up (ratchet, never shrinks) so the
+agent can keep playing into the faster, harder part of the game next time.
 """
 from __future__ import annotations
 
@@ -36,6 +42,9 @@ class TempleRunEnv(gym.Env):
         reset_settle_steps: int = C.DEFAULT_RESET_SETTLE_STEPS,
         reset_timeout: float = C.DEFAULT_RESET_TIMEOUT,
         connect_timeout: float = C.DEFAULT_CONNECT_TIMEOUT,
+        grow_episode_steps: bool = C.DEFAULT_GROW_EPISODE_STEPS,
+        max_episode_steps_growth: float = C.DEFAULT_MAX_EPISODE_STEPS_GROWTH,
+        max_episode_steps_ceiling: int = C.DEFAULT_MAX_EPISODE_STEPS_CEILING,
         auto_connect: bool = True,
     ):
         super().__init__()
@@ -48,6 +57,11 @@ class TempleRunEnv(gym.Env):
         self.death_penalty = float(death_penalty)
         self.reset_settle_steps = int(reset_settle_steps)
         self.reset_timeout = float(reset_timeout)
+
+        # Adaptive episode-length ratchet (see module docstring / constants).
+        self.grow_episode_steps = bool(grow_episode_steps)
+        self.max_episode_steps_growth = float(max_episode_steps_growth)
+        self.max_episode_steps_ceiling = int(max_episode_steps_ceiling)
 
         self._state = StateClient(host, state_port, connect_timeout)
         self._action = ActionClient(host, action_port, connect_timeout)
@@ -149,8 +163,32 @@ class TempleRunEnv(gym.Env):
         truncated = self._elapsed_steps >= self.max_episode_steps
 
         obs = O.state_to_obs(state)
-        info = {"raw_state": state, "score": score, "elapsed_steps": self._elapsed_steps}
+        info = {
+            "raw_state": state,
+            "score": score,
+            "elapsed_steps": self._elapsed_steps,
+            "max_episode_steps": self.max_episode_steps,
+        }
+        # Ratchet the cap up only on a *pure* truncation (alive at the limit, not a death):
+        # the agent survived the whole episode, so unlock more of the (faster) game next run.
+        if truncated and not terminated and self.grow_episode_steps:
+            if self._grow_episode_cap():
+                info["episode_cap_grew_to"] = self.max_episode_steps
         return obs, float(reward), terminated, truncated, info
+
+    def _grow_episode_cap(self) -> bool:
+        """Raise the episode cap (ratchet: up only, bounded by the ceiling).
+
+        Returns True if the cap actually changed.
+        """
+        new_cap = min(
+            int(self.max_episode_steps * self.max_episode_steps_growth),
+            self.max_episode_steps_ceiling,
+        )
+        if new_cap > self.max_episode_steps:
+            self.max_episode_steps = new_cap
+            return True
+        return False
 
     def _wait_one_tick(self) -> dict:
         """Return the newest state produced after the action, honoring step_dt."""

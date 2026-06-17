@@ -79,7 +79,11 @@ obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
   `8`=RunAgainClicked — the "Rejouer" flow that actually starts a fresh, progressing run.)
 - **Reward** — `(score - prev_score) * reward_scale` each step, minus `death_penalty` on the
   terminal step. Defaults `reward_scale=0.01`, `death_penalty=1.0` (configurable in the constructor).
-- **Episode** — `terminated` when `is_dead`/`is_game_over`; `truncated` at `max_episode_steps` (default 1000).
+- **Episode** — `terminated` when `is_dead`/`is_game_over`; `truncated` at `max_episode_steps` (default 1000;
+  a *ceiling*, since runs almost always end earlier by death). Optional **adaptive cap**
+  (`grow_episode_steps=True`, or `--grow-episode-steps`): each time the agent survives a full episode the
+  cap ratchets up (×`max_episode_steps_growth`, bounded by `max_episode_steps_ceiling`) so it keeps
+  unlocking the faster late game instead of being clipped. Off by default.
 
 ## Layout
 ```
@@ -91,9 +95,26 @@ docs/               SETUP.md, GADGET.md, OFFSETS.md
 CLAUDE.md           full project notes (offsets, gotchas, history)
 ```
 
-## Scaling & caveats
-- **One phone = one env**, real-time at ~10 Hz, with short episodes. There is no simulator and no
-  parallelism; to scale, add more phones/arm64 hosts, each with its own forwarded ports and env.
+## Scaling to multiple phones
+**One phone = one env**, real-time at ~10 Hz, with short episodes — there is no simulator, so the only
+way to collect faster is to run more phones in parallel. The plumbing supports this:
+- In-phone ports are always 27042/9999/9998; on the host, each device gets its own port triple at a
+  stride of 100 (`device_ports(i)` → `9999+i*100` / `9998+i*100`).
+- Bring each device up in its own terminal with a distinct slot:
+  ```bash
+  python scripts/setup_device.py --serial PHONE_A --device-index 0
+  python scripts/setup_device.py --serial PHONE_B --device-index 1
+  ```
+- Train across all of them — PPO collects `n_steps × num_envs` transitions per rollout:
+  ```bash
+  python scripts/train.py --timesteps 100000 --num-envs 2
+  ```
+  With `--num-envs > 1` the env switches from `DummyVecEnv` to `SubprocVecEnv` so each phone's
+  real-time wait overlaps (≈100 ms/vec-step regardless of N, up to USB/host limits) instead of
+  serializing. Each phone needs the gadget APK installed, the game open, and `svc power stayon true`.
+  A powered USB hub helps once you have several devices.
+
+## Caveats
 - The instrumentation offsets are specific to **Temple Run v1.39.0**; a different version needs a
   re-dump (see [docs/OFFSETS.md](docs/OFFSETS.md)). The Python layer keys only on JSON field names,
   so as long as the 19-field contract holds, no Python changes are needed.
