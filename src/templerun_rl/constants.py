@@ -146,6 +146,7 @@ DEFAULT_MAX_EPISODE_STEPS_CEILING = 6000  # hard ceiling (~10 min at 100 ms) so 
 DEFAULT_ACTION_COST = 0.0      # penalty per non-NoOp action (curb thrashing / favour stillness); try ~0.02-0.05
 DEFAULT_REACTION_BONUS = 0.0   # bonus for the correct reaction (jump/slide/valid-turn); try ~0.1 (> action_cost)
 DEFAULT_TURN_SPAM_PENALTY = 0.0  # extra penalty for a TURN that immediately follows another TURN (curb junction turn-spam); try ~0.15 (> reaction_bonus)
+DEFAULT_IDLE_ACTION_PENALTY = 0.0  # extra penalty for JUMP with no must_jump / SLIDE with no must_slide (curb erratic jumping/sliding when no obstacle calls for it); try ~0.06 (> action_cost)
 
 # Per-env resilience: in a SubprocVecEnv any single env that raises kills ALL workers. If a
 # reset can't start a fresh run within this budget (phone wedged in game-over limbo / app down),

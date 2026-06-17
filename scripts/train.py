@@ -67,6 +67,10 @@ def parse_args() -> argparse.Namespace:
                    help="bonus for the correct jump/slide/turn reaction; try ~0.1 (> action-cost)")
     p.add_argument("--turn-spam-penalty", type=float, default=0.0,
                    help="penalty for a turn right after another turn (curb junction turn-spam); try ~0.15 (> reaction-bonus)")
+    p.add_argument("--idle-action-penalty", type=float, default=0.0,
+                   help="penalty for JUMP with no must_jump / SLIDE with no must_slide (curb erratic jumping/sliding); try ~0.06")
+    p.add_argument("--ent-coef", type=float, default=0.003,
+                   help="PPO entropy bonus; HIGH (0.01) keeps the policy random/'excited', LOW (~0.003) lets it commit to NoOp+reactions. Applied on resume too.")
     return p.parse_args()
 
 
@@ -96,6 +100,7 @@ def _make_one(args: argparse.Namespace, index: int):
             action_cost=args.action_cost,
             reaction_bonus=args.reaction_bonus,
             turn_spam_penalty=args.turn_spam_penalty,
+            idle_action_penalty=args.idle_action_penalty,
         )
         return Monitor(env)
 
@@ -121,6 +126,8 @@ def main() -> None:
     if args.resume:
         print(f"Resuming from {args.resume}")
         model = PPO.load(args.resume, env=env, tensorboard_log=args.tensorboard)
+        model.ent_coef = args.ent_coef  # apply the (lowered) entropy bonus to the resumed policy too
+        print(f"  ent_coef set to {args.ent_coef}")
     else:
         model = PPO(
             "MlpPolicy",
@@ -131,7 +138,7 @@ def main() -> None:
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.01,            # encourage exploration across the 7 actions
+            ent_coef=args.ent_coef,   # entropy bonus; low -> commit to NoOp+reactions, high -> stay random
             learning_rate=3e-4,
             vf_coef=0.5,
             max_grad_norm=0.5,

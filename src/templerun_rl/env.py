@@ -51,6 +51,7 @@ class TempleRunEnv(gym.Env):
         action_cost: float = C.DEFAULT_ACTION_COST,
         reaction_bonus: float = C.DEFAULT_REACTION_BONUS,
         turn_spam_penalty: float = C.DEFAULT_TURN_SPAM_PENALTY,
+        idle_action_penalty: float = C.DEFAULT_IDLE_ACTION_PENALTY,
         auto_connect: bool = True,
     ):
         super().__init__()
@@ -80,6 +81,10 @@ class TempleRunEnv(gym.Env):
         #   env supplies the missing memory via _last_action and docks repeats. > reaction_bonus
         #   so the 2nd+ consecutive turn is net-negative even when it's a "valid" turn frame.
         self.turn_spam_penalty = float(turn_spam_penalty)
+        # idle_action_penalty: jump/slide fired with no obstacle (must_jump/must_slide false) is
+        #   the "excited" erratic behavior; dock it on top of action_cost. Pairs with a lowered
+        #   PPO ent_coef (the entropy bonus is what keeps the policy randomly spraying actions).
+        self.idle_action_penalty = float(idle_action_penalty)
         self._prev_state: Optional[dict] = None  # the state the last action responded to (for shaping)
         self._last_action: Optional[int] = None  # the action taken on the previous step (for turn-spam)
 
@@ -259,7 +264,8 @@ class TempleRunEnv(gym.Env):
         - reaction_bonus: a bonus when the action matches what ``prev`` called for — JUMP on
           must_jump, SLIDE on must_slide, or a *valid* TURN at a junction (is_turn + can_turn_*).
         """
-        if not self.action_cost and not self.reaction_bonus and not self.turn_spam_penalty:
+        if (not self.action_cost and not self.reaction_bonus and not self.turn_spam_penalty
+                and not self.idle_action_penalty):
             return 0.0
         r = 0.0
         if self.action_cost and action != int(C.Action.NOOP):
@@ -279,6 +285,12 @@ class TempleRunEnv(gym.Env):
             turns = (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))
             if action in turns and self._last_action in turns:
                 r -= self.turn_spam_penalty
+        # Idle jump/slide: fired with no obstacle calling for it -> erratic "excitement", dock it.
+        if self.idle_action_penalty and prev is not None:
+            if action == int(C.Action.JUMP) and not prev.get("must_jump"):
+                r -= self.idle_action_penalty
+            elif action == int(C.Action.SLIDE) and not prev.get("must_slide"):
+                r -= self.idle_action_penalty
         return r
 
     def _grow_episode_cap(self) -> bool:
