@@ -60,6 +60,11 @@ def parse_args() -> argparse.Namespace:
                    help="hard upper bound the growing cap can never exceed (~10 min at 0.1 s/step)")
     p.add_argument("--reward-scale", type=float, default=0.01)
     p.add_argument("--death-penalty", type=float, default=1.0)
+    # reward shaping (opt-in) — speeds learning / curbs early thrashing; see env._shaping_reward
+    p.add_argument("--action-cost", type=float, default=0.0,
+                   help="penalty per non-NoOp action (curb thrashing); try ~0.02-0.05")
+    p.add_argument("--reaction-bonus", type=float, default=0.0,
+                   help="bonus for the correct jump/slide/turn reaction; try ~0.1 (> action-cost)")
     return p.parse_args()
 
 
@@ -86,6 +91,8 @@ def _make_one(args: argparse.Namespace, index: int):
             max_episode_steps_ceiling=args.max_episode_steps_ceiling,
             reward_scale=args.reward_scale,
             death_penalty=args.death_penalty,
+            action_cost=args.action_cost,
+            reaction_bonus=args.reaction_bonus,
         )
         return Monitor(env)
 

@@ -46,6 +46,8 @@ class TempleRunEnv(gym.Env):
         grow_episode_steps: bool = C.DEFAULT_GROW_EPISODE_STEPS,
         max_episode_steps_growth: float = C.DEFAULT_MAX_EPISODE_STEPS_GROWTH,
         max_episode_steps_ceiling: int = C.DEFAULT_MAX_EPISODE_STEPS_CEILING,
+        action_cost: float = C.DEFAULT_ACTION_COST,
+        reaction_bonus: float = C.DEFAULT_REACTION_BONUS,
         auto_connect: bool = True,
     ):
         super().__init__()
@@ -59,6 +61,15 @@ class TempleRunEnv(gym.Env):
         self.reset_settle_steps = int(reset_settle_steps)
         self.reset_timeout = float(reset_timeout)
         self.freeze_timeout = float(freeze_timeout)
+
+        # Reward shaping (both default 0.0 = off -> the documented score-delta reward).
+        # action_cost: subtracted on every non-NoOp action -> discourages thrashing / favours
+        #   doing nothing unless an action helps. reaction_bonus: added when the action matches
+        #   the obstacle/turn the policy was looking at (jump on must_jump, slide on must_slide,
+        #   a valid turn at a junction) -> dense signal for the core skill (vs the sparse die/score).
+        self.action_cost = float(action_cost)
+        self.reaction_bonus = float(reaction_bonus)
+        self._prev_state: Optional[dict] = None  # the state the last action responded to (for shaping)
 
         # Adaptive episode-length ratchet (see module docstring / constants).
         self.grow_episode_steps = bool(grow_episode_steps)
@@ -106,6 +117,7 @@ class TempleRunEnv(gym.Env):
 
         state = self._restart_and_wait()
         self._prev_score = int(state.get("score", 0))
+        self._prev_state = state
         self._elapsed_steps = 0
         _, self._last_seq = self._state.latest()
         obs = O.state_to_obs(state)
@@ -173,10 +185,12 @@ class TempleRunEnv(gym.Env):
         score = int(state.get("score", self._prev_score))
 
         reward = (score - self._prev_score) * self.reward_scale
+        reward += self._shaping_reward(a, self._prev_state)  # action cost + correct-reaction bonus
         terminated = bool(state.get("is_dead") or state.get("is_game_over"))
         if terminated:
             reward -= self.death_penalty
         self._prev_score = score
+        self._prev_state = state
 
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.max_episode_steps
@@ -194,6 +208,32 @@ class TempleRunEnv(gym.Env):
             if self._grow_episode_cap():
                 info["episode_cap_grew_to"] = self.max_episode_steps
         return obs, float(reward), terminated, truncated, info
+
+    def _shaping_reward(self, action: int, prev: Optional[dict]) -> float:
+        """Optional dense shaping (0 unless action_cost / reaction_bonus are set).
+
+        Evaluated against ``prev`` — the state the policy actually saw when it chose ``action``
+        (the obs returned by the previous step/reset), not the post-action state.
+        - action_cost: a small penalty on any non-NoOp action (favour stillness; curb thrashing).
+        - reaction_bonus: a bonus when the action matches what ``prev`` called for — JUMP on
+          must_jump, SLIDE on must_slide, or a *valid* TURN at a junction (is_turn + can_turn_*).
+        """
+        if not self.action_cost and not self.reaction_bonus:
+            return 0.0
+        r = 0.0
+        if self.action_cost and action != int(C.Action.NOOP):
+            r -= self.action_cost
+        if self.reaction_bonus and prev is not None:
+            if prev.get("must_jump") and action == int(C.Action.JUMP):
+                r += self.reaction_bonus
+            elif prev.get("must_slide") and action == int(C.Action.SLIDE):
+                r += self.reaction_bonus
+            elif prev.get("is_turn"):
+                if action == int(C.Action.TURN_LEFT) and prev.get("can_turn_left"):
+                    r += self.reaction_bonus
+                elif action == int(C.Action.TURN_RIGHT) and prev.get("can_turn_right"):
+                    r += self.reaction_bonus
+        return r
 
     def _grow_episode_cap(self) -> bool:
         """Raise the episode cap (ratchet: up only, bounded by the ceiling).

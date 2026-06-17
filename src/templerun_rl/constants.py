@@ -141,3 +141,7 @@ DEFAULT_FREEZE_TIMEOUT = 90.0
 DEFAULT_GROW_EPISODE_STEPS = False        # opt-in; keeps the fixed cap unless turned on
 DEFAULT_MAX_EPISODE_STEPS_GROWTH = 1.5    # multiply the cap by this on each pure-truncation
 DEFAULT_MAX_EPISODE_STEPS_CEILING = 6000  # hard ceiling (~10 min at 100 ms) so it can't grow forever
+
+# Reward shaping (opt-in; both 0.0 = off -> the plain score-delta reward). See env._shaping_reward.
+DEFAULT_ACTION_COST = 0.0      # penalty per non-NoOp action (curb thrashing / favour stillness); try ~0.02-0.05
+DEFAULT_REACTION_BONUS = 0.0   # bonus for the correct reaction (jump/slide/valid-turn); try ~0.1 (> action_cost)
