@@ -40,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume", default=None, help="path to a .zip model to continue training")
     p.add_argument("--checkpoint-freq", type=int, default=5_000)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-progress-bar", action="store_true",
+                   help="disable the tqdm/rich progress bar (use for background/headless runs)")
     # parallelism: one env per physical phone. Bring each device up first with
     # `setup_device.py --device-index i` (host ports offset by i*100); env i then
     # connects to device_ports(i). >1 env uses SubprocVecEnv so the ~10 Hz waits overlap.
@@ -139,7 +141,7 @@ def main() -> None:
             total_timesteps=args.timesteps,
             callback=checkpoint,
             reset_num_timesteps=not args.resume,
-            progress_bar=True,
+            progress_bar=not args.no_progress_bar,
         )
     except KeyboardInterrupt:
         print("\nInterrupted — saving final model.")

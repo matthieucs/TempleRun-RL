@@ -142,6 +142,18 @@ Maxed to: Vacuum/Invincibility/CoinBonus/Boost = 8, CoinValue = 5. (0/1/2 are co
   (`SecurityException: INJECT_EVENTS`) unless "Install via USB" / "USB debugging (Security settings)"
   are enabled (needs Mi-account sign-in). **Workarounds:** install the merged APK by tapping it in the
   Files app; **never needs `adb input`** because actions are in-process Frida calls (this is the whole point).
+- **Screen sleep freezes everything → crashes training.** When the phone's display sleeps, Unity
+  pauses (`onApplicationPause`) → `GameController.Update` stops ticking → the state stream stops
+  broadcasting. The env's next `step()` times out on its ~3 s frame-wait and the `SubprocVecEnv` worker
+  dies, taking the whole run down (`EOFError` in the parent). Worse, HyperOS may then **kill+relaunch**
+  the app, which drops the injected JS agent (the embedded gadget reloads on 27042 but our
+  `temple_run_hook.js` is gone) — recover by re-running `setup_device.py` for that device.
+  **Fix (now automatic in `setup_device.py`, `keep_awake()`):** `svc power stayon true` works on
+  permissive ROMs (older MIUI/Android 9) but **silently no-ops on strict HyperOS**, which also denies the
+  secure `stay_on_while_plugged_in` write (`WRITE_SECURE_SETTINGS` revoked from shell). The path that
+  actually sticks there: `appops set com.android.shell android:write_settings allow` then
+  `settings put system screen_off_timeout 2147483647` (~25 days). `adb input keyevent WAKEUP` is blocked
+  (INJECT_EVENTS), so an already-asleep screen needs a physical tap; the timeout fix prevents recurrence.
 - **Actions need ONE persistent socket to 9998.** Per-action connect/close races the reader on close —
   only the first byte arrives. The server accept loop must be `async while(true){ await accept() }`
   (the recursive-accept pattern wedged after the first connection).

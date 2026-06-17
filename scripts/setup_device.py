@@ -51,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--script", default=str(DEFAULT_SCRIPT), help="Frida agent JS to inject")
     p.add_argument("--python", default=sys.executable, help="python used to run gadget_inject.py")
     p.add_argument("--no-inject", action="store_true", help="only set up adb forwards, do not inject")
+    p.add_argument("--no-stay-awake", action="store_true",
+                   help="skip the keep-screen-awake tweaks (screen sleep pauses Unity -> the state stream freezes)")
     return p.parse_args()
 
 
@@ -76,6 +78,30 @@ def check_device(args: argparse.Namespace) -> None:
     if not args.serial and len(devices) > 1:
         sys.exit(f"Multiple devices ({devices}); pass --serial / set $ANDROID_SERIAL "
                  "(and a distinct --device-index per device).")
+
+
+def keep_awake(args: argparse.Namespace) -> None:
+    """Stop the screen from sleeping: sleep pauses Unity, which freezes the state stream
+    and crashes the env on its next step (the ~3 s frame-wait times out).
+
+    Belt-and-suspenders because ROMs differ:
+      * ``svc power stayon true`` works on permissive ROMs (e.g. older MIUI / Android 9);
+      * strict MIUI/HyperOS silently no-ops that AND denies the secure
+        ``stay_on_while_plugged_in`` write, so we also grant the WRITE_SETTINGS appop to
+        shell and push ``screen_off_timeout`` to ~25 days (the path that actually sticks).
+    All best-effort; failures on one rung are expected and ignored.
+    """
+    base = adb_base(args)
+    for cmd in (
+        ["shell", "svc", "power", "stayon", "true"],
+        ["shell", "appops", "set", "com.android.shell", "android:write_settings", "allow"],
+        ["shell", "settings", "put", "system", "screen_off_timeout", "2147483647"],
+    ):
+        subprocess.run(base + cmd, capture_output=True, text=True)
+    got = subprocess.run(base + ["shell", "settings", "get", "system", "screen_off_timeout"],
+                         capture_output=True, text=True).stdout.strip()
+    note = "ok (~never)" if got == "2147483647" else f"still {got} ms -- enable Developer options > 'Stay awake' manually"
+    print(f"keep-awake: screen_off_timeout = {got} [{note}]")
 
 
 def forward(args: argparse.Namespace) -> None:
