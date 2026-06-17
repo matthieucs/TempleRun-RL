@@ -231,14 +231,35 @@ alone leaves the run in limbo), plus SB3 PPO `scripts/train.py` / `scripts/evalu
 fresh resets). See `README.md`.
 
 Possible next steps: robust reset that suppresses the occasional interstitial ad in `EndGameUI`;
-richer observation (one-hot enums, a `valid` flag for the -1 sentinels); reward shaping.
+richer observation (one-hot enums, a `valid` flag for the -1 sentinels); off-policy algo (DQN/QR-DQN)
+or frame-stacking for sample efficiency; investigate device-0 (HyperOS) crashing under training load.
+
+### Multi-phone training + resume (current operational setup)
+- **Two phones** (USB serials — same on any host): `nzqwrkbyfeey89fa` (Redmi Note 11, HyperOS/Android 14,
+  device-index 0) and `3f80a3a` (Redmi Note 7, Android 9, device-index 1). Host ports per device =
+  base + index*100 (`device_ports(i)`): dev0 = 27042/9999/9998, dev1 = 27142/10099/10098.
+- **Bring up + train (each line its own terminal; leave running):**
+  ```bash
+  python scripts/setup_device.py --serial nzqwrkbyfeey89fa --device-index 0
+  python scripts/setup_device.py --serial 3f80a3a          --device-index 1
+  python scripts/watchdog.py --serials nzqwrkbyfeey89fa,3f80a3a     # self-heal crashes/sleep
+  python scripts/train.py --resume runs/ppo_templerun_final.zip --num-envs 2 \
+    --grow-episode-steps --no-progress-bar --checkpoint-freq 1000 \
+    --action-cost 0.03 --reaction-bonus 0.1                          # shaping: curb thrashing + reward correct reactions
+  ```
+- **Weights/logs live in `runs/` and are git-ignored** — copy that folder between machines to keep/resume a
+  model (`ppo_templerun_final.zip` is written on every exit incl. crashes). A clone has no weights until you do.
+- **CPU + phone-I/O bound** (GPU unused — torch is CPU-only here); a low-power host is fine. The phones are
+  the throughput ceiling (~10 Hz each).
+- Last known good: ~20–26k steps, `ep_len_mean` ~40–50 and rising, `ep_rew_mean` ~8–9 (pre-shaping).
 
 ---
 
 ## 9. The RL environment (`TempleRun-v0`)
 
 `src/templerun_rl/` wraps the two sockets as a Gymnasium env (`gym.make("TempleRun-v0")`). **One physical
-phone = one env**, real-time ~10 Hz, no simulator, no parallelism. Defaults live in `constants.py`;
+phone = one env**, real-time ~10 Hz, no simulator. Parallelism = more phones (`--num-envs N` →
+`SubprocVecEnv`, see §8). Defaults live in `constants.py`;
 encoding in `obs.py`; the env in `env.py`.
 
 ### Observation — `Box(0.0, 1.0, (21,), float32)`
