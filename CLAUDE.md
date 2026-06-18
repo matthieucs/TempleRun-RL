@@ -307,9 +307,14 @@ Train PPO in the sim (`scripts/train_sim.py`, CPU, minutes), deploy the `.zip` o
 multiplier-inflated). The sim is essentially SOLVED (a good policy hits 100% turns / 10,000m on a
 normal-window config) — so the on-device shortfall is **sim-to-real fidelity**, not net capacity.
 
-**Deployment model: `runs/ppo_best.zip` (= linger2)** — MLP [128,128], action-history K=4, trained with
-turn-linger + DR + zones. Each model has a sidecar `<name>.json` (frame_stack, K, arch) so
-`scripts/eval_real.py <model>` auto-configures the obs. **Eval with `--turn-cooldown 3`** (default).
+**Deployment model: `runs/ppo_best.zip` (= lingerclean)** — MLP [128,128], action-history K=4, trained
+with turn-linger + DR + zones + strafe-dock. Each model has a sidecar `<name>.json` (frame_stack, K,
+arch) so `scripts/eval_real.py <model>` auto-configures the obs. **Eval with `--turn-cooldown 3`**.
+On device nzqwrkbyfeey89fa (2026-06-19): **median 607, best 1610m, 8/8 stable, NO strafe / double-turn /
+double-jump**. Remaining deaths = late-first-turns at the window edge.
+NOTE: turn-linger (harder task) + ent_coef 0.04 let the **strafe-spam back through** (linger2 strafed
+SL:17-43/run, which breaks turns off-center). FIX: dock STRAFE via `idle_action_penalty` (strafe is never
+needed) in `reward.py`/`env.py`; retrain `--idle-action-penalty 0.08` → strafe 0%, per-turn held ~99.3%.
 
 ### What MOVED the on-device number (best real run 393 → 1258+ native, 1643 with cooldown)
 1. **The double-turn was THE dominant on-device turn-death.** On the phone `is_turn` stays True ~2

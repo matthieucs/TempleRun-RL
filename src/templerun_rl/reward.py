@@ -82,4 +82,9 @@ def shaping_reward(
         elif (action == int(C.Action.SLIDE)
                 and prev.get("must_slide") and not prev.get("next_must_slide")):
             r -= redundant_action_penalty
+    # STRAFE is never "needed" in this model (no strafe-required obstacle modelled) and strafing
+    # off-center BREAKS turns on the phone -> dock it like an idle action (always). Curbs the strafe
+    # spam that high ent_coef + a harder task (turn-linger) lets back through.
+    if idle_action_penalty and action in (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT)):
+        r -= idle_action_penalty
     return r

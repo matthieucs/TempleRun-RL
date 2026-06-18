@@ -363,6 +363,9 @@ class TempleRunEnv(gym.Env):
             elif (action == int(C.Action.SLIDE)
                     and prev.get("must_slide") and not prev.get("next_must_slide")):
                 r -= self.redundant_action_penalty
+        # strafe is never needed in the model (and breaks turns off-center) -> dock it like an idle action
+        if self.idle_action_penalty and action in (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT)):
+            r -= self.idle_action_penalty
         return r
 
     def _grow_episode_cap(self) -> bool:
