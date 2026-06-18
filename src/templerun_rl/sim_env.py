@@ -50,15 +50,28 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "max_velocity": 210.0,            # [KNOWN] MRV (CharacterPlayer.MaxRunVelocity)
     "accel_per_sec": 6.0,             # [INFERRED] linear approx of the AccCurve (units/s); ~+0.6/100ms
     "stumble_slowdown": 0.85,         # [KNOWN] StumbleSlowDown — velocity *= this on a stumble
-    # --- B. Track generation (PathElement statics; names [KNOWN], values [INFERRED]) -------
-    "min_space_between_obstacles": 3,   # [INFERRED] sMinSpaceBetweenObstacles@0x34 (cells)
-    "min_space_between_turns": 6,       # [INFERRED] sMinSpaceBetweenTurns@0x2C (cells)
-    "min_spaces_between_bonus": 8,      # [INFERRED] sMinSpacesBetweenBonusItems@0x18
-    "obstacle_prob": 0.45,             # [INFERRED] chance a non-gated cell carries an obstacle
-    "double_obstacle_percent": 0.10,    # [INFERRED] sDoubleObstaclePercent@0x38 (back-to-back)
-    "max_back_to_back_obstacles": 2,    # [INFERRED] sMaxBackToBackObstacles@0x30
-    "turn_prob": 0.18,                 # [INFERRED] chance a turn-eligible cell becomes a junction
-    "default_path_level": 2,           # [KNOWN] default piece level = 2 (Temple)
+    # --- B. Track generation (PathElement statics) — values READ off the device (Frida, baseline
+    # Temple/level-2 section; the game ramps these by distance via section/level changes). -------
+    "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
+    "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
+    "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
+    "obstacle_prob": 0.45,             # [INFERRED] chance a non-gated cell carries an obstacle (real gen is deterministic+variation; approx)
+    "double_obstacle_percent": 0.0,     # [READ] sDoubleObstaclePercent (no doubles in the baseline section)
+    "max_back_to_back_obstacles": 2,    # [READ] sMaxBackToBackObstacles
+    "turn_prob": 0.18,                 # [INFERRED] chance a turn-eligible cell becomes a junction (early game)
+    # Difficulty RAMP: the real game densifies turns with distance (measured turns/1k: ~8.5 at the
+    # start -> ~21 by distance 5-6k). difficulty = clip((distance-start)/ramp_distance, 0, 1) lerps
+    # the turn spacing down + turn prob up; slides only switch on past slides_after_distance (the
+    # baseline statics have sAllowTreeSlide/FlameTowers = False -> no slides early).
+    "ramp_distance": 6000.0,           # [CALIBRATED] distance over which difficulty goes 0 -> 1
+    "min_space_between_turns_late": 7, # [CALIBRATED] turn spacing at full difficulty (cells)
+    "turn_prob_late": 0.5,             # [CALIBRATED] turn probability at full difficulty
+    "slides_after_distance": 300.0,    # [CALIBRATED] TreeSlide/FlameTower obstacles only past this distance
+    "default_path_level": 2,           # [READ] sPathLevel = 2 (Temple)
+    # Powerup spawn probabilities are all 0 in the baseline read (sProbabilityBoost/Invincibility/
+    # Vacuum/CoinBonus = 0) — why human runs saw 0 boost frames; the sim models no powerups (v1).
+    "min_spaces_between_coin_runs": 12, # [READ] sMinSpacesBetweenCoinRuns
+    "max_coins_per_run": 5,            # [READ] sMaxCoinsPerRun
     # obstacle-type mix among the "real" obstacles (must sum to ~1; calibrated later).
     # Keys are ObstacleType enum values (SPEC §2): 1 Hole, 2 Narrow, 3 TreeStumble,
     # 4 TreeJump, 5 TreeSlide, 6 FlameTower. (0 None, 7 LevelChange handled separately.)
@@ -80,13 +93,26 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "score_per_distance": 2.7,         # [INFERRED] score units per distance unit (dist = vel*dt)
     "start_score": 162,                # [KNOWN-ish] reset frame score ~162 (CLAUDE.md §9)
     "coin_score": 50,                  # [INFERRED] score bump when a coin/bonus cell is consumed
+    # The reward keys on DISTANCE (DistanceTraveled), which advances ~0.107 per (velocity*dt) of
+    # model distance in real units (real dist-rate/velocity ~0.10-0.116; vel 100 -> ~1.16/10Hz-step).
+    # The sim emits a real-scale "distance" so its distance-delta reward matches the phone's units.
+    "dist_per_velsec": 0.107,          # [CALIBRATED] real DistanceTraveled per (velocity*dt) model unit
+    "start_distance": 5.3,             # [CALIBRATED] DistanceTraveled at run start (reset-frame offset)
     # --- D. Action timings (seconds; durations of the transient flags) -------
     "jump_duration": 0.6,             # [INFERRED] airtime — IsJumping true for this long
     "slide_duration": 0.6,            # [INFERRED] SlideDuration@0x108
     "strafe_duration": 0.25,          # [INFERRED] strafe lane-shift dur@0x12C
     "stumble_duration": 0.5,          # [INFERRED] StumbleDuration; unrecovered -> death window
     # --- E. Geometry ---------------------------------------------------------
-    "cell_length": 60.0,              # [KNOWN GridZ=60; calibrate exactly from real traces] world distance between adjacent PathElements
+    "cell_length": 60.0,              # PROCEDURAL mode: cells crossed per (velocity*dt) of model distance
+    # REPLAY mode crosses cells off the RECORDED hidden.distance (decoupled from the velocity
+    # model so path_type tests cell-length alone). Calibrated from real traces: the cell-to-cell
+    # gap in hidden.distance units is ~6.7 (median over 24 crossings, 3 episodes); the Temple
+    # start-piece is partial, so the player begins ~3.2 into the first cell (first crossing after
+    # ~3.5 distance, then every cell_length_real).
+    "cell_length_real": 6.4,          # [CALIBRATED] hidden.distance units between adjacent PathElements
+                                      # (8 body cells span distance 8.64->59.69 in ep0 => 6.38/cell)
+    "replay_start_into_cell": 3.2,    # [CALIBRATED] dist_into_cell at run start (Temple is partial)
     "lookahead": 12,                  # cells of track kept ahead of the player (>= SIM_CONTRACT K>=8)
 }
 
@@ -139,6 +165,7 @@ class TempleRunSimEnv(gym.Env):
         step_dt: float = C.DEFAULT_STEP_DT,
         max_episode_steps: int = C.DEFAULT_MAX_EPISODE_STEPS,
         reward_scale: float = C.DEFAULT_REWARD_SCALE,
+        reward_mode: str = C.DEFAULT_REWARD_MODE,
         death_penalty: float = C.DEFAULT_DEATH_PENALTY,
         # same shaping knobs as the real env so training transfers (see reward.py):
         action_cost: float = C.DEFAULT_ACTION_COST,
@@ -166,6 +193,7 @@ class TempleRunSimEnv(gym.Env):
         self.step_dt = float(step_dt)
         self.max_episode_steps = int(max_episode_steps)
         self.reward_scale = float(reward_scale)
+        self.reward_mode = str(reward_mode)
         self.death_penalty = float(death_penalty)
         self.action_cost = float(action_cost)
         self.reaction_bonus = float(reaction_bonus)
@@ -184,6 +212,7 @@ class TempleRunSimEnv(gym.Env):
 
         # episode/bookkeeping state (set up in reset())
         self._prev_score = 0
+        self._prev_distance = 0.0
         self._prev_state: Optional[dict] = None
         self._last_action: Optional[int] = None
         self._elapsed_steps = 0
@@ -209,6 +238,8 @@ class TempleRunSimEnv(gym.Env):
         self._facing = DIR_N
         self._lane = 0                       # -1 L, 0 C, +1 R (3 lanes; SPEC §3)
         self._distance = 0.0
+        self._distance_real = float(self.cfg["start_distance"])  # real-scale DistanceTraveled (reward signal)
+        self._last_ext_distance = 0.0        # replay: last recorded hidden.distance (cell-crossing anchor)
         self._dist_into_cell = 0.0           # how far the player is into the current cell
         self._cell_index = 0                 # index of the cell the player is on (in self._track)
         self._is_dead = False
@@ -220,9 +251,12 @@ class TempleRunSimEnv(gym.Env):
         self._stumble_t = 0.0
         self._ground_height = 0.0
         self._score = float(self.cfg["start_score"])
-        self._cells_since_obstacle = self.cfg["min_space_between_obstacles"]
-        self._cells_since_turn = self.cfg["min_space_between_turns"]
-        self._cells_since_bonus = self.cfg["min_spaces_between_bonus"]
+        # Start the spacing counters at 0 (NOT the minimum): the real run has a straight intro
+        # (first turn @ ~12 cells = sMinSpaceBetweenTurns, first obstacle @ ~6-29 cells), so a cell
+        # only becomes turn/obstacle-eligible after that many cells from the start.
+        self._cells_since_obstacle = 0
+        self._cells_since_turn = 0
+        self._cells_since_bonus = 0
         self._b2b_obstacles = 0
         # replay cursor (which injected element feeds the next generated cell)
         self._replay_cursor = 0
@@ -257,6 +291,12 @@ class TempleRunSimEnv(gym.Env):
         # ran out of recorded track: feed neutral straight cells (the episode usually ended).
         return _element(type=self.cfg["path_type_straight"], level=self.cfg["default_path_level"])
 
+    def _difficulty(self) -> float:
+        """0 at run start, 1 by ``ramp_distance`` — drives the turn-density ramp (real game
+        densifies turns ~8.5/1k -> ~21/1k over distance 0 -> 6k)."""
+        d = self._distance_real - float(self.cfg["start_distance"])
+        return float(np.clip(d / max(1.0, float(self.cfg["ramp_distance"])), 0.0, 1.0))
+
     def _next_cell_procedural(self) -> dict:
         cfg = self.cfg
         level = int(cfg["default_path_level"])
@@ -264,13 +304,20 @@ class TempleRunSimEnv(gym.Env):
         self._cells_since_turn += 1
         self._cells_since_bonus += 1
 
+        # Difficulty-ramped turn spacing/probability (lerp baseline -> late by distance).
+        diff = self._difficulty()
+        min_turns = (float(cfg["min_space_between_turns"]) * (1.0 - diff)
+                     + float(cfg["min_space_between_turns_late"]) * diff)
+        turn_p = (float(cfg["turn_prob"]) * (1.0 - diff)
+                  + float(cfg["turn_prob_late"]) * diff)
+
         # --- junction / turn decision (gated by min_space_between_turns) -----
         is_turn = False
         can_l = False
         can_r = False
         ptype = int(cfg["path_type_straight"])
-        if self._cells_since_turn >= int(cfg["min_space_between_turns"]):
-            if self._rng.random() < float(cfg["turn_prob"]):
+        if self._cells_since_turn >= min_turns:
+            if self._rng.random() < turn_p:
                 is_turn = True
                 self._cells_since_turn = 0
                 roll = self._rng.random()
@@ -312,7 +359,11 @@ class TempleRunSimEnv(gym.Env):
                         can_turn_left=can_l, can_turn_right=can_r, is_coin=is_coin)
 
     def _sample_obstacle_type(self) -> int:
-        weights = self.cfg["obstacle_type_weights"]
+        weights = dict(self.cfg["obstacle_type_weights"])
+        # Slides (TreeSlide=5, FlameTower=6) only appear past slides_after_distance — the baseline
+        # statics have sAllowTreeSlide/FlameTowers = False, so early runs are jump/stumble only.
+        if self._distance_real < float(self.cfg["slides_after_distance"]):
+            weights = {t: w for t, w in weights.items() if t not in (5, 6)}
         types = list(weights.keys())
         probs = np.array([weights[t] for t in types], dtype=float)
         probs = probs / probs.sum()
@@ -328,13 +379,14 @@ class TempleRunSimEnv(gym.Env):
         self._last_action = None
         state = self._snapshot()
         self._prev_score = int(state["score"])
+        self._prev_distance = float(state["distance"])
         self._prev_state = state
         obs = O.state_to_obs(state)
-        info = {"raw_state": state, "score": self._prev_score}
+        info = {"raw_state": state, "score": self._prev_score, "distance": self._prev_distance}
         return obs, info
 
     # -------------------------------------------------------------- gym: step
-    def step(self, action: int):
+    def step(self, action: int, ext_distance: Optional[float] = None):
         a = int(action)
         if a >= C.N_ACTIONS:
             raise ValueError(
@@ -343,12 +395,17 @@ class TempleRunSimEnv(gym.Env):
 
         if not self._is_dead:
             self._apply_action(a)
-            self._advance(self.step_dt)
+            self._advance(self.step_dt, ext_distance=ext_distance)
 
         state = self._snapshot()
         score = int(state["score"])
+        distance = float(state["distance"])
 
-        reward = (score - self._prev_score) * self.reward_scale
+        # Reward on distance (true objective) or legacy score — mirror the real env (see constants).
+        if self.reward_mode == "distance":
+            reward = max(0.0, distance - self._prev_distance) * self.reward_scale
+        else:
+            reward = (score - self._prev_score) * self.reward_scale
         reward += R.shaping_reward(
             a, self._prev_state, self._last_action,
             action_cost=self.action_cost, reaction_bonus=self.reaction_bonus,
@@ -359,6 +416,7 @@ class TempleRunSimEnv(gym.Env):
             reward -= self.death_penalty
 
         self._prev_score = score
+        self._prev_distance = distance
         self._prev_state = state
         self._last_action = a
         self._elapsed_steps += 1
@@ -368,6 +426,7 @@ class TempleRunSimEnv(gym.Env):
         info = {
             "raw_state": state,
             "score": score,
+            "distance": distance,
             "elapsed_steps": self._elapsed_steps,
             "max_episode_steps": self.max_episode_steps,
             "death_type": self._death_type,
@@ -416,8 +475,14 @@ class TempleRunSimEnv(gym.Env):
             self._kill(1)
 
     # --------------------------------------------------------- physics tick
-    def _advance(self, dt: float) -> None:
-        """Advance velocity, transient timers, distance, cell crossings + scoring for ``dt``."""
+    def _advance(self, dt: float, ext_distance: Optional[float] = None) -> None:
+        """Advance velocity, transient timers, distance, cell crossings + scoring for ``dt``.
+
+        ``ext_distance`` (replay only) is the real ``hidden.distance`` for this step. When given,
+        cell crossings are driven off the recorded distance delta (units = ``cell_length_real``),
+        decoupling path_type from the velocity model — the velocity/score fields still evolve via
+        the model so their own tiers stay meaningful. ``None`` = procedural: cross on velocity*dt.
+        """
         cfg = self.cfg
         # velocity accel toward max (SPEC §3: 100 -> 210).
         self._velocity = min(float(cfg["max_velocity"]),
@@ -433,11 +498,23 @@ class TempleRunSimEnv(gym.Env):
         # distance covered this tick, scored ~ velocity*dt (SPEC §5).
         moved = self._velocity * dt
         self._distance += moved
-        self._dist_into_cell += moved
         self._score += moved * float(cfg["score_per_distance"])
 
+        # cell-crossing accumulator: recorded distance (replay) or model distance (procedural).
+        # Also advance the real-scale DistanceTraveled (reward signal): in replay echo the recorded
+        # value; in procedural integrate velocity at the calibrated real-distance rate.
+        if ext_distance is not None:
+            moved_cells = max(0.0, float(ext_distance) - self._last_ext_distance)
+            self._last_ext_distance = float(ext_distance)
+            self._distance_real = float(ext_distance)
+            cell_len = float(cfg["cell_length_real"])
+        else:
+            moved_cells = moved
+            self._distance_real += self._velocity * dt * float(cfg["dist_per_velsec"])
+            cell_len = float(cfg["cell_length"])
+        self._dist_into_cell += moved_cells
+
         # cross as many cell boundaries as we covered (usually 0-1 at 10 Hz).
-        cell_len = float(cfg["cell_length"])
         guard = 0
         while self._dist_into_cell >= cell_len and not self._is_dead:
             guard += 1
@@ -531,6 +608,7 @@ class TempleRunSimEnv(gym.Env):
             "can_turn_left": bool(can_l),
             "can_turn_right": bool(can_r),
             "is_turn": bool(is_turn),
+            "distance": float(self._distance_real),
         }
         return state
 
@@ -558,6 +636,7 @@ class TempleRunSimEnv(gym.Env):
         lane = hidden.get("lane")
         self._lane = int(lane) if lane is not None else 0
         self._distance = float(hidden.get("distance") or 0.0)
+        self._distance_real = float(hidden.get("distance") or self.cfg["start_distance"])
         self._ground_height = float(hidden.get("ground_height") or 0.0)
 
         # Reconstruct transient timers: prefer the recorded remainders, else derive a full
@@ -583,11 +662,18 @@ class TempleRunSimEnv(gym.Env):
         )
         # rebuild the track window with this cell as the current one.
         if self.track_source == "replay":
-            # keep consuming the injected track from the top; current cell is the seeded one.
-            self._replay_cursor = 0
+            # The seeded current cell IS injected element 0 (the recorded nearest cell == the
+            # front of the recorded track window). So the NEXT injected cell to consume is
+            # index 1 -- starting the cursor at 0 duplicates element 0 (observed: the Temple
+            # start-piece (type 37) appeared twice, holding path_type=37 for ~11 steps instead
+            # of the real ~4).
+            self._replay_cursor = 1
             self._track = [cell]
             self._cell_index = 0
-            self._dist_into_cell = 0.0
+            # Anchor cell-crossing to the recorded distance: the player starts partway into the
+            # (partial) Temple start-piece, so seed dist_into_cell from the calibrated offset.
+            self._last_ext_distance = float(self._distance)
+            self._dist_into_cell = float(self.cfg["replay_start_into_cell"])
             self._extend_track()
         else:
             self._track = [cell]

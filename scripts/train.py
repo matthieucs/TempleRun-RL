@@ -58,7 +58,11 @@ def parse_args() -> argparse.Namespace:
                    help="multiply the cap by this on each pure-truncation (with --grow-episode-steps)")
     p.add_argument("--max-episode-steps-ceiling", type=int, default=6000,
                    help="hard upper bound the growing cap can never exceed (~10 min at 0.1 s/step)")
-    p.add_argument("--reward-scale", type=float, default=0.01)
+    p.add_argument("--reward-mode", choices=("distance", "score"), default="distance",
+                   help="reward signal: 'distance' (DistanceTraveled-delta, the true objective; immune "
+                        "to the challenge score-multiplier) or 'score' (legacy, multiplier-inflated)")
+    p.add_argument("--reward-scale", type=float, default=0.1,
+                   help="reward = reward-delta * scale; 0.1 suits distance (~1-2/step), use 0.01 for score")
     p.add_argument("--death-penalty", type=float, default=1.0)
     # reward shaping (opt-in) — speeds learning / curbs early thrashing; see env._shaping_reward
     p.add_argument("--action-cost", type=float, default=0.0,
@@ -96,6 +100,7 @@ def _make_one(args: argparse.Namespace, index: int):
             max_episode_steps_growth=args.max_episode_steps_growth,
             max_episode_steps_ceiling=args.max_episode_steps_ceiling,
             reward_scale=args.reward_scale,
+            reward_mode=args.reward_mode,
             death_penalty=args.death_penalty,
             action_cost=args.action_cost,
             reaction_bonus=args.reaction_bonus,

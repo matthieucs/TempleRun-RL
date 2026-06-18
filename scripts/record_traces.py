@@ -280,15 +280,22 @@ class Recorder:
         _, seq = self.chan.latest()
         last_started = None
         consecutive = 0
-        # nudge into a run; re-send across the wait because a relaunched app lands on the menu
-        for a in C.RESET_ACTIONS:
-            self.actions.try_send(int(a))
+        # Nudge into a run with a COOLDOWN between presses. Pressing every frame spams
+        # OnPlayClicked (byte 9), which RESTARTS the menu->run transition each tick so a run
+        # never settles (observed: dispatches at ticks 1,2,3,... -> 0 steps). The working
+        # env.reset sends the bytes once then waits a full window before re-sending; we do the
+        # same here, re-pressing at most every NUDGE_INTERVAL s. The first press fires; once a
+        # run starts the gadget-side gate skips later presses, so the run proceeds uninterrupted.
+        NUDGE_INTERVAL = 1.5
+        last_nudge = -1e9
         while time.monotonic() < deadline:
-            frame, seq = self._wait_fresh(seq, timeout=min(self.stall_timeout, self.reset_timeout))
-            if frame is None:
-                # stalled: re-nudge and keep waiting within the reset budget
+            now = time.monotonic()
+            if now - last_nudge >= NUDGE_INTERVAL:
                 for a in C.RESET_ACTIONS:
                     self.actions.try_send(int(a))
+                last_nudge = now
+            frame, seq = self._wait_fresh(seq, timeout=min(0.5, max(0.01, deadline - now)))
+            if frame is None:
                 continue
             st = frame.get("state", {})
             if run_started(st):
@@ -298,9 +305,6 @@ class Recorder:
                     return last_started
             else:
                 consecutive = 0
-                # if we've drifted back to a non-gameplay screen, re-nudge
-                for a in C.RESET_ACTIONS:
-                    self.actions.try_send(int(a))
         if last_started is not None:
             return last_started
         raise TimeoutError("no fresh run within reset_timeout")

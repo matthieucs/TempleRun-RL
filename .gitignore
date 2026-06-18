@@ -35,3 +35,6 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# recorded phone traces (data; can be large)
+traces/

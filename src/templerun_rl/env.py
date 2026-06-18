@@ -38,6 +38,7 @@ class TempleRunEnv(gym.Env):
         step_dt: float = C.DEFAULT_STEP_DT,
         max_episode_steps: int = C.DEFAULT_MAX_EPISODE_STEPS,
         reward_scale: float = C.DEFAULT_REWARD_SCALE,
+        reward_mode: str = C.DEFAULT_REWARD_MODE,
         death_penalty: float = C.DEFAULT_DEATH_PENALTY,
         reset_settle_steps: int = C.DEFAULT_RESET_SETTLE_STEPS,
         reset_timeout: float = C.DEFAULT_RESET_TIMEOUT,
@@ -61,6 +62,9 @@ class TempleRunEnv(gym.Env):
         self.step_dt = float(step_dt)
         self.max_episode_steps = int(max_episode_steps)
         self.reward_scale = float(reward_scale)
+        # "distance": reward = DistanceTraveled-delta (the true objective; immune to the score
+        # multiplier). "score": legacy score-delta (multiplier-inflated). See constants.
+        self.reward_mode = str(reward_mode)
         self.death_penalty = float(death_penalty)
         self.reset_settle_steps = int(reset_settle_steps)
         self.reset_timeout = float(reset_timeout)
@@ -98,6 +102,7 @@ class TempleRunEnv(gym.Env):
         self._connected = False
 
         self._prev_score = 0
+        self._prev_distance = 0.0
         self._elapsed_steps = 0
         self._last_seq = 0
 
@@ -144,6 +149,7 @@ class TempleRunEnv(gym.Env):
             self._degraded = True
             state = self._prev_state or {}
         self._prev_score = int(state.get("score", 0))
+        self._prev_distance = float(state.get("distance", 0.0) or 0.0)
         self._prev_state = state
         self._last_action = None
         self._elapsed_steps = 0
@@ -228,13 +234,22 @@ class TempleRunEnv(gym.Env):
         if self._degraded and self._run_started(state):
             self._degraded = False  # phone recovered mid-episode -> rejoin normally
         score = int(state.get("score", self._prev_score))
+        distance = float(state.get("distance", self._prev_distance) or 0.0)
 
-        reward = (score - self._prev_score) * self.reward_scale
+        # Reward on DISTANCE (the true objective) not score: score is inflated by the challenge
+        # multiplier (score/dist ramps ~23 -> ~170 over a run), so score-delta over-rewards late
+        # game and decouples from "how far did it run". distance is monotonic within a run, so a
+        # negative delta is a glitch / new-run frame -> clamp to 0.
+        if self.reward_mode == "distance":
+            reward = max(0.0, distance - self._prev_distance) * self.reward_scale
+        else:
+            reward = (score - self._prev_score) * self.reward_scale
         reward += self._shaping_reward(a, self._prev_state)  # action cost + correct-reaction bonus
         terminated = bool(state.get("is_dead") or state.get("is_game_over"))
         if terminated:
             reward -= self.death_penalty
         self._prev_score = score
+        self._prev_distance = distance
         self._prev_state = state
         self._last_action = a
 
@@ -245,6 +260,7 @@ class TempleRunEnv(gym.Env):
         info = {
             "raw_state": state,
             "score": score,
+            "distance": distance,
             "elapsed_steps": self._elapsed_steps,
             "max_episode_steps": self.max_episode_steps,
         }
@@ -329,6 +345,7 @@ class TempleRunEnv(gym.Env):
             self._degraded = False                   # recovered -> end neutral episode, rejoin
             self._prev_state = state
             self._prev_score = int(state.get("score", 0))
+            self._prev_distance = float(state.get("distance", 0.0) or 0.0)
             self._last_seq = seq
             return (O.state_to_obs(state), 0.0, True, False,
                     {"raw_state": state, "score": self._prev_score, "elapsed_steps": self._elapsed_steps,

@@ -90,6 +90,7 @@ STATE_FIELDS = (
     "can_turn_left",
     "can_turn_right",
     "is_turn",
+    "distance",   # GameController.DistanceTraveled — clean run distance (no score multiplier); reward signal, excluded from obs
 )
 
 # The 17 boolean flags (everything except score/velocity/path_type/path_level/facing).
@@ -113,17 +114,23 @@ BOOL_FIELDS = (
     "is_turn",
 )
 INT_FIELDS = ("score", "path_type", "path_level", "facing")
-FLOAT_FIELDS = ("velocity",)
+FLOAT_FIELDS = ("velocity", "distance")
 
 # Default values used when a field is missing from a (possibly truncated) JSON line.
 STATE_DEFAULTS = {f: False for f in BOOL_FIELDS}
-STATE_DEFAULTS.update({"score": 0, "path_type": -1, "path_level": -1, "facing": -1, "velocity": 0.0})
+STATE_DEFAULTS.update({"score": 0, "path_type": -1, "path_level": -1, "facing": -1,
+                       "velocity": 0.0, "distance": 0.0})
 
 
 # --- Environment defaults ----------------------------------------------------
 DEFAULT_STEP_DT = 0.1            # seconds between control ticks (~10 Hz, matches the 100 ms broadcast)
 DEFAULT_MAX_EPISODE_STEPS = 1000
-DEFAULT_REWARD_SCALE = 0.01     # score-delta -> reward scale (keeps typical step reward ~O(0.1-1))
+# Reward is keyed on DISTANCE, not score: score is inflated by the challenge MULTIPLIER (score/dist
+# ramps ~23 -> ~170 over a long run) so it's a non-stationary, distance-decoupled signal. The goal is
+# max distance, so reward = distance-delta. distance advances ~1.0-2.1 per 10 Hz step; scale 0.1 keeps
+# the typical step reward ~O(0.1-0.2), comparable to the old score-delta reward.
+DEFAULT_REWARD_MODE = "distance"   # "distance" (DistanceTraveled-delta) | "score" (legacy score-delta)
+DEFAULT_REWARD_SCALE = 0.1      # reward = reward-delta * scale
 DEFAULT_DEATH_PENALTY = 1.0     # subtracted on the terminal (death / game-over) step
 DEFAULT_RESET_SETTLE_STEPS = 3  # consecutive "alive" frames required before reset() returns
 DEFAULT_RESET_TIMEOUT = 5.0     # seconds to wait for a fresh run after RestartGame

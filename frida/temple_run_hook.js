@@ -40,6 +40,7 @@ const OFF = {
   // GameController
   TutorialID: 0x48, GamePlayer: 0x70, IsGameOver: 0xDE,
   IsTutorialMode: 0x104, NearestElement: 0x88, RecordManager: 0xB0,
+  DistanceTraveled: 0x124, // GameController.DistanceTraveled (float) — clean distance, no score multiplier
   // PathElement
   PE_Type: 0x30, PE_Level: 0x34, PE_Obstacles: 0x38,
 };
@@ -296,10 +297,13 @@ function snapshot() {
     score: 0, velocity: 0.0, path_type: -1, path_level: -1, facing: -1,
     must_jump: false, must_slide: false, is_game_over: false,
     can_turn_left: false, can_turn_right: false, is_turn: false,
+    distance: 0.0,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
 
   s.is_game_over = readBool(gcInstance, OFF.IsGameOver);
+  // DistanceTraveled is the real run distance (no challenge multiplier) -> the reward signal.
+  s.distance = readF32(gcInstance, OFF.DistanceTraveled);
 
   const cp = gcInstance.add(OFF.GamePlayer).readPointer();
   if (!cp.isNull()) {

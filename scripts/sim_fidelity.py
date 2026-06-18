@@ -223,7 +223,15 @@ def replay_episode(ep: Episode, build_sim: Callable[[Optional[list]], Any]) -> l
             action = int(action)
             if action >= C.N_ACTIONS:           # reset-only bytes never replay as a move
                 action = int(C.Action.NOOP)
-            sim.step(action)
+            # Feed the recorded real distance so the sim crosses cells off reality, not its
+            # (separately-tested) velocity model. Sims that don't accept it fall back gracefully.
+            ext_d = None
+            if ep.hiddens and i < len(ep.hiddens) and ep.hiddens[i]:
+                ext_d = ep.hiddens[i].get("distance")
+            try:
+                sim.step(action, ext_distance=ext_d)
+            except TypeError:
+                sim.step(action)
             sim_states.append(dict(sim.raw_state()))
     finally:
         close = getattr(sim, "close", None)
