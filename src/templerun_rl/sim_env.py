@@ -48,7 +48,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # --- A. Velocity / pacing ------------------------------------------------
     "start_velocity": 100.0,          # [KNOWN] SRV (CharacterPlayer.StartRunVelocity)
     "max_velocity": 210.0,            # [KNOWN] MRV (CharacterPlayer.MaxRunVelocity)
-    "accel_per_sec": 6.0,             # [INFERRED] linear approx of the AccCurve (units/s); ~+0.6/100ms
+    "accel_per_sec": 6.0,             # [INFERRED] linear fallback if velocity_curve is empty
+    # velocity = curve(distance) — the real AccCurve is distance-gated, not linear. Measured from
+    # human runs (median velocity per distance bin): rises 100->210 over ~4k distance, then plateaus.
+    "velocity_curve": [               # [CALIBRATED] (DistanceTraveled, velocity) median over real runs
+        [5, 100.0], [10, 110.9], [30, 125.7], [50, 137.1], [70, 138.6], [90, 139.8], [110, 141.3],
+        [130, 142.6], [150, 144.1], [170, 145.5], [190, 146.3], [225, 148.7], [275, 151.6],
+        [325, 154.3], [375, 157.6], [425, 159.7], [475, 162.6], [525, 164.9], [575, 167.3],
+        [750, 174.0], [1050, 180.7], [1350, 184.5], [1650, 187.5], [1950, 190.6], [2250, 194.0],
+        [2550, 196.8], [2850, 200.0], [3150, 202.7], [3450, 205.5], [3750, 207.4], [4200, 210.0],
+        [6750, 210.0],
+    ],
     "stumble_slowdown": 0.85,         # [KNOWN] StumbleSlowDown — velocity *= this on a stumble
     # --- B. Track generation (PathElement statics) — values READ off the device (Frida, baseline
     # Temple/level-2 section; the game ramps these by distance via section/level changes). -------
@@ -199,6 +209,11 @@ class TempleRunSimEnv(gym.Env):
         self.reaction_bonus = float(reaction_bonus)
         self.turn_spam_penalty = float(turn_spam_penalty)
         self.idle_action_penalty = float(idle_action_penalty)
+
+        # Velocity curve (distance -> velocity) for fast interpolation in _advance.
+        vc = self.cfg.get("velocity_curve") or []
+        self._vel_curve_d = np.array([p[0] for p in vc], dtype=float) if vc else None
+        self._vel_curve_v = np.array([p[1] for p in vc], dtype=float) if vc else None
 
         # Track source: "procedural" (RNG) or an injected list of element dicts (replay).
         if isinstance(track_source, str):
@@ -484,9 +499,6 @@ class TempleRunSimEnv(gym.Env):
         the model so their own tiers stay meaningful. ``None`` = procedural: cross on velocity*dt.
         """
         cfg = self.cfg
-        # velocity accel toward max (SPEC §3: 100 -> 210).
-        self._velocity = min(float(cfg["max_velocity"]),
-                             self._velocity + float(cfg["accel_per_sec"]) * dt)
 
         # tick down transient flags.
         self._jump_t = max(0.0, self._jump_t - dt)
@@ -495,23 +507,31 @@ class TempleRunSimEnv(gym.Env):
         if self._stumble_t > 0.0:
             self._stumble_t = max(0.0, self._stumble_t - dt)
 
-        # distance covered this tick, scored ~ velocity*dt (SPEC §5).
-        moved = self._velocity * dt
-        self._distance += moved
-        self._score += moved * float(cfg["score_per_distance"])
-
-        # cell-crossing accumulator: recorded distance (replay) or model distance (procedural).
-        # Also advance the real-scale DistanceTraveled (reward signal): in replay echo the recorded
-        # value; in procedural integrate velocity at the calibrated real-distance rate.
+        # Advance the real-scale DistanceTraveled FIRST (it indexes the velocity curve + drives cell
+        # crossings): replay echoes the recorded value; procedural integrates the current velocity.
         if ext_distance is not None:
             moved_cells = max(0.0, float(ext_distance) - self._last_ext_distance)
             self._last_ext_distance = float(ext_distance)
             self._distance_real = float(ext_distance)
             cell_len = float(cfg["cell_length_real"])
         else:
-            moved_cells = moved
             self._distance_real += self._velocity * dt * float(cfg["dist_per_velsec"])
             cell_len = float(cfg["cell_length"])
+
+        # velocity = calibrated curve(distance) — the real AccCurve is distance-gated, not linear
+        # (measured 100->210 over ~4k distance, then plateau). Linear accel is the fallback.
+        if self._vel_curve_d is not None:
+            self._velocity = float(np.interp(self._distance_real, self._vel_curve_d, self._vel_curve_v))
+        else:
+            self._velocity = min(float(cfg["max_velocity"]),
+                                 self._velocity + float(cfg["accel_per_sec"]) * dt)
+
+        # distance covered this tick, scored ~ velocity*dt (SPEC §5).
+        moved = self._velocity * dt
+        self._distance += moved
+        self._score += moved * float(cfg["score_per_distance"])
+        if ext_distance is None:
+            moved_cells = moved
         self._dist_into_cell += moved_cells
 
         # cross as many cell boundaries as we covered (usually 0-1 at 10 Hz).
