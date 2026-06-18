@@ -180,6 +180,7 @@ class TempleRunSimEnv(gym.Env):
         max_episode_steps: int = C.DEFAULT_MAX_EPISODE_STEPS,
         reward_scale: float = C.DEFAULT_REWARD_SCALE,
         reward_mode: str = C.DEFAULT_REWARD_MODE,
+        action_delay: int = 0,
         death_penalty: float = C.DEFAULT_DEATH_PENALTY,
         # same shaping knobs as the real env so training transfers (see reward.py):
         action_cost: float = C.DEFAULT_ACTION_COST,
@@ -208,6 +209,8 @@ class TempleRunSimEnv(gym.Env):
         self.max_episode_steps = int(max_episode_steps)
         self.reward_scale = float(reward_scale)
         self.reward_mode = str(reward_mode)
+        self.action_delay = int(action_delay)   # steps the chosen action is buffered before applying
+        self._action_buffer: list[int] = []
         self.death_penalty = float(death_penalty)
         self.action_cost = float(action_cost)
         self.reaction_bonus = float(reaction_bonus)
@@ -396,6 +399,7 @@ class TempleRunSimEnv(gym.Env):
         self._reset_internal_state()
         self._elapsed_steps = 0
         self._last_action = None
+        self._action_buffer = [int(C.Action.NOOP)] * self.action_delay
         state = self._snapshot()
         self._prev_score = int(state["score"])
         self._prev_distance = float(state["distance"])
@@ -411,6 +415,14 @@ class TempleRunSimEnv(gym.Env):
             raise ValueError(
                 f"action {a} is reserved for reset(); the policy must emit 0..{C.N_ACTIONS - 1}"
             )
+
+        # Action-application delay: the phone applies the agent's action ~1 step late (TCP + frame
+        # lag) while the sim is instant. Buffer it so the policy trains against the SAME latency it
+        # meets on the phone and learns to anticipate (it has the lookahead obs to do so) — the cause
+        # of marginal/unreliable turns. action_delay=0 (default) for the fidelity harness/replay.
+        if self.action_delay > 0:
+            self._action_buffer.append(a)
+            a = self._action_buffer.pop(0)
 
         if not self._is_dead:
             self._apply_action(a)

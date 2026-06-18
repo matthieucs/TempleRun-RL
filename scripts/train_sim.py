@@ -35,6 +35,7 @@ def _make_env(args, rank: int):
             max_episode_steps=args.max_episode_steps,
             reward_mode="distance",
             reward_scale=args.reward_scale,
+            action_delay=args.action_delay,
             death_penalty=args.death_penalty,
             action_cost=args.action_cost,
             reaction_bonus=args.reaction_bonus,
@@ -211,6 +212,10 @@ def main() -> None:
     p.add_argument("--turn-spam-penalty", type=float, default=0.1)
     p.add_argument("--idle-action-penalty", type=float, default=0.05)
     p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--action-delay", type=int, default=0,
+                   help="steps to buffer the action before applying. EXPERIMENTAL/off: delay=1 "
+                        "over-models the phone lag and breaks the missed-turn death (a buffered turn "
+                        "lands after the junction is exited -> unfair, oracle dies). Keep 0.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="runs/ppo_sim")
     # periodic REAL-phone eval (sim-to-real): play on the phone every N steps, log to TensorBoard
