@@ -43,15 +43,23 @@ def _norm_enum(value: int, max_value: float) -> float:
     return float(np.clip(value, 0.0, max_value) / max_value)
 
 
-def make_observation_space() -> spaces.Box:
-    return spaces.Box(low=0.0, high=1.0, shape=(OBS_LEN,), dtype=np.float32)
+def full_obs_len(frame_stack: int = 1, action_history_len: int = 0) -> int:
+    """Total obs length = ``frame_stack`` stacked 26-d frames + ``action_history_len`` one-hot
+    action frames (7 each). frame_stack=1, K=0 -> the base 26-d obs."""
+    return max(1, int(frame_stack)) * OBS_LEN + int(action_history_len) * C.N_ACTIONS
+
+
+def make_observation_space(frame_stack: int = 1, action_history_len: int = 0) -> spaces.Box:
+    return spaces.Box(low=0.0, high=1.0,
+                      shape=(full_obs_len(frame_stack, action_history_len),), dtype=np.float32)
 
 
 def state_to_obs(state: dict) -> np.ndarray:
-    """Convert a raw state dict to the normalized float32 observation vector.
+    """Convert a raw state dict to the base (26-element) normalized float32 observation vector.
 
     Tolerant of missing keys (falls back to ``constants.STATE_DEFAULTS``) so a
-    malformed/truncated JSON line never crashes a step.
+    malformed/truncated JSON line never crashes a step. Action history (if any) is appended
+    separately by ``obs_with_history`` — this stays 26-d for the fidelity harness/replay.
     """
     g = lambda k: state.get(k, C.STATE_DEFAULTS.get(k))  # noqa: E731
     out = np.empty(OBS_LEN, dtype=np.float32)
@@ -64,3 +72,50 @@ def state_to_obs(state: dict) -> np.ndarray:
     out[base + 2] = _norm_enum(int(g("path_level")), PATH_LEVEL_MAX)
     out[base + 3] = _norm_enum(int(g("facing")), FACING_MAX)
     return out
+
+
+def action_history_vec(history, action_history_len: int) -> np.ndarray:
+    """One-hot encode the last ``action_history_len`` actions, oldest-first, left-padded with NoOp.
+
+    ``history`` is the running list of past actions (most recent LAST). Gives the memoryless
+    MLP policy a short memory so it knows it *just* turned/jumped — curbs the "multiple turns at a
+    junction" spam (the policy re-fires a turn because a single-frame obs can't see it already did).
+    """
+    K = int(action_history_len)
+    vec = np.zeros(K * C.N_ACTIONS, dtype=np.float32)
+    if K <= 0:
+        return vec
+    h = [int(a) for a in list(history)[-K:]]
+    h = [int(C.Action.NOOP)] * (K - len(h)) + h   # left-pad so index 0 = oldest
+    for i, a in enumerate(h):
+        if 0 <= a < C.N_ACTIONS:
+            vec[i * C.N_ACTIONS + a] = 1.0
+    return vec
+
+
+def obs_with_history(state: dict, history, action_history_len: int = 0) -> np.ndarray:
+    """Base obs (26) optionally concatenated with the one-hot action history (K*7)."""
+    base = state_to_obs(state)
+    if not action_history_len:
+        return base
+    return np.concatenate([base, action_history_vec(history, action_history_len)])
+
+
+def stacked_obs(frame_deque, history, frame_stack: int = 1, action_history_len: int = 0) -> np.ndarray:
+    """Full obs = the last ``frame_stack`` base frames (oldest->newest) + one-hot action history.
+
+    ``frame_deque`` holds recent base (26-d) obs vectors (most recent LAST); it is left-padded by
+    repeating the OLDEST available frame so the vector is fixed-size from the first step. Stacking
+    frames gives the MLP the temporal context (how is_turn/facing/velocity are *evolving*) it needs
+    to ANTICIPATE a junction and fire the turn on the exact frame — beating the 1-frame reactive
+    limit that caps single-frame turn reliability.
+    """
+    N = max(1, int(frame_stack))
+    frames = list(frame_deque)[-N:]
+    if not frames:
+        frames = [np.zeros(OBS_LEN, dtype=np.float32)]
+    frames = [frames[0]] * (N - len(frames)) + frames    # left-pad with the oldest frame
+    parts = frames
+    if action_history_len:
+        parts = parts + [action_history_vec(history, action_history_len)]
+    return np.concatenate(parts).astype(np.float32)

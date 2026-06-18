@@ -166,6 +166,24 @@ DEFAULT_ACTION_COST = 0.0      # penalty per non-NoOp action (curb thrashing / f
 DEFAULT_REACTION_BONUS = 0.0   # bonus for the correct reaction (jump/slide/valid-turn); try ~0.1 (> action_cost)
 DEFAULT_TURN_SPAM_PENALTY = 0.0  # extra penalty for a TURN that immediately follows another TURN (curb junction turn-spam); try ~0.15 (> reaction_bonus)
 DEFAULT_IDLE_ACTION_PENALTY = 0.0  # extra penalty for JUMP with no must_jump / SLIDE with no must_slide (curb erratic jumping/sliding when no obstacle calls for it); try ~0.06 (> action_cost)
+DEFAULT_REDUNDANT_ACTION_PENALTY = 0.0  # extra penalty for JUMP/SLIDE when the obstacle is the CURRENT cell (must_jump) but NOT ahead (next_must_jump=0) -> the trailing re-jump after the obstacle is already cleared (the "double-jump"). try ~0.12 (slightly > reaction_bonus, so a death-preventing jump still wins but a redundant one nets negative)
+
+# Action-history stacking: append the one-hot of the last K actions to the obs so the memoryless MLP
+# policy knows what it JUST did (curbs "multiple turns at once" at a junction — the single-frame obs
+# can't see it already turned). 0 = off (26-d obs). >0 -> obs grows by K*N_ACTIONS. Host-side (the env
+# tracks its own actions) so it needs NO hook change and works the same in sim and on the phone.
+DEFAULT_ACTION_HISTORY_LEN = 0
+
+# Frame stacking: feed the last N base-26 observation frames (oldest->newest) so the MLP sees how
+# is_turn/facing/velocity are EVOLVING -> it can anticipate a junction and fire the turn on the exact
+# frame (beats the single-frame reactive limit that caps turn reliability). 1 = off (single frame).
+# obs grows to N*26 (+ action history). Host-side; identical in sim and on the phone (no hook change).
+DEFAULT_FRAME_STACK = 1
+
+# Turn cooldown (live env only): after a turn is sent, drop further turn actions for this many steps.
+# On the phone is_turn stays True ~2 frames at a junction; the policy fires the turn on both and the
+# 2nd over-rotates the character off the corner (Fall) — the dominant turn-death. 0 = off; try 2-3.
+DEFAULT_TURN_COOLDOWN = 0
 
 # Per-env resilience: in a SubprocVecEnv any single env that raises kills ALL workers. If a
 # reset can't start a fresh run within this budget (phone wedged in game-over limbo / app down),

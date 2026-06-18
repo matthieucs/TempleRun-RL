@@ -76,12 +76,33 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "ramp_distance": 6000.0,           # [CALIBRATED] distance over which difficulty goes 0 -> 1
     "min_space_between_turns_late": 7, # [CALIBRATED] turn spacing at full difficulty (cells)
     "turn_prob_late": 0.5,             # [CALIBRATED] turn probability at full difficulty
+    # Clear run-out after a junction: the cell immediately after a turn carries NO obstacle. You can't
+    # turn AND have a jump/slide active on the same cell-crossing, so a must-jump cell right after a
+    # junction is unclearable (turn -> enter obstacle with no jump -> die). Real turn-pieces have a
+    # straight run-out too. >=2 -> the player turns, gets 1 clean cell, then the next may be an obstacle
+    # (visible via the lookahead while on the clean cell).
+    "min_clear_after_turn": 2,         # [CALIBRATED] cells after a junction kept obstacle-free
     # A junction is turnable only for the first this-fraction of the cell — ~2 control-steps,
     # matching the real ~217ms turn window (measured: is_turn True ~13 frames @60Hz over 206 human
     # turns). Forces the policy to turn promptly (else it learns lazy turns -> dies-too-late on phone).
     "turn_window_frac": 0.5,           # [CALIBRATED] fraction of the junction cell that stays turnable
     "slides_after_distance": 300.0,    # [CALIBRATED] TreeSlide/FlameTower obstacles only past this distance
-    "default_path_level": 2,           # [READ] sPathLevel = 2 (Temple)
+    "default_path_level": 2,           # [READ] sPathLevel = 2 (Temple) — the START zone (mid altitude)
+    # ZONE / ALTITUDE TRANSITIONS (user-reported + captured live): the track runs through 3 altitude
+    # zones (low/mid/high). A transition carries ObstacleType.LevelChange(7) — a CREVASSE that must be
+    # JUMPED (captured: path_level 2->3 + obstacle=7 + no jump => fell). Model it: every ~N cells the
+    # zone steps to an adjacent altitude and that cell is a must-jump LevelChange. path_level in the obs
+    # follows the zone so the policy also sees the altitude.
+    "zone_change_every_cells": 60,     # [CALIBRATED] cells between zone transitions (first real one ~dist600 ≈ 94 cells; spaced like an obstacle too)
+    # SIM-TO-REAL turn fidelity: on the phone is_turn stays True for ~2 frames AFTER a turn (the
+    # facing-change lags the input), so the policy fires the turn on both frames and the 2nd
+    # OVER-ROTATES the character off the corner -> Fall (the dominant on-device turn-death). The plain
+    # sim drops is_turn instantly so the policy is never tempted -> never learns to resist. Set
+    # turn_linger_frames>0 to FORCE is_turn True for N frames post-turn (a 2nd turn during them = death)
+    # -> the policy must learn (via action-history memory) to turn ONCE. 0 = off (legacy instant-consume).
+    "turn_linger_frames": 0,
+    "zone_min_level": 1,               # low altitude
+    "zone_max_level": 3,               # high altitude (start = default_path_level = 2 = mid)
     # Powerup spawn probabilities are all 0 in the baseline read (sProbabilityBoost/Invincibility/
     # Vacuum/CoinBonus = 0) — why human runs saw 0 boost frames; the sim models no powerups (v1).
     "min_spaces_between_coin_runs": 12, # [READ] sMinSpacesBetweenCoinRuns
@@ -128,6 +149,20 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
                                       # (8 body cells span distance 8.64->59.69 in ep0 => 6.38/cell)
     "replay_start_into_cell": 3.2,    # [CALIBRATED] dist_into_cell at run start (Temple is partial)
     "lookahead": 12,                  # cells of track kept ahead of the player (>= SIM_CONTRACT K>=8)
+    # --- F. Domain randomization (sim-to-real robustness) --------------------
+    # The policy ACES a clean sim (0 deaths / 20k steps) but the phone has timing variance — the
+    # ~95% turn reliability, sub-step lag, velocity jitter. DR samples these per EPISODE so the
+    # policy learns ONE robust behaviour (turn on the first cue, jump early) instead of overfitting
+    # one exact timing. Ranges chosen so the oracle still survives the WHOLE range (fairness-checked).
+    # OFF by default (fidelity harness/replay need determinism); train_sim flips it on.
+    "domain_rand": False,
+    "dr_turn_window_frac": [0.40, 0.62],   # narrower window -> forces earlier turns
+    "dr_jump_duration":    [0.55, 0.72],   # real airtime varies
+    "dr_slide_duration":   [0.55, 0.72],
+    "dr_velocity_scale":   [0.94, 1.08],   # multiply the curve velocity per episode
+    "dr_obstacle_prob":    [0.35, 0.55],   # obstacle density jitter
+    "dr_turn_prob":        [0.12, 0.28],   # early-game turn density jitter
+    "dr_cell_length":      [56.0, 64.0],   # procedural cell length (cross timing jitter)
 }
 
 # ObstacleType enum (SPEC §2) -> which flag must be active when the cell is passed.
@@ -140,9 +175,14 @@ OBST_TREE_SLIDE = 5
 OBST_FLAME_TOWER = 6
 OBST_LEVEL_CHANGE = 7
 
-_MUST_JUMP = frozenset({OBST_HOLE, OBST_TREE_JUMP})        # SPEC §0: must_jump = Obstacles ∈ {1,4}
+# TreeStumble (the lane-dependent "tree-root": left-lane=jump-or-die, middle=stumble-2nd-kills,
+# right=free) is treated as MUST_JUMP — jumping clears it safely on every lane, so the policy
+# learns one robust response instead of needing lane awareness. Observed killing the agent on the
+# phone (must_jump=0 -> it NoOp'd -> died).
+_MUST_JUMP = frozenset({OBST_HOLE, OBST_TREE_JUMP, OBST_TREE_STUMBLE, OBST_LEVEL_CHANGE})  # jump-or-die
+# (OBST_LEVEL_CHANGE = the zone/altitude-transition crevasse; jump clears it — matches hook geo-latch-4)
 _MUST_SLIDE = frozenset({OBST_TREE_SLIDE, OBST_FLAME_TOWER})  # must_slide = Obstacles ∈ {5,6}
-_SURVIVABLE = frozenset({OBST_NARROW, OBST_TREE_STUMBLE})  # don't kill in v0 (stumble/strafe)
+_SURVIVABLE = frozenset({OBST_NARROW})                    # don't kill in v0 (strafe)
 
 # PathDirection enum (SPEC §0): None0 North1 East2 South3 West4.
 DIR_NONE, DIR_N, DIR_E, DIR_S, DIR_W = 0, 1, 2, 3, 4
@@ -187,12 +227,19 @@ class TempleRunSimEnv(gym.Env):
         reaction_bonus: float = C.DEFAULT_REACTION_BONUS,
         turn_spam_penalty: float = C.DEFAULT_TURN_SPAM_PENALTY,
         idle_action_penalty: float = C.DEFAULT_IDLE_ACTION_PENALTY,
+        redundant_action_penalty: float = C.DEFAULT_REDUNDANT_ACTION_PENALTY,
+        action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
+        frame_stack: int = C.DEFAULT_FRAME_STACK,
         **_ignored: Any,
     ):
         super().__init__()
-        # IDENTICAL spaces to TempleRunEnv (Box(21), Discrete(7)) -> policies are drop-in.
-        self.observation_space = O.make_observation_space()
+        # IDENTICAL spaces to TempleRunEnv -> drop-in. obs = frame_stack*26 (+ K*7 action history).
+        self.action_history_len = int(action_history_len)
+        self.frame_stack = max(1, int(frame_stack))
+        self.observation_space = O.make_observation_space(self.frame_stack, self.action_history_len)
         self.action_space = gym.spaces.Discrete(C.N_ACTIONS)
+        self._act_hist: list[int] = []
+        self._frames: list = []
 
         # Merge config over defaults (shallow + one level for the obstacle weights).
         self.cfg = dict(DEFAULT_SIM_CONFIG)
@@ -204,6 +251,11 @@ class TempleRunSimEnv(gym.Env):
                     self.cfg[k] = w
                 else:
                     self.cfg[k] = v
+        # Immutable base; `self.cfg` is re-derived from it each reset (domain randomization mutates
+        # the per-episode copy, never the base).
+        self._base_cfg = dict(self.cfg)
+        self._dr = bool(self.cfg.get("domain_rand", False))
+        self._vel_scale = 1.0
 
         self.step_dt = float(step_dt)
         self.max_episode_steps = int(max_episode_steps)
@@ -216,6 +268,7 @@ class TempleRunSimEnv(gym.Env):
         self.reaction_bonus = float(reaction_bonus)
         self.turn_spam_penalty = float(turn_spam_penalty)
         self.idle_action_penalty = float(idle_action_penalty)
+        self.redundant_action_penalty = float(redundant_action_penalty)
 
         # Velocity curve (distance -> velocity) for fast interpolation in _advance.
         vc = self.cfg.get("velocity_curve") or []
@@ -271,6 +324,9 @@ class TempleRunSimEnv(gym.Env):
         self._slide_t = 0.0
         self._strafe_t = 0.0
         self._stumble_t = 0.0
+        self._post_turn_linger = 0      # frames is_turn stays True after a turn (sim-to-real trap)
+        self._linger_can_l = False
+        self._linger_can_r = False
         self._ground_height = 0.0
         self._score = float(self.cfg["start_score"])
         # Start the spacing counters at 0 (NOT the minimum): the real run has a straight intro
@@ -279,6 +335,8 @@ class TempleRunSimEnv(gym.Env):
         self._cells_since_obstacle = 0
         self._cells_since_turn = 0
         self._cells_since_bonus = 0
+        self._cells_since_zone = 0
+        self._zone_level = int(self.cfg["default_path_level"])   # current altitude zone (mid at start)
         self._b2b_obstacles = 0
         # replay cursor (which injected element feeds the next generated cell)
         self._replay_cursor = 0
@@ -321,10 +379,11 @@ class TempleRunSimEnv(gym.Env):
 
     def _next_cell_procedural(self) -> dict:
         cfg = self.cfg
-        level = int(cfg["default_path_level"])
+        level = int(self._zone_level)
         self._cells_since_obstacle += 1
         self._cells_since_turn += 1
         self._cells_since_bonus += 1
+        self._cells_since_zone += 1
 
         # Difficulty-ramped turn spacing/probability (lerp baseline -> late by distance).
         diff = self._difficulty()
@@ -353,9 +412,33 @@ class TempleRunSimEnv(gym.Env):
                     can_l, can_r = True, True       # T-junction: both sides
                     ptype = int(cfg["path_type_t_junction"])
 
-        # A turn cell carries no obstacle (the player must turn here).
+        # ZONE TRANSITION (altitude change): every ~zone_change_every cells the track steps to an
+        # adjacent altitude zone; that cell is a LevelChange CREVASSE (must-jump). Takes priority over
+        # a normal obstacle. Kept off turn cells + out of the post-junction clear window (unclearable).
         obstacle = OBST_NONE
-        if not is_turn and self._cells_since_obstacle >= int(cfg["min_space_between_obstacles"]):
+        if (not is_turn
+                and self._cells_since_turn >= int(cfg["min_clear_after_turn"])
+                and self._cells_since_obstacle >= int(cfg["min_space_between_obstacles"])
+                and self._cells_since_zone >= int(cfg["zone_change_every_cells"])):
+            obstacle = OBST_LEVEL_CHANGE
+            self._cells_since_zone = 0
+            self._cells_since_obstacle = 0
+            self._b2b_obstacles = 0
+            lo, hi = int(cfg["zone_min_level"]), int(cfg["zone_max_level"])
+            if self._zone_level <= lo:
+                self._zone_level += 1
+            elif self._zone_level >= hi:
+                self._zone_level -= 1
+            else:
+                self._zone_level += 1 if self._rng.random() < 0.5 else -1
+            level = int(self._zone_level)   # the crevasse cell already sits in the NEW zone (matches live capture)
+
+        # A turn cell carries no obstacle (the player must turn here); the cell right after a junction
+        # is also kept clear (min_clear_after_turn) — a must-jump obstacle there is unclearable (you
+        # can't turn AND jump on one crossing).
+        if (obstacle == OBST_NONE and not is_turn
+                and self._cells_since_turn >= int(cfg["min_clear_after_turn"])
+                and self._cells_since_obstacle >= int(cfg["min_space_between_obstacles"])):
             place = self._rng.random() < float(cfg["obstacle_prob"])
             # honor max back-to-back: if we've hit the cap, force a gap.
             if self._b2b_obstacles >= int(cfg["max_back_to_back_obstacles"]):
@@ -392,19 +475,45 @@ class TempleRunSimEnv(gym.Env):
         return int(self._rng.choice(types, p=probs))
 
     # ------------------------------------------------------------- gym: reset
+    def _sample_domain(self) -> None:
+        """Per-episode domain randomization: re-derive ``self.cfg`` from the base and jitter the
+        sim-to-real-sensitive knobs (turn window, durations, velocity, density). No-op if off."""
+        self.cfg = dict(self._base_cfg)
+        self._vel_scale = 1.0
+        if not self._dr:
+            return
+        r = self._rng
+        c = self.cfg
+
+        def U(key):
+            lo, hi = self._base_cfg[key]
+            return float(r.uniform(lo, hi))
+        c["turn_window_frac"] = U("dr_turn_window_frac")
+        c["jump_duration"] = U("dr_jump_duration")
+        c["slide_duration"] = U("dr_slide_duration")
+        c["obstacle_prob"] = U("dr_obstacle_prob")
+        c["cell_length"] = U("dr_cell_length")
+        tp = U("dr_turn_prob")
+        c["turn_prob"] = tp
+        c["turn_prob_late"] = max(tp, float(self._base_cfg["turn_prob_late"]))
+        self._vel_scale = U("dr_velocity_scale")
+
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         if seed is not None:
             self._rng = np.random.default_rng(seed)
+        self._sample_domain()
         self._reset_internal_state()
         self._elapsed_steps = 0
         self._last_action = None
         self._action_buffer = [int(C.Action.NOOP)] * self.action_delay
+        self._act_hist = []
+        self._frames = []
         state = self._snapshot()
         self._prev_score = int(state["score"])
         self._prev_distance = float(state["distance"])
         self._prev_state = state
-        obs = O.state_to_obs(state)
+        obs = self._build_obs(state)
         info = {"raw_state": state, "score": self._prev_score, "distance": self._prev_distance}
         return obs, info
 
@@ -441,6 +550,7 @@ class TempleRunSimEnv(gym.Env):
             a, self._prev_state, self._last_action,
             action_cost=self.action_cost, reaction_bonus=self.reaction_bonus,
             turn_spam_penalty=self.turn_spam_penalty, idle_action_penalty=self.idle_action_penalty,
+            redundant_action_penalty=self.redundant_action_penalty,
         )
         terminated = bool(state["is_dead"] or state["is_game_over"])
         if terminated:
@@ -453,7 +563,12 @@ class TempleRunSimEnv(gym.Env):
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.max_episode_steps
 
-        obs = O.state_to_obs(state)
+        # record the action the policy just executed (for the action-history obs), keep last K.
+        if self.action_history_len:
+            self._act_hist.append(a)
+            if len(self._act_hist) > self.action_history_len:
+                self._act_hist = self._act_hist[-self.action_history_len:]
+        obs = self._build_obs(state)
         info = {
             "raw_state": state,
             "score": score,
@@ -489,6 +604,11 @@ class TempleRunSimEnv(gym.Env):
 
     def _attempt_turn(self, a: int) -> None:
         """Turn is valid ONLY at a junction with a matching exit; mid-path turn kills (SPEC §3/§4)."""
+        # OVER-ROTATION: a 2nd turn within the post-turn linger window rotates the (already-turned)
+        # character off the corner -> Fall. Models the phone's lingering is_turn double-turn trap.
+        if self._post_turn_linger > 0:
+            self._kill(8)   # over-rotation (double-turn)
+            return
         cell = self._current_cell()
         want_left = a == int(C.Action.TURN_LEFT)
         valid = bool(cell.get("is_turn")) and self._turn_window_open() and (
@@ -501,6 +621,12 @@ class TempleRunSimEnv(gym.Env):
             cell["can_turn_left"] = False
             cell["can_turn_right"] = False
             self._cells_since_turn = 0
+            # Start the linger: is_turn stays True for N frames (snapshot), tempting a fatal re-turn.
+            n = int(self.cfg.get("turn_linger_frames", 0))
+            if n > 0:
+                self._post_turn_linger = n
+                self._linger_can_l = bool(want_left)
+                self._linger_can_r = not want_left
         else:
             # forced turn off a junction -> the run ends (Fall).
             self._kill(1)
@@ -522,6 +648,8 @@ class TempleRunSimEnv(gym.Env):
         self._strafe_t = max(0.0, self._strafe_t - dt)
         if self._stumble_t > 0.0:
             self._stumble_t = max(0.0, self._stumble_t - dt)
+        if self._post_turn_linger > 0:          # post-turn is_turn linger (sim-to-real trap) counts down
+            self._post_turn_linger -= 1
 
         # Advance the real-scale DistanceTraveled FIRST (it indexes the velocity curve + drives cell
         # crossings): replay echoes the recorded value; procedural integrates the current velocity.
@@ -541,6 +669,7 @@ class TempleRunSimEnv(gym.Env):
         else:
             self._velocity = min(float(cfg["max_velocity"]),
                                  self._velocity + float(cfg["accel_per_sec"]) * dt)
+        self._velocity *= self._vel_scale   # domain-randomization per-episode velocity jitter (1.0 if off)
 
         # distance covered this tick, scored ~ velocity*dt (SPEC §5).
         moved = self._velocity * dt
@@ -560,38 +689,36 @@ class TempleRunSimEnv(gym.Env):
             self._cross_into_next_cell()
 
     def _cross_into_next_cell(self) -> None:
-        """The player leaves the current cell -> resolve its obstacle/junction, then step forward."""
+        """The player leaves the current cell -> resolve junction (exit), step forward, then resolve
+        the entered cell's obstacle (ENTRY)."""
         leaving = self._current_cell()
-        self._resolve_cell_on_exit(leaving)
-        if self._is_dead:
+        # Missed-turn death: must turn while ON the junction; checked on exit.
+        if leaving.get("is_turn") and (leaving.get("can_turn_left") or leaving.get("can_turn_right")):
+            self._kill(1)   # Fall
             return
         # move onto the next cell.
         self._cell_index += 1
         self._extend_track()
         entered = self._current_cell()
+        # Obstacle death checked on ENTRY: the jump/slide must already be ACTIVE when crossing into
+        # the obstacle cell. So the policy must act on the LOOKAHEAD (next_must_jump/slide) one cell
+        # early — matching the real phone, where reacting only when the obstacle is the nearest cell
+        # lands the action a step too late (observed: agent jumps after it's already falling).
+        self._resolve_obstacle_on_enter(entered)
+        if self._is_dead:
+            return
         if entered.get("is_coin"):
             self._score += float(self.cfg["coin_score"])
             entered["is_coin"] = False
 
-    def _resolve_cell_on_exit(self, cell: dict) -> None:
-        """Collision/death check for the cell being passed (SPEC §4)."""
+    def _resolve_obstacle_on_enter(self, cell: dict) -> None:
         obst = int(cell.get("obstacles", 0))
-        # junction: if it's still a live turn (no valid turn was issued) -> Fall.
-        if cell.get("is_turn") and (cell.get("can_turn_left") or cell.get("can_turn_right")):
-            self._kill(1)   # Fall
-            return
         if obst in _MUST_JUMP:
             if self._jump_t <= 0.0:
-                self._kill(2 if obst == OBST_TREE_JUMP else 1)  # Tree / Fall(hole)
-            return
-        if obst in _MUST_SLIDE:
+                self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / Tree
+        elif obst in _MUST_SLIDE:
             if self._slide_t <= 0.0:
                 self._kill(5 if obst == OBST_FLAME_TOWER else 3)  # Burnt / Slide
-            return
-        if obst == OBST_TREE_STUMBLE:
-            # survivable: slow down (StumbleSlowDown) + brief stumble flag, not death.
-            self._velocity *= float(self.cfg["stumble_slowdown"])
-            self._stumble_t = float(self.cfg["stumble_duration"])
         # OBST_NARROW / OBST_NONE / OBST_LEVEL_CHANGE: no death in v0.
 
     def _kill(self, death_type: int) -> None:
@@ -630,6 +757,12 @@ class TempleRunSimEnv(gym.Env):
         # already the post-heading turnability the hook reports -> expose them directly (windowed).
         can_l = bool(cell.get("can_turn_left")) and win
         can_r = bool(cell.get("can_turn_right")) and win
+        # Post-turn LINGER: after a turn, force is_turn True for N frames (like the phone) so the
+        # policy faces the double-turn temptation and must learn (via action history) to resist it.
+        if self._post_turn_linger > 0:
+            is_turn = True
+            can_l = self._linger_can_l
+            can_r = self._linger_can_r
 
         # 1-cell lookahead: the cell ahead of the nearest (raw, not window-gated -> anticipation).
         self._extend_track()
@@ -668,6 +801,13 @@ class TempleRunSimEnv(gym.Env):
             "next_must_slide": nobst in _MUST_SLIDE,
         }
         return state
+
+    def _build_obs(self, state: dict):
+        """Push this frame's base obs and return the stacked (frame_stack) + action-history vector."""
+        self._frames.append(O.state_to_obs(state))
+        if len(self._frames) > self.frame_stack:
+            self._frames = self._frames[-self.frame_stack:]
+        return O.stacked_obs(self._frames, self._act_hist, self.frame_stack, self.action_history_len)
 
     # ------------------------------------------- fidelity harness: raw/set state
     def raw_state(self) -> dict:

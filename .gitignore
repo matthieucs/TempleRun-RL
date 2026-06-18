@@ -38,3 +38,4 @@ venv/
 
 # recorded phone traces (data; can be large)
 traces/
+logs/

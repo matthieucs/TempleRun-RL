@@ -53,11 +53,22 @@ class TempleRunEnv(gym.Env):
         reaction_bonus: float = C.DEFAULT_REACTION_BONUS,
         turn_spam_penalty: float = C.DEFAULT_TURN_SPAM_PENALTY,
         idle_action_penalty: float = C.DEFAULT_IDLE_ACTION_PENALTY,
+        redundant_action_penalty: float = C.DEFAULT_REDUNDANT_ACTION_PENALTY,
+        action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
+        frame_stack: int = C.DEFAULT_FRAME_STACK,
+        turn_cooldown: int = C.DEFAULT_TURN_COOLDOWN,
         auto_connect: bool = True,
     ):
         super().__init__()
-        self.observation_space = O.make_observation_space()
+        self.turn_cooldown = int(turn_cooldown)
+        self._last_turn_step = -10_000
+        # obs = frame_stack*26 (+ action_history_len*7 one-hot recent actions); host-side, no hook change.
+        self.action_history_len = int(action_history_len)
+        self.frame_stack = max(1, int(frame_stack))
+        self.observation_space = O.make_observation_space(self.frame_stack, self.action_history_len)
         self.action_space = gym.spaces.Discrete(C.N_ACTIONS)
+        self._act_hist: list[int] = []
+        self._frames: list = []
 
         self.step_dt = float(step_dt)
         self.max_episode_steps = int(max_episode_steps)
@@ -89,6 +100,9 @@ class TempleRunEnv(gym.Env):
         #   the "excited" erratic behavior; dock it on top of action_cost. Pairs with a lowered
         #   PPO ent_coef (the entropy bonus is what keeps the policy randomly spraying actions).
         self.idle_action_penalty = float(idle_action_penalty)
+        # redundant_action_penalty: dock the trailing re-jump/re-slide (obstacle is the current cell,
+        #   must_jump set, but not ahead via next_must_jump) — curbs the "double-jump". See reward.py.
+        self.redundant_action_penalty = float(redundant_action_penalty)
         self._prev_state: Optional[dict] = None  # the state the last action responded to (for shaping)
         self._last_action: Optional[int] = None  # the action taken on the previous step (for turn-spam)
 
@@ -152,14 +166,30 @@ class TempleRunEnv(gym.Env):
         self._prev_distance = float(state.get("distance", 0.0) or 0.0)
         self._prev_state = state
         self._last_action = None
+        self._act_hist = []
+        self._frames = []
+        self._last_turn_step = -10_000
         self._elapsed_steps = 0
         try:
             _, self._last_seq = self._state.latest()
         except Exception:  # noqa: BLE001  no frame yet while degraded
             self._last_seq = -1
-        obs = O.state_to_obs(state)
+        obs = self._obs(state)
         info = {"raw_state": state, "score": self._prev_score, "degraded": self._degraded}
         return obs, info
+
+    def _obs(self, state: dict) -> "np.ndarray":
+        """Stacked obs (frame_stack frames + one-hot action history). Host-side, no hook field."""
+        self._frames.append(O.state_to_obs(state))
+        if len(self._frames) > self.frame_stack:
+            self._frames = self._frames[-self.frame_stack:]
+        return O.stacked_obs(self._frames, self._act_hist, self.frame_stack, self.action_history_len)
+
+    def _push_action(self, a: int) -> None:
+        if self.action_history_len:
+            self._act_hist.append(int(a))
+            if len(self._act_hist) > self.action_history_len:
+                self._act_hist = self._act_hist[-self.action_history_len:]
 
     def _restart_and_wait(self, budget: Optional[float] = None) -> dict:
         """Start a fresh run and wait until it's actually progressing.
@@ -212,6 +242,16 @@ class TempleRunEnv(gym.Env):
         a = int(action)
         if a >= C.N_ACTIONS:
             raise ValueError(f"action {a} is reserved for reset(); the policy must emit 0..{C.N_ACTIONS - 1}")
+        # TURN COOLDOWN: on the phone is_turn stays True ~2 frames at a junction, so the policy fires
+        # the turn on both -> the 2nd lands AFTER the corner and over-rotates the character off the
+        # path (Fall). The sim consumes the turn instantly so the policy never learned to not repeat.
+        # Guard host-side: after a turn is sent, drop further turn actions for `turn_cooldown` steps
+        # (send NoOp). Real consecutive junctions are spaced far more than this, so it's safe.
+        if self.turn_cooldown and a in (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT)):
+            if self._elapsed_steps - self._last_turn_step <= self.turn_cooldown:
+                a = int(C.Action.NOOP)        # suppress the redundant 2nd turn -> no over-rotation
+            else:
+                self._last_turn_step = self._elapsed_steps
         if self._degraded:
             return self._degraded_step(a)
         try:
@@ -225,9 +265,10 @@ class TempleRunEnv(gym.Env):
             self._degraded = True
             last = self._prev_state or {}
             self._last_action = a
+            self._push_action(a)
             self._elapsed_steps += 1
             return (
-                O.state_to_obs(last), 0.0, True, False,
+                self._obs(last), 0.0, True, False,
                 {"raw_state": last, "score": self._prev_score, "elapsed_steps": self._elapsed_steps,
                  "max_episode_steps": self.max_episode_steps, "degraded": True},
             )
@@ -252,11 +293,12 @@ class TempleRunEnv(gym.Env):
         self._prev_distance = distance
         self._prev_state = state
         self._last_action = a
+        self._push_action(a)
 
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.max_episode_steps
 
-        obs = O.state_to_obs(state)
+        obs = self._obs(state)
         info = {
             "raw_state": state,
             "score": score,
@@ -281,15 +323,17 @@ class TempleRunEnv(gym.Env):
           must_jump, SLIDE on must_slide, or a *valid* TURN at a junction (is_turn + can_turn_*).
         """
         if (not self.action_cost and not self.reaction_bonus and not self.turn_spam_penalty
-                and not self.idle_action_penalty):
+                and not self.idle_action_penalty and not self.redundant_action_penalty):
             return 0.0
         r = 0.0
         if self.action_cost and action != int(C.Action.NOOP):
             r -= self.action_cost
         if self.reaction_bonus and prev is not None:
-            if prev.get("must_jump") and action == int(C.Action.JUMP):
+            # reward the reaction whether the obstacle is the current cell (must_*) or AHEAD (next_*)
+            # -> the anticipatory jump (which clears the entry check) is rewarded, not punished.
+            if (prev.get("must_jump") or prev.get("next_must_jump")) and action == int(C.Action.JUMP):
                 r += self.reaction_bonus
-            elif prev.get("must_slide") and action == int(C.Action.SLIDE):
+            elif (prev.get("must_slide") or prev.get("next_must_slide")) and action == int(C.Action.SLIDE):
                 r += self.reaction_bonus
             elif prev.get("is_turn"):
                 if action == int(C.Action.TURN_LEFT) and prev.get("can_turn_left"):
@@ -301,12 +345,24 @@ class TempleRunEnv(gym.Env):
             turns = (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))
             if action in turns and self._last_action in turns:
                 r -= self.turn_spam_penalty
-        # Idle jump/slide: fired with no obstacle calling for it -> erratic "excitement", dock it.
+        # Idle jump/slide: fired with NO obstacle ahead or here (not must_* and not next_must_*) ->
+        # erratic "excitement"; keyed on next_* too so the anticipatory jump is not docked.
         if self.idle_action_penalty and prev is not None:
-            if action == int(C.Action.JUMP) and not prev.get("must_jump"):
+            if (action == int(C.Action.JUMP)
+                    and not prev.get("must_jump") and not prev.get("next_must_jump")):
                 r -= self.idle_action_penalty
-            elif action == int(C.Action.SLIDE) and not prev.get("must_slide"):
+            elif (action == int(C.Action.SLIDE)
+                    and not prev.get("must_slide") and not prev.get("next_must_slide")):
                 r -= self.idle_action_penalty
+        # Redundant jump/slide: obstacle is the current cell (must_jump) but not ahead
+        # (next_must_jump=0) -> already entered/cleared; the trailing re-jump is the "double-jump".
+        if self.redundant_action_penalty and prev is not None:
+            if (action == int(C.Action.JUMP)
+                    and prev.get("must_jump") and not prev.get("next_must_jump")):
+                r -= self.redundant_action_penalty
+            elif (action == int(C.Action.SLIDE)
+                    and prev.get("must_slide") and not prev.get("next_must_slide")):
+                r -= self.redundant_action_penalty
         return r
 
     def _grow_episode_cap(self) -> bool:
@@ -332,6 +388,7 @@ class TempleRunEnv(gym.Env):
         neutral frames until it recovers (watchdog re-inject / manual force-restart).
         """
         self._last_action = a
+        self._push_action(a)
         self._elapsed_steps += 1
         time.sleep(self.step_dt)
         state = None
@@ -347,12 +404,12 @@ class TempleRunEnv(gym.Env):
             self._prev_score = int(state.get("score", 0))
             self._prev_distance = float(state.get("distance", 0.0) or 0.0)
             self._last_seq = seq
-            return (O.state_to_obs(state), 0.0, True, False,
+            return (self._obs(state), 0.0, True, False,
                     {"raw_state": state, "score": self._prev_score, "elapsed_steps": self._elapsed_steps,
                      "max_episode_steps": self.max_episode_steps, "recovered": True, "degraded": False})
         blank = self._prev_state or {}
         truncated = self._elapsed_steps >= self.max_episode_steps
-        return (O.state_to_obs(blank), 0.0, False, truncated,
+        return (self._obs(blank), 0.0, False, truncated,
                 {"raw_state": blank, "score": self._prev_score, "elapsed_steps": self._elapsed_steps,
                  "max_episode_steps": self.max_episode_steps, "degraded": True})
 

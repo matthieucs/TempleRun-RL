@@ -13,6 +13,7 @@ Saves runs/ppo_sim_final.zip + checkpoints; TensorBoard under runs/tb_sim.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -41,6 +42,12 @@ def _make_env(args, rank: int):
             reaction_bonus=args.reaction_bonus,
             turn_spam_penalty=args.turn_spam_penalty,
             idle_action_penalty=args.idle_action_penalty,
+            redundant_action_penalty=args.redundant_action_penalty,
+            action_history_len=args.action_history_len,
+            frame_stack=args.frame_stack,
+            config={"domain_rand": bool(args.domain_rand),
+                    "turn_linger_frames": int(args.turn_linger),
+                    **(json.loads(args.sim_config) if args.sim_config else {})},
             seed=args.seed + rank,
         )
         return env
@@ -48,22 +55,28 @@ def _make_env(args, rank: int):
 
 
 def _oracle(st: dict) -> int:
-    if st["must_jump"]:
-        return int(C.Action.JUMP)
-    if st["must_slide"]:
-        return int(C.Action.SLIDE)
+    # TURN has priority over the lookahead-jump: a junction with an obstacle in the cell AFTER it
+    # (is_turn=1 AND next_must_jump=1) must be TURNED, not jumped — jumping misses the turn -> Fall.
+    # (The generation keeps the cell right after a junction obstacle-free, so turning is always safe.)
     if st["is_turn"]:
         if st["can_turn_left"]:
             return int(C.Action.TURN_LEFT)
         if st["can_turn_right"]:
             return int(C.Action.TURN_RIGHT)
         return int(C.Action.TURN_LEFT)
+    # Anticipate: jump/slide on the LOOKAHEAD (obstacle is the NEXT cell) so the action is active
+    # when entering the obstacle cell (the sim resolves obstacles on entry).
+    if st["must_jump"] or st.get("next_must_jump"):
+        return int(C.Action.JUMP)
+    if st["must_slide"] or st.get("next_must_slide"):
+        return int(C.Action.SLIDE)
     return int(C.Action.NOOP)
 
 
-def _rollout(policy, n_eps=20, seed0=10000):
+def _rollout(policy, n_eps=20, seed0=10000, action_history_len=0, frame_stack=1):
     """Run a policy (callable obs->action OR 'oracle'/'random') in a single sim; return survival."""
-    env = gym.make("TempleRunSim-v0", max_episode_steps=100000).unwrapped
+    env = gym.make("TempleRunSim-v0", max_episode_steps=100000,
+                   action_history_len=action_history_len, frame_stack=frame_stack).unwrapped
     steps, dists, deaths = [], [], 0
     rng = np.random.default_rng(seed0)
     for ep in range(n_eps):
@@ -92,9 +105,11 @@ def _rollout(policy, n_eps=20, seed0=10000):
 
 class EvalCallback(BaseCallback):
     """Every ``every`` steps, roll out the greedy policy and log survival vs oracle/random."""
-    def __init__(self, every: int, verbose=1):
+    def __init__(self, every: int, action_history_len: int = 0, frame_stack: int = 1, verbose=1):
         super().__init__(verbose)
         self.every = every
+        self.action_history_len = int(action_history_len)
+        self.frame_stack = int(frame_stack)
         self._last = 0
 
     def _on_step(self) -> bool:
@@ -106,7 +121,8 @@ class EvalCallback(BaseCallback):
         def greedy(obs):
             a, _ = model.predict(obs, deterministic=True)
             return int(a)
-        ms, md, deaths = _rollout(greedy, n_eps=15)
+        ms, md, deaths = _rollout(greedy, n_eps=15, action_history_len=self.action_history_len,
+                                  frame_stack=self.frame_stack)
         self.logger.record("eval/median_steps", ms)
         self.logger.record("eval/median_distance", md)
         self.logger.record("eval/deaths_per15", deaths)
@@ -211,12 +227,32 @@ def main() -> None:
     p.add_argument("--reaction-bonus", type=float, default=0.1)
     p.add_argument("--turn-spam-penalty", type=float, default=0.1)
     p.add_argument("--idle-action-penalty", type=float, default=0.05)
+    p.add_argument("--redundant-action-penalty", type=float, default=0.0,
+                   help="dock the trailing re-jump/re-slide (must_jump set but next_must_jump=0, "
+                        "obstacle already entered) — curbs the 'double-jump'. try ~0.12")
+    p.add_argument("--action-history-len", type=int, default=0,
+                   help="append the one-hot of the last K actions to the obs (policy memory -> curbs "
+                        "multiple-turns-at-a-junction). obs grows by K*7. try 3-6. needs a retrain.")
+    p.add_argument("--frame-stack", type=int, default=1,
+                   help="stack the last N base-26 obs frames (temporal context -> anticipate turns). "
+                        "obs grows to N*26 (+K*7). try 2-4. needs a retrain.")
+    p.add_argument("--turn-linger", type=int, default=0,
+                   help="sim-to-real: keep is_turn True N frames after a turn (a 2nd turn during them "
+                        "= over-rotation death) so the policy learns to NOT double-turn. try 2. needs K>0.")
+    p.add_argument("--sim-config", default="",
+                   help="JSON dict of extra sim config overrides, e.g. '{\"dr_turn_window_frac\":[0.28,0.45]}'")
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--action-delay", type=int, default=0,
                    help="steps to buffer the action before applying. EXPERIMENTAL/off: delay=1 "
                         "over-models the phone lag and breaks the missed-turn death (a buffered turn "
                         "lands after the junction is exited -> unfair, oracle dies). Keep 0.")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--net-arch", default="64,64",
+                   help="comma-separated hidden layer sizes for the MLP policy, e.g. '256,256'")
+    p.add_argument("--domain-rand", dest="domain_rand", action="store_true", default=True,
+                   help="per-episode jitter of turn window / durations / velocity / density for "
+                        "sim-to-real robustness (default ON)")
+    p.add_argument("--no-domain-rand", dest="domain_rand", action="store_false")
     p.add_argument("--out", default="runs/ppo_sim")
     # periodic REAL-phone eval (sim-to-real): play on the phone every N steps, log to TensorBoard
     p.add_argument("--real-eval-every", type=int, default=0,
@@ -227,21 +263,26 @@ def main() -> None:
     p.add_argument("--real-eval-max-steps", type=int, default=600)
     args = p.parse_args()
 
-    print(f"baselines: oracle {_rollout('oracle', 10)}, random {_rollout('random', 10)}", flush=True)
+    K, FS = args.action_history_len, args.frame_stack
+    print(f"baselines: oracle {_rollout('oracle', 10, action_history_len=K, frame_stack=FS)}, "
+          f"random {_rollout('random', 10, action_history_len=K, frame_stack=FS)}", flush=True)
 
     factories = [_make_env(args, i) for i in range(args.num_envs)]
     venv = SubprocVecEnv(factories) if args.num_envs > 1 else DummyVecEnv(factories)
 
+    net_arch = [int(x) for x in str(args.net_arch).split(",") if x.strip()]
+    print(f"policy net_arch={net_arch}", flush=True)
     model = PPO(
         "MlpPolicy", venv,
         n_steps=512, batch_size=64, n_epochs=10, gamma=0.99, gae_lambda=0.95,
         ent_coef=args.ent_coef, learning_rate=3e-4, clip_range=0.2,
-        policy_kwargs=dict(net_arch=[64, 64]),
+        policy_kwargs=dict(net_arch=net_arch),
         tensorboard_log="runs/tb_sim", verbose=0,
     )
     ckpt = CheckpointCallback(save_freq=max(1, 100_000 // args.num_envs),
-                              save_path="runs", name_prefix="ppo_sim")
-    callbacks = [ckpt, EvalCallback(every=100_000)]
+                              save_path="runs", name_prefix=Path(args.out).name)
+    callbacks = [ckpt, EvalCallback(every=100_000, action_history_len=args.action_history_len,
+                                    frame_stack=args.frame_stack)]
     if args.real_eval_every > 0:
         callbacks.append(RealPhoneEvalCallback(
             every=args.real_eval_every, serial=args.real_eval_serial,
@@ -250,9 +291,16 @@ def main() -> None:
         print(f"REAL-phone eval every {args.real_eval_every} steps on {args.real_eval_serial}", flush=True)
     model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=False)
     model.save(f"{args.out}_final")
-    print(f"saved {args.out}_final.zip", flush=True)
+    # sidecar so eval/score know the obs shape (obs dim alone is ambiguous between frame_stack & K).
+    import json
+    with open(f"{args.out}_final.json", "w") as f:
+        json.dump({"frame_stack": args.frame_stack, "action_history_len": args.action_history_len,
+                   "net_arch": net_arch}, f)
+    print(f"saved {args.out}_final.zip (+ .json: fs={args.frame_stack} K={args.action_history_len} "
+          f"arch={net_arch})", flush=True)
 
-    ms, md, deaths = _rollout(lambda o: int(model.predict(o, deterministic=True)[0]), n_eps=30)
+    ms, md, deaths = _rollout(lambda o: int(model.predict(o, deterministic=True)[0]), n_eps=30,
+                              action_history_len=args.action_history_len, frame_stack=args.frame_stack)
     print(f"FINAL policy: median steps={ms:.0f} distance={md:.0f} deaths={deaths}/30", flush=True)
 
 

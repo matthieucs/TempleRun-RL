@@ -28,6 +28,7 @@ def shaping_reward(
     reaction_bonus: float = 0.0,
     turn_spam_penalty: float = 0.0,
     idle_action_penalty: float = 0.0,
+    redundant_action_penalty: float = 0.0,
 ) -> float:
     """Dense shaping term (0 unless a knob is set). Mirror of ``env._shaping_reward``.
 
@@ -35,15 +36,20 @@ def shaping_reward(
     previous step/reset), NOT the post-action state. ``last_action`` is the action taken on the
     previous step (for the turn-spam memory the policy lacks).
     """
-    if not action_cost and not reaction_bonus and not turn_spam_penalty and not idle_action_penalty:
+    if (not action_cost and not reaction_bonus and not turn_spam_penalty
+            and not idle_action_penalty and not redundant_action_penalty):
         return 0.0
     r = 0.0
     if action_cost and action != int(C.Action.NOOP):
         r -= action_cost
     if reaction_bonus and prev is not None:
-        if prev.get("must_jump") and action == int(C.Action.JUMP):
+        # Reward the reaction on the obstacle whether it's the CURRENT cell (must_jump) or AHEAD
+        # (next_must_jump) — the anticipatory jump (next_*) is the one that actually clears the entry
+        # check, so it MUST be rewarded (the old shaping only rewarded must_*, which punished the
+        # correct early jump and rewarded the trailing re-jump -> the double-jump artifact).
+        if (prev.get("must_jump") or prev.get("next_must_jump")) and action == int(C.Action.JUMP):
             r += reaction_bonus
-        elif prev.get("must_slide") and action == int(C.Action.SLIDE):
+        elif (prev.get("must_slide") or prev.get("next_must_slide")) and action == int(C.Action.SLIDE):
             r += reaction_bonus
         elif prev.get("is_turn"):
             if action == int(C.Action.TURN_LEFT) and prev.get("can_turn_left"):
@@ -55,10 +61,25 @@ def shaping_reward(
         turns = (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))
         if action in turns and last_action in turns:
             r -= turn_spam_penalty
-    # Idle jump/slide: fired with no obstacle calling for it -> erratic "excitement", dock it.
+    # Idle jump/slide: fired with NO obstacle ahead or here (not must_* and not next_must_*) ->
+    # erratic "excitement", dock it. (Keyed on next_* too so the correct anticipatory jump is NOT
+    # docked — only a truly purposeless jump is.)
     if idle_action_penalty and prev is not None:
-        if action == int(C.Action.JUMP) and not prev.get("must_jump"):
+        if (action == int(C.Action.JUMP)
+                and not prev.get("must_jump") and not prev.get("next_must_jump")):
             r -= idle_action_penalty
-        elif action == int(C.Action.SLIDE) and not prev.get("must_slide"):
+        elif (action == int(C.Action.SLIDE)
+                and not prev.get("must_slide") and not prev.get("next_must_slide")):
             r -= idle_action_penalty
+    # Redundant jump/slide: the obstacle is the CURRENT cell (must_jump) but NOT ahead
+    # (next_must_jump=0) -> the player has already entered/cleared it; jumping again is the wasteful
+    # "double-jump". Dock it. (A death-preventing jump fires on the lookahead next_must_jump, which is
+    # NOT penalized; so this only suppresses the trailing re-jump, never a real reaction.)
+    if redundant_action_penalty and prev is not None:
+        if (action == int(C.Action.JUMP)
+                and prev.get("must_jump") and not prev.get("next_must_jump")):
+            r -= redundant_action_penalty
+        elif (action == int(C.Action.SLIDE)
+                and prev.get("must_slide") and not prev.get("next_must_slide")):
+            r -= redundant_action_penalty
     return r

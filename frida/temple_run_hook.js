@@ -95,8 +95,13 @@ const ACTION_PORT = 9998;
 const POLL_MS = 100;
 
 // ObstacleType -> required reaction
-const MUST_JUMP_TYPES = [1, 4];   // kObstacleHole, kObstacleTreeJump
-const MUST_SLIDE_TYPES = [5, 6];  // kObstacleTreeSlide, kObstacleFlameTower
+// TreeStumble (3) is lane-dependent on the phone (left lane = jump-or-die, middle = stumble/2nd-hit
+// kills, right = free). Jumping clears it on EVERY lane, so we report it as must_jump -> the policy
+// learns ONE robust response (jump) without needing lane awareness. Matches sim _MUST_JUMP.
+// LevelChange (7) marks a ZONE/ALTITUDE TRANSITION (path_level changes, e.g. 2->3 mid->high) which is
+// a CREVASSE that must be jumped — captured live: obstacle=7 + path_level 2->3 + no jump => fell+died.
+const MUST_JUMP_TYPES = [1, 3, 4, 7]; // Hole, TreeStumble, TreeJump, LevelChange(zone-transition crevasse)
+const MUST_SLIDE_TYPES = [5, 6];      // kObstacleTreeSlide, kObstacleFlameTower
 
 // ---------------------------------------------------------------------------
 // State
@@ -117,7 +122,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'geo-latch-1'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'geo-latch-4'; // bump on each hook edit to verify the right build is injected
 let cachedDbg = null;               // raw junction structure for diagnosis
 // One-turn-per-junction latch: the real game keeps is_turn TRUE for many frames AFTER a turn
 // (the sim consumes it), so a sim-trained policy over-turns into the approach cell and dies.
@@ -355,7 +360,7 @@ function snapshot() {
     score: 0, velocity: 0.0, path_type: -1, path_level: -1, facing: -1,
     must_jump: false, must_slide: false, is_game_over: false,
     can_turn_left: false, can_turn_right: false, is_turn: false,
-    distance: 0.0,
+    distance: 0.0, obstacle: -1,
     next_is_turn: false, next_can_turn_left: false, next_can_turn_right: false,
     next_must_jump: false, next_must_slide: false,
   };
@@ -390,6 +395,7 @@ function snapshot() {
     const obs = readI32(pe, OFF.PE_Obstacles);
     s.must_jump = MUST_JUMP_TYPES.indexOf(obs) !== -1;
     s.must_slide = MUST_SLIDE_TYPES.indexOf(obs) !== -1;
+    s.obstacle = obs;   // raw ObstacleType enum (diagnose crevasse / tree-root)
   }
   // turn availability (computed on the main thread in the Update hook via the game's queries)
   s.can_turn_left = cachedCanLeft;

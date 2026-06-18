@@ -295,3 +295,63 @@ step is ≈ **−1**. `prev_score` is set from the reset frame (~162), so the fi
   `--grow-episode-steps`/`--max-episode-steps-growth`/`--max-episode-steps-ceiling`.
 - **Connection layer (`client.py`):** `StateClient` reader thread keeps only the latest frame (`seq`
   counter); `ActionClient` holds one persistent `TCP_NODELAY` socket.
+
+---
+
+## 10. Headless sim + policy training — sim-to-real findings (2026-06-18)
+
+**Pipeline:** `TempleRunSim-v0` (`src/templerun_rl/sim_env.py`) is a fast headless model of the game
+(track gen, 3 lanes, obstacles, junctions, 3 altitude **zones**, velocity curve, domain randomization).
+Train PPO in the sim (`scripts/train_sim.py`, CPU, minutes), deploy the `.zip` on the phone via the same
+`TempleRunEnv` + Frida hook. **Reward = distance-delta** (DistanceTraveled@0x124), not score (score is
+multiplier-inflated). The sim is essentially SOLVED (a good policy hits 100% turns / 10,000m on a
+normal-window config) — so the on-device shortfall is **sim-to-real fidelity**, not net capacity.
+
+**Deployment model: `runs/ppo_best.zip` (= linger2)** — MLP [128,128], action-history K=4, trained with
+turn-linger + DR + zones. Each model has a sidecar `<name>.json` (frame_stack, K, arch) so
+`scripts/eval_real.py <model>` auto-configures the obs. **Eval with `--turn-cooldown 3`** (default).
+
+### What MOVED the on-device number (best real run 393 → 1258+ native, 1643 with cooldown)
+1. **The double-turn was THE dominant on-device turn-death.** On the phone `is_turn` stays True ~2
+   frames at a junction (facing-change lags the input); with the 1-frame obs lag the policy fires the
+   turn on BOTH frames — the 1st lands on the corner (good), the 2nd OVER-ROTATES the character off the
+   path → Fall (facing goes e.g. N→E→S). The plain sim consumed `is_turn` instantly, so the policy was
+   never tempted → never learned to resist. **Verified live** (capture) + reproduced in-sim.
+2. **TURN COOLDOWN (host-side, no retrain): `env.py` `turn_cooldown`** — after a turn is sent, drop
+   further turn actions for N steps (NoOp). `--turn-cooldown 3` is best (2/4/5 much worse). Instant
+   fix: median 281→~590, best 393→1643.
+3. **TURN LINGER (principled, sim-to-real): `sim_env` `turn_linger_frames`** — force `is_turn` True for
+   N frames after a turn (a 2nd turn during them = over-rotation death, death_type 8). The policy then
+   MUST learn (via action-history memory) to turn ONCE. In-sim proof: a non-linger model dies 40/40 to
+   over-rotation on a linger env; the linger-trained model survives 40/40. On device: best 1258 at
+   **cooldown=0** (native single-turns, no crutch). This is the real fix; cooldown is the patch.
+
+### What did NOT help (ran the experiments, drew the conclusion)
+- **Bigger / deeper nets HURT.** Sweep (per-turn on tight window): [128,128]=98.95% > [256,256]=94.77%
+  > [128,128,128]=no gain. Most-params config was worst. Sim turn-reliability is timing-limited, not
+  capacity-limited. **Keep 128×128.**
+- **Frame-stacking HURTS** (fs=1 98.95% > fs=2 97.46% > fs=4 97.52%): the base obs already has the
+  `next_is_turn` lookahead, so stacking past frames adds dilution not anticipation. `--frame-stack 1`.
+- **Tightening the training turn window** (lingertight, dr_turn_window_frac[0.28,0.45]) did NOT beat the
+  default-window linger2 (99.03% vs 99.33% per-turn on the linger+tight metric).
+- **Modeling action lag (`action_delay=1`) is UNFAIR** even with linger — a memory+lag-aware oracle dies
+  30/30 (the 1-step lag overruns the tight DR window). Don't re-add without re-widening the window.
+
+### Key reward/obs knobs (all in `constants.py` defaults; train_sim flags)
+- `action_history_len` (K): one-hot of last K actions appended to obs (memory → curbs double-turn; needs
+  ent_coef≈0.04 to avoid a NOOP-collapse). `action_cost`=0.06 kills the strafe-spam high-ent_coef causes.
+- `redundant_action_penalty`=0.12 (kills the double-JUMP: reward anticipatory jump, dock the trailing one).
+- `frame_stack` (N), `turn_linger_frames`, `--sim-config '{json}'` (arbitrary sim overrides).
+
+### Metrics / scripts
+- `scripts/score_turns.py` — per-TURN reliability + 10k-reached on a tight-window config (phone proxy).
+- `scripts/score_hard.py` — survival on the hard held-out config (arch discrimination).
+- `scripts/exp_phone.py <model> --cooldowns a,b` — on-device dist + death-cause classification (turn/
+  obstacle/zone). `scripts/eval_real.py` — plain on-device eval (auto-reads sidecar).
+- Current state: linger2 ~99.3% per-turn on the hardest sim (8460 junctions), max sim run 11,500m. The
+  last mile to 99.99% (needed for a reliable 10,000m) is the late-first-turn at the window edge — likely
+  needs a hook-side fix (latch is_turn=0 on turn-byte RECEIPT, or a distance-to-junction obs).
+
+### Device note
+New phone **nzqwrkbyfeey89fa** (replaces topaz e4de25a1). Same crash-loop after ~30-60 min of eval;
+recover with clean_inject + force-stop + relaunch + setup_device (see [[launch-recipe-multi-phone]]).
