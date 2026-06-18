@@ -91,6 +91,14 @@ STATE_FIELDS = (
     "can_turn_right",
     "is_turn",
     "distance",   # GameController.DistanceTraveled — clean run distance (no score multiplier); reward signal, excluded from obs
+    # 1-cell LOOKAHEAD (the cell ahead of the nearest) — lets the policy ANTICIPATE turns/obstacles
+    # the way a human reads the track visually, instead of only reacting when a junction is already
+    # the nearest cell (too late: the real turn window is ~2 control-steps). Included in the obs.
+    "next_is_turn",
+    "next_can_turn_left",
+    "next_can_turn_right",
+    "next_must_jump",
+    "next_must_slide",
 )
 
 # The 17 boolean flags (everything except score/velocity/path_type/path_level/facing).
@@ -116,8 +124,12 @@ BOOL_FIELDS = (
 INT_FIELDS = ("score", "path_type", "path_level", "facing")
 FLOAT_FIELDS = ("velocity", "distance")
 
+LOOKAHEAD_FIELDS = ("next_is_turn", "next_can_turn_left", "next_can_turn_right",
+                    "next_must_jump", "next_must_slide")
+
 # Default values used when a field is missing from a (possibly truncated) JSON line.
 STATE_DEFAULTS = {f: False for f in BOOL_FIELDS}
+STATE_DEFAULTS.update({f: False for f in LOOKAHEAD_FIELDS})
 STATE_DEFAULTS.update({"score": 0, "path_type": -1, "path_level": -1, "facing": -1,
                        "velocity": 0.0, "distance": 0.0})
 

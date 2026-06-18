@@ -76,6 +76,10 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "ramp_distance": 6000.0,           # [CALIBRATED] distance over which difficulty goes 0 -> 1
     "min_space_between_turns_late": 7, # [CALIBRATED] turn spacing at full difficulty (cells)
     "turn_prob_late": 0.5,             # [CALIBRATED] turn probability at full difficulty
+    # A junction is turnable only for the first this-fraction of the cell — ~2 control-steps,
+    # matching the real ~217ms turn window (measured: is_turn True ~13 frames @60Hz over 206 human
+    # turns). Forces the policy to turn promptly (else it learns lazy turns -> dies-too-late on phone).
+    "turn_window_frac": 0.5,           # [CALIBRATED] fraction of the junction cell that stays turnable
     "slides_after_distance": 300.0,    # [CALIBRATED] TreeSlide/FlameTower obstacles only past this distance
     "default_path_level": 2,           # [READ] sPathLevel = 2 (Temple)
     # Powerup spawn probabilities are all 0 in the baseline read (sProbabilityBoost/Invincibility/
@@ -475,7 +479,7 @@ class TempleRunSimEnv(gym.Env):
         """Turn is valid ONLY at a junction with a matching exit; mid-path turn kills (SPEC §3/§4)."""
         cell = self._current_cell()
         want_left = a == int(C.Action.TURN_LEFT)
-        valid = bool(cell.get("is_turn")) and (
+        valid = bool(cell.get("is_turn")) and self._turn_window_open() and (
             cell.get("can_turn_left") if want_left else cell.get("can_turn_right")
         )
         if valid:
@@ -592,17 +596,33 @@ class TempleRunSimEnv(gym.Env):
         """The element the hook would report as NearestElement (the current/just-ahead cell)."""
         return self._current_cell()
 
+    def _turn_window_open(self) -> bool:
+        """Procedural: a junction is turnable only for the first ``turn_window_frac`` of the cell
+        (~2 control-steps, matching the real ~217ms window measured from human turns) -> forces the
+        policy to turn PROMPTLY instead of lazily (the cause of dying-too-late on the phone). Replay
+        keeps the recorded is_turn (it already encodes the real window) so fidelity is untouched."""
+        if self.track_source == "replay":
+            return True
+        cell_len = float(self.cfg["cell_length"])
+        return self._dist_into_cell < cell_len * float(self.cfg["turn_window_frac"])
+
     def _snapshot(self) -> dict:
-        """Produce the 22-field raw-state dict (constants.STATE_FIELDS order)."""
+        """Produce the raw-state dict (constants.STATE_FIELDS order) incl. 1-cell lookahead."""
         cell = self._nearest_cell()
         obst = int(cell.get("obstacles", 0))
         must_jump = obst in _MUST_JUMP
         must_slide = obst in _MUST_SLIDE
-        is_turn = bool(cell.get("is_turn"))
+        win = self._turn_window_open()
+        is_turn = bool(cell.get("is_turn")) and win
         # CanTurnLeft/Right are heading-relative in the game, but the recorded/cell fields are
-        # already the post-heading turnability the hook reports -> expose them directly.
-        can_l = bool(cell.get("can_turn_left"))
-        can_r = bool(cell.get("can_turn_right"))
+        # already the post-heading turnability the hook reports -> expose them directly (windowed).
+        can_l = bool(cell.get("can_turn_left")) and win
+        can_r = bool(cell.get("can_turn_right")) and win
+
+        # 1-cell lookahead: the cell ahead of the nearest (raw, not window-gated -> anticipation).
+        self._extend_track()
+        nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
+        nobst = int(nxt.get("obstacles", 0))
 
         on_ground = self._jump_t <= 0.0 and not self._is_dead
         state = {
@@ -629,6 +649,11 @@ class TempleRunSimEnv(gym.Env):
             "can_turn_right": bool(can_r),
             "is_turn": bool(is_turn),
             "distance": float(self._distance_real),
+            "next_is_turn": bool(nxt.get("is_turn")),
+            "next_can_turn_left": bool(nxt.get("can_turn_left")),
+            "next_can_turn_right": bool(nxt.get("can_turn_right")),
+            "next_must_jump": nobst in _MUST_JUMP,
+            "next_must_slide": nobst in _MUST_SLIDE,
         }
         return state
 

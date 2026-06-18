@@ -115,6 +115,90 @@ class EvalCallback(BaseCallback):
         return True
 
 
+class RealPhoneEvalCallback(BaseCallback):
+    """Every ``every`` steps, play the current greedy policy on the REAL phone for a few episodes
+    and log real survival/distance/score to TensorBoard (eval_real/*). This is the sim-to-real
+    check — you watch the real curve climb next to the sim curve. Robust: any phone hiccup is
+    caught and the eval is skipped (training never dies for a flaky device)."""
+    def __init__(self, every: int, serial: str, device_index: int, episodes: int,
+                 max_steps: int, verbose=1):
+        super().__init__(verbose)
+        self.every = every
+        self.serial = serial
+        self.device_index = device_index
+        self.episodes = episodes
+        self.max_steps = max_steps
+        self._last = 0
+        self._env = None
+
+    def _get_env(self):
+        if self._env is None:
+            import templerun_rl.constants as _C
+            from templerun_rl.env import TempleRunEnv
+            ports = _C.device_ports(self.device_index)
+            self._env = TempleRunEnv(
+                host="127.0.0.1", state_port=ports["state_port"], action_port=ports["action_port"],
+                max_episode_steps=self.max_steps, reward_mode="distance", auto_connect=True,
+                # fail fast if the phone is asleep/down so a real-eval can't stall training for long
+                freeze_timeout=12.0, reset_timeout=6.0, connect_timeout=6.0)
+        return self._env
+
+    def _on_step(self) -> bool:
+        if self.every <= 0 or self.num_timesteps - self._last < self.every:
+            return True
+        self._last = self.num_timesteps
+        try:
+            env = self._get_env()
+            steps, dists, scores, deaths, frozen = [], [], [], 0, 0
+            for _ in range(self.episodes):
+                o, i = env.reset()
+                st = i["raw_state"]
+                d0 = float(st.get("distance", 0) or 0)
+                s = 0
+                degraded = False
+                while True:
+                    a, _ = self.model.predict(o, deterministic=True)
+                    o, r, term, trunc, info = env.step(int(a))
+                    st = info["raw_state"]
+                    if info.get("degraded"):     # phone paused/frozen -> bail fast, don't burn 600 steps
+                        degraded = True
+                        break
+                    s += 1
+                    if term:
+                        deaths += 1
+                        break
+                    if trunc:
+                        break
+                prog = float(st.get("distance", 0) or 0) - d0
+                # A frozen/limbo run (degraded, or no distance progress) is NOT real survival —
+                # the phone is paused (e.g. notification shade covering the game). Don't count it.
+                if degraded or prog < 5.0:
+                    frozen += 1
+                    continue
+                steps.append(s)
+                dists.append(prog)
+                scores.append(int(st.get("score", 0) or 0))
+            if not dists:
+                print(f"[REAL eval @ {self.num_timesteps}] FROZEN — topaz not running a real "
+                      f"game ({frozen}/{self.episodes} limbo; check the screen/shade)", flush=True)
+                self.logger.record("eval_real/frozen", float(frozen))
+                self._env = None
+                return True
+            ms = float(np.median(steps))
+            md = float(np.median(dists))
+            self.logger.record("eval_real/median_steps", ms)
+            self.logger.record("eval_real/median_distance", md)
+            self.logger.record("eval_real/median_score", float(np.median(scores)))
+            self.logger.record("eval_real/deaths", deaths)
+            print(f"[REAL eval @ {self.num_timesteps}] topaz: median steps={ms:.0f} "
+                  f"distance={md:.0f} score={int(np.median(scores))} deaths={deaths}/{self.episodes}",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001  flaky phone must never kill training
+            print(f"[REAL eval @ {self.num_timesteps}] SKIPPED ({type(e).__name__}: {e})", flush=True)
+            self._env = None  # force reconnect next time
+        return True
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--timesteps", type=int, default=3_000_000)
@@ -129,6 +213,13 @@ def main() -> None:
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="runs/ppo_sim")
+    # periodic REAL-phone eval (sim-to-real): play on the phone every N steps, log to TensorBoard
+    p.add_argument("--real-eval-every", type=int, default=0,
+                   help="play the policy on the real phone every N steps (0 = off)")
+    p.add_argument("--real-eval-serial", default="e4de25a1", help="phone serial for real eval")
+    p.add_argument("--real-eval-device-index", type=int, default=0)
+    p.add_argument("--real-eval-episodes", type=int, default=2)
+    p.add_argument("--real-eval-max-steps", type=int, default=600)
     args = p.parse_args()
 
     print(f"baselines: oracle {_rollout('oracle', 10)}, random {_rollout('random', 10)}", flush=True)
@@ -143,10 +234,16 @@ def main() -> None:
         policy_kwargs=dict(net_arch=[64, 64]),
         tensorboard_log="runs/tb_sim", verbose=0,
     )
-    ckpt = CheckpointCallback(save_freq=max(1, 200_000 // args.num_envs),
+    ckpt = CheckpointCallback(save_freq=max(1, 100_000 // args.num_envs),
                               save_path="runs", name_prefix="ppo_sim")
-    evalcb = EvalCallback(every=200_000)
-    model.learn(total_timesteps=args.timesteps, callback=[ckpt, evalcb], progress_bar=False)
+    callbacks = [ckpt, EvalCallback(every=100_000)]
+    if args.real_eval_every > 0:
+        callbacks.append(RealPhoneEvalCallback(
+            every=args.real_eval_every, serial=args.real_eval_serial,
+            device_index=args.real_eval_device_index, episodes=args.real_eval_episodes,
+            max_steps=args.real_eval_max_steps))
+        print(f"REAL-phone eval every {args.real_eval_every} steps on {args.real_eval_serial}", flush=True)
+    model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=False)
     model.save(f"{args.out}_final")
     print(f"saved {args.out}_final.zip", flush=True)
 

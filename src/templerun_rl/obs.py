@@ -18,16 +18,18 @@ PATH_TYPE_MAX = 37.0
 PATH_LEVEL_MAX = 4.0
 FACING_MAX = 4.0   # PathDirection: None=0, N=1, E=2, S=3, W=4
 
-# Observation vector layout (21 dims): the 17 bools, then 4 normalized scalars.
+# Observation vector layout: the bool flags (incl. 1-cell lookahead), then normalized scalars.
 OBS_BOOL_FIELDS = (
     "is_dead", "is_jumping", "is_sliding", "is_on_ground", "is_stumbling",
     "has_invincibility", "has_angel_wings", "has_vacuum", "has_boost",
     "is_mega_boost", "is_strafing", "must_jump", "must_slide", "is_game_over",
     "can_turn_left", "can_turn_right", "is_turn",
+    # 1-cell lookahead — anticipation (see a junction/obstacle before it's the nearest cell).
+    "next_is_turn", "next_can_turn_left", "next_can_turn_right", "next_must_jump", "next_must_slide",
 )
 OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
-OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS  # length 18
-OBS_LEN = len(OBS_FIELDS)  # 18
+OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS
+OBS_LEN = len(OBS_FIELDS)  # 22 bool/lookahead-inclusive + 4 scalar = 26
 
 
 def _norm_enum(value: int, max_value: float) -> float:

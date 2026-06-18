@@ -43,7 +43,22 @@ const OFF = {
   DistanceTraveled: 0x124, // GameController.DistanceTraveled (float) — clean distance, no score multiplier
   // PathElement
   PE_Type: 0x30, PE_Level: 0x34, PE_Obstacles: 0x38,
+  // directional neighbors (PathElement*) — the "forward" cell for 1-cell lookahead
+  PathNorth: 0x50, PathEast: 0x58, PathWest: 0x60, PathSouth: 0x68,
 };
+
+// PathDirection (N1 E2 S3 W4) -> neighbor offset in that heading.
+// forward: N->North E->East S->South W->West.  left = 90deg CCW, right = 90deg CW.
+const FWD_NEIGHBOR = { 1: 0x50, 2: 0x58, 3: 0x68, 4: 0x60 };
+const LEFT_NEIGHBOR = { 1: 0x60, 2: 0x50, 3: 0x58, 4: 0x68 };  // N->W E->N S->E W->S
+const RIGHT_NEIGHBOR = { 1: 0x58, 2: 0x68, 3: 0x60, 4: 0x50 }; // N->E E->S S->W W->N
+
+// Turn availability from GEOMETRY (which exit cell exists), not the position-dependent
+// CanTurnLeft/Right query (which flickers 0/1 at the junction and is useless for lookahead).
+function neighborExists(cell, off) {
+  if (!off) return false;
+  try { const n = cell.add(off).readPointer(); return n && !n.isNull(); } catch (_) { return false; }
+}
 
 const RVA = {
   Start: 0x1269CE8,
@@ -99,6 +114,14 @@ let updateTicks = 0;   // increments every GameController.Update — proves the 
 let upgradesMaxed = false;
 let cachedRunVel = 0;  // GetRunVelocity() sampled on the main thread (Update), read by the broadcast thread
 let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn availability at the nearest element
+// 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
+let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
+let cachedNextMustJump = false, cachedNextMustSlide = false;
+const HOOK_VERSION = 'geo-latch-1'; // bump on each hook edit to verify the right build is injected
+let cachedDbg = null;               // raw junction structure for diagnosis
+// One-turn-per-junction latch: the real game keeps is_turn TRUE for many frames AFTER a turn
+// (the sim consumes it), so a sim-trained policy over-turns into the approach cell and dies.
+let prevNearest = ptr(0), turnedHere = false, prevFacing = 0;
 
 function log(m) { console.log('[TR] ' + m); }
 function dbg() { try { send({ tr: Array.prototype.slice.call(arguments) }); } catch (_) {} }
@@ -221,10 +244,45 @@ function installHooks() {
           const pe = gcInstance.add(OFF.NearestElement).readPointer();
           if (!pe.isNull()) {
             const facing = cp.add(OFF.Facing).readS32();
-            cachedCanLeft = !!fn.CanTurnLeft(pe, facing, NULLPTR);
-            cachedCanRight = !!fn.CanTurnRight(pe, facing, NULLPTR);
-            cachedIsTurn = !!fn.IsTurn(pe, NULLPTR);
-          } else { cachedCanLeft = cachedCanRight = cachedIsTurn = false; }
+            const rawIsTurn = !!fn.IsTurn(pe, NULLPTR);
+            // New junction cell -> reset the "already turned here" latch.
+            if (!pe.equals(prevNearest)) { turnedHere = false; prevNearest = pe; }
+            // Turned on this junction (heading changed while ON a turn cell)? Latch it so we stop
+            // exposing the turn -> the policy turns exactly ONCE (matching the sim, which consumes
+            // is_turn on the turn). Without this it over-turns into the approach cell and dies.
+            if (rawIsTurn && prevFacing > 0 && facing !== prevFacing) turnedHere = true;
+            prevFacing = facing;
+            // is_turn / turn DIRECTION (geometry: which exit cell exists, 90deg off heading) — exposed
+            // only until the one turn is taken.
+            cachedIsTurn = rawIsTurn && !turnedHere;
+            cachedCanLeft = cachedIsTurn ? neighborExists(pe, LEFT_NEIGHBOR[facing]) : false;
+            cachedCanRight = cachedIsTurn ? neighborExists(pe, RIGHT_NEIGHBOR[facing]) : false;
+            // DEBUG: absolute neighbor existence + the query, to verify direction logic at junctions.
+            cachedDbg = {
+              fac: facing,
+              N: neighborExists(pe, 0x50), E: neighborExists(pe, 0x58),
+              W: neighborExists(pe, 0x60), S: neighborExists(pe, 0x68),
+              qL: !!fn.CanTurnLeft(pe, facing, NULLPTR), qR: !!fn.CanTurnRight(pe, facing, NULLPTR),
+            };
+            // 1-cell lookahead: the forward neighbor in the player's heading.
+            const noff = FWD_NEIGHBOR[facing];
+            const nxt = noff ? pe.add(noff).readPointer() : NULL;
+            if (nxt && !nxt.isNull()) {
+              cachedNextIsTurn = !!fn.IsTurn(nxt, NULLPTR);
+              cachedNextCanLeft = neighborExists(nxt, LEFT_NEIGHBOR[facing]);
+              cachedNextCanRight = neighborExists(nxt, RIGHT_NEIGHBOR[facing]);
+              const nobs = nxt.add(OFF.PE_Obstacles).readS32();
+              cachedNextMustJump = MUST_JUMP_TYPES.indexOf(nobs) !== -1;
+              cachedNextMustSlide = MUST_SLIDE_TYPES.indexOf(nobs) !== -1;
+            } else {
+              cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
+              cachedNextMustJump = cachedNextMustSlide = false;
+            }
+          } else {
+            cachedCanLeft = cachedCanRight = cachedIsTurn = false;
+            cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
+            cachedNextMustJump = cachedNextMustSlide = false;
+          }
         } catch (_) {}
       }
       if (pendingActions.length === 0) return;
@@ -298,6 +356,8 @@ function snapshot() {
     must_jump: false, must_slide: false, is_game_over: false,
     can_turn_left: false, can_turn_right: false, is_turn: false,
     distance: 0.0,
+    next_is_turn: false, next_can_turn_left: false, next_can_turn_right: false,
+    next_must_jump: false, next_must_slide: false,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
 
@@ -335,6 +395,13 @@ function snapshot() {
   s.can_turn_left = cachedCanLeft;
   s.can_turn_right = cachedCanRight;
   s.is_turn = cachedIsTurn;
+  s.next_is_turn = cachedNextIsTurn;
+  s.next_can_turn_left = cachedNextCanLeft;
+  s.next_can_turn_right = cachedNextCanRight;
+  s.next_must_jump = cachedNextMustJump;
+  s.next_must_slide = cachedNextMustSlide;
+  s._hv = HOOK_VERSION;
+  s._dbg = cachedDbg;
   return s;
 }
 
