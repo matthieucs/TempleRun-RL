@@ -79,6 +79,16 @@ def _oracle(st: dict) -> int:
         return int(C.Action.JUMP)
     if st["must_slide"] or st.get("next_must_slide"):
         return int(C.Action.SLIDE)
+    # LANE: be in the upcoming narrow's safe lane; otherwise RE-CENTER (so the next narrow is <=1 lane
+    # away -> reachable in the 1-cell window). Low priority (after jump/slide).
+    ntl = st.get("narrow_target_lane")
+    target = 0 if ntl is None else int(ntl)
+    lane = float(st.get("lane", -1.3))
+    cur = -1 if lane < -3.15 else (1 if lane > 0.55 else 0)
+    if cur < target:
+        return int(C.Action.STRAFE_RIGHT)
+    if cur > target:
+        return int(C.Action.STRAFE_LEFT)
     return int(C.Action.NOOP)
 
 

@@ -36,7 +36,7 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # fire a turn at cell-center instead of too early), lane = which of the 3 lanes (L/C/R) the runner is in
 # (for narrow strips). Both come from the hook (CharacterPlayer.GetPosition2D + PathElement.Rectangle)
 # and from the sim's own state — they are OBSERVATIONS, not actions.
-OBS_EXTRA_FIELDS = ("cell_progress", "lane")
+OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
 OBS_LEN = len(OBS_FIELDS)  # 22 bool/lookahead + 4 scalar + 2 extra = 28
 
@@ -99,6 +99,11 @@ def state_to_obs(state: dict) -> np.ndarray:
     cp = g("cell_progress")
     out[base + 4] = float(np.clip(cp if cp is not None else 0.0, 0.0, 1.0))
     out[base + 5] = lane_to_obs(g("lane"))
+    # narrow_target_lane: which lane to be in for the upcoming narrow (-1 L / 0 C / +1 R), or None ->
+    # 0.5 (center, the default home / "no constraint"). Same {0,0.5,1} encoding as `lane` so the
+    # policy compares them and strafes to match.
+    ntl = g("narrow_target_lane")
+    out[base + 6] = 0.5 if ntl is None else float(np.clip((int(ntl) + 1) / 2.0, 0.0, 1.0))
     return out
 
 

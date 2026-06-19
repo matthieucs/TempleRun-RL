@@ -133,7 +133,7 @@ STATE_DEFAULTS.update({f: False for f in LOOKAHEAD_FIELDS})
 STATE_DEFAULTS.update({"score": 0, "path_type": -1, "path_level": -1, "facing": -1,
                        "velocity": 0.0, "distance": 0.0,
                        "cell_progress": 0.0, "lane": -1.3,  # lane default = real home/center
-                       "next_wide_gap": False})
+                       "next_wide_gap": False, "narrow_target_lane": None})
 
 
 # --- Environment defaults ----------------------------------------------------
