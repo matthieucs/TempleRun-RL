@@ -33,6 +33,8 @@ def main() -> None:
     p.add_argument("--stochastic", dest="deterministic", action="store_false")
     p.add_argument("--turn-cooldown", type=int, default=3,
                    help="drop turn actions for N steps after a turn (kills the double-turn over-rotation)")
+    p.add_argument("--step-dt", type=float, default=0.1,
+                   help="control tick seconds; 0.05 = 20 Hz (match the hook POLL_MS + the model's train rate)")
     args = p.parse_args()
 
     model = PPO.load(args.model)
@@ -47,7 +49,7 @@ def main() -> None:
     ports = C.device_ports(args.device_index)
     env = TempleRunEnv(host="127.0.0.1", state_port=ports["state_port"],
                        action_port=ports["action_port"], max_episode_steps=args.max_steps,
-                       reward_mode="distance", auto_connect=True,
+                       reward_mode="distance", auto_connect=True, step_dt=args.step_dt,
                        frame_stack=fs, action_history_len=K, turn_cooldown=args.turn_cooldown,
                        freeze_timeout=20.0, reset_timeout=8.0, connect_timeout=8.0)
     print(f"obs: frame_stack={fs} action_history={K} (dim {model.observation_space.shape[0]}) "

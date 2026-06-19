@@ -92,7 +92,8 @@ const PLAYER_ID = 1; // confirmed: PlayerManager.GetActivePlayer() returns 1
 
 const STATE_PORT = 9999;
 const ACTION_PORT = 9998;
-const POLL_MS = 100;
+const POLL_MS = 100;  // 10 Hz broadcast. (Tried 20 Hz to cut turn-lag — the 20 Hz-retrained model was
+                      // WORSE on device, median 180 vs 607; reverted. The turn-barrier is not the rate.)
 
 // ObstacleType -> required reaction
 // TreeStumble (3) is lane-dependent on the phone (left lane = jump-or-die, middle = stumble/2nd-hit
@@ -122,7 +123,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'geo-latch-4'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'geo-latch-5b'; // bump on each hook edit to verify the right build is injected
 let cachedDbg = null;               // raw junction structure for diagnosis
 // One-turn-per-junction latch: the real game keeps is_turn TRUE for many frames AFTER a turn
 // (the sim consumes it), so a sim-trained policy over-turns into the approach cell and dies.

@@ -34,6 +34,7 @@ def _make_env(args, rank: int):
         env = gym.make(
             "TempleRunSim-v0",
             max_episode_steps=args.max_episode_steps,
+            step_dt=args.step_dt,
             reward_mode="distance",
             reward_scale=args.reward_scale,
             action_delay=args.action_delay,
@@ -241,6 +242,9 @@ def main() -> None:
                         "= over-rotation death) so the policy learns to NOT double-turn. try 2. needs K>0.")
     p.add_argument("--sim-config", default="",
                    help="JSON dict of extra sim config overrides, e.g. '{\"dr_turn_window_frac\":[0.28,0.45]}'")
+    p.add_argument("--step-dt", type=float, default=C.DEFAULT_STEP_DT,
+                   help="control tick seconds. 0.05 = 20 Hz (halves the on-device turn lag). MUST match "
+                        "the hook POLL_MS and eval --step-dt. Pair with turn_linger ~4 at 20 Hz.")
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--action-delay", type=int, default=0,
                    help="steps to buffer the action before applying. EXPERIMENTAL/off: delay=1 "
