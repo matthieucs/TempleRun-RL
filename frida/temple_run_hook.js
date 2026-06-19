@@ -132,7 +132,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'turn-buffer-7a'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'crevasse-assist-8a'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -150,6 +150,17 @@ let pendingSawTurnCell = false;     // became true once we were on the turn cell
 let cachedLane = 0.0;               // signed lateral offset from path center (+ = right of travel)
 let cachedCellProg = 0.0;           // longitudinal position within the nearest cell along travel, 0..1
 let cachedRawIsTurn = false;        // nearest cell is a turn piece (IsTurn()), pre-latch
+// CREVASSE JUMP-ASSIST: the zone/altitude transition (ObstacleType.LevelChange=7) is a ~2-cell GAP.
+// The policy reacts to the 1-cell lookahead and jumps too EARLY -> comes down IN the gap -> falls
+// (or doesn't jump at all). The right response is deterministic: jump just as you reach the gap so the
+// ~0.6 s airtime spans both cells. So near a crevasse we take over the jump: suppress the policy's jump
+// and fire one well-timed native Jump. Calibrate JUMP_FIRE_PROG live like the turn fire-progress.
+const OBST_LEVEL_CHANGE = 7;
+const CREVASSE_ASSIST = true;
+const JUMP_FIRE_PROG = 0.70;        // fire the assisted jump once the pre-gap cell crosses this progress
+let cachedIsLevelChange = false;    // nearest cell IS a LevelChange crevasse
+let cachedNextIsLevelChange = false;// forward-neighbor cell is a LevelChange crevasse (gap ahead)
+let crevasseJumped = false;         // one assisted jump per crevasse (reset when clear of LevelChange)
 // One-turn-per-junction latch: the real game keeps is_turn TRUE for many frames AFTER a turn
 // (the sim consumes it), so a sim-trained policy over-turns into the approach cell and dies.
 let prevNearest = ptr(0), turnedHere = false, prevFacing = 0;
@@ -298,6 +309,7 @@ function installHooks() {
               if (DIAG_TURN) cachedTurnDiag = {
                 lane: Math.round(cachedLane * 10) / 10, prog: Math.round(cachedCellProg * 100) / 100,
                 raw: rawIsTurn, pend: pendingTurn, fac: facing,
+                lc: cachedIsLevelChange, nlc: cachedNextIsLevelChange, cj: crevasseJumped,
               };
             } catch (e) { if (DIAG_TURN) cachedTurnDiag = { err: String(e) }; }
             // Fire a buffered turn once the player reaches the cell center (lands centered, not off-edge).
@@ -314,6 +326,7 @@ function installHooks() {
             cachedIsTurn = rawIsTurn && !turnedHere;
             cachedCanLeft = cachedIsTurn ? neighborExists(pe, LEFT_NEIGHBOR[facing]) : false;
             cachedCanRight = cachedIsTurn ? neighborExists(pe, RIGHT_NEIGHBOR[facing]) : false;
+            cachedIsLevelChange = (pe.add(OFF.PE_Obstacles).readS32() === OBST_LEVEL_CHANGE);
             // DEBUG: absolute neighbor existence + the query, to verify direction logic at junctions.
             cachedDbg = {
               fac: facing,
@@ -331,14 +344,19 @@ function installHooks() {
               const nobs = nxt.add(OFF.PE_Obstacles).readS32();
               cachedNextMustJump = MUST_JUMP_TYPES.indexOf(nobs) !== -1;
               cachedNextMustSlide = MUST_SLIDE_TYPES.indexOf(nobs) !== -1;
+              cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE);
             } else {
               cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
               cachedNextMustJump = cachedNextMustSlide = false;
+              cachedNextIsLevelChange = false;
             }
+            // Fire one well-timed jump for an upcoming crevasse (after lane/prog are known this frame).
+            maybeJumpCrevasse(cp);
           } else {
             cachedCanLeft = cachedCanRight = cachedIsTurn = false;
             cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
             cachedNextMustJump = cachedNextMustSlide = false;
+            cachedIsLevelChange = cachedNextIsLevelChange = false;
           }
         } catch (_) {}
       }
@@ -391,11 +409,34 @@ function maybeFireTurn(cp) {
   }
 }
 
+// Jump a zone crevasse (LevelChange) at the right moment: just before the gap so the airtime spans
+// both gap cells. One jump per crevasse; a safety late-jump if we somehow reach the gap still grounded.
+function maybeJumpCrevasse(cp) {
+  if (!CREVASSE_ASSIST || cp.isNull()) return;
+  if (!cachedIsLevelChange && !cachedNextIsLevelChange) { crevasseJumped = false; return; }
+  if (crevasseJumped) return;
+  const airborne = readBool(cp, OFF.IsJumping);
+  if (cachedNextIsLevelChange && cachedCellProg >= JUMP_FIRE_PROG && !airborne) {
+    try { fn.Jump(cp, 0.0, NULLPTR); } catch (_) {}
+    crevasseJumped = true;
+    dbg('crevasse_jump', 'prog', Math.round(cachedCellProg * 100) / 100);
+  } else if (cachedIsLevelChange && !airborne) {
+    try { fn.Jump(cp, 0.0, NULLPTR); } catch (_) {}    // safety: on the gap and grounded -> jump now
+    crevasseJumped = true;
+    dbg('crevasse_jump_late', 'prog', Math.round(cachedCellProg * 100) / 100);
+  }
+}
+
 function dispatchAction(a, gc, cp) {
   switch (a) {
     case 0: if (!cp.isNull()) fn.StrafeLeft(cp, NULLPTR); break;
     case 1: if (!cp.isNull()) fn.StrafeRight(cp, NULLPTR); break;
-    case 2: if (!cp.isNull()) fn.Jump(cp, 0.0, NULLPTR); break;
+    case 2: // Jump — suppressed near a crevasse (the assist owns that jump's timing), else normal.
+      if (!cp.isNull()) {
+        if (CREVASSE_ASSIST && (cachedNextIsLevelChange || cachedIsLevelChange)) { dbg('jump_suppress_crevasse'); }
+        else fn.Jump(cp, 0.0, NULLPTR);
+      }
+      break;
     case 3: if (!cp.isNull()) fn.Slide(cp, NULLPTR); break;
     case 4: // TurnLeft — BUFFERED: latch it, fire at the cell center (maybeFireTurn) so it lands on-path.
     case 5: // TurnRight
