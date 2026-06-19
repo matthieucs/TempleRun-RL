@@ -84,7 +84,16 @@ const RVA = {
   CanTurnLeft: 0x12E2E88,        // bool PathElement.CanTurnLeft(PathDirection origin)
   CanTurnRight: 0x12E2F44,       // bool PathElement.CanTurnRight(PathDirection origin)
   IsTurn: 0x12E28B0,             // bool PathElement.IsTurn()
+  // POSITION gate: the game's real "is the player physically over this element's turn area" test.
+  // IsTurn()/CanTurn* are TOPOLOGICAL (the cell HAS a branch); this is the longitudinal window in
+  // which a turn actually lands on the corner. point = player horizontal pos (x,z), radius = tolerance.
+  GetPosition2D: 0x12E0E9C,       // Vector2 MovingObject.GetPosition2D()  -> (x, z)
+  IsPointOverTurnArea2D: 0x12E818C, // bool PathElement.IsPointOverTurnArea(Vector2 point, float radius)
 };
+
+// Player lateral offset within the cell (strafe lane). CharacterPlayer.PlayerXOffset @ 0x190.
+const OFF_PlayerXOffset = 0x190;
+const OFF_PE_Rectangle = 0xA0; // UnityEngine.Rect {xmin@0xA0, ymin@0xA4, w@0xA8, h@0xAC}
 
 // StoreItemType values to max out: AngelWings,HeadStart,HeadStartMega,Vacuum,Invincibility,CoinBonus,CoinValue,Boost
 const UPGRADE_TYPES = [0, 1, 2, 5, 6, 7, 8, 9];
@@ -123,8 +132,24 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'geo-latch-5b'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'turn-buffer-7a'; // bump on each hook edit to verify the right build is injected
+const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
+let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
+// TURN BUFFERING (the big on-device fix): a native TurnLeft/Right fired at the START of the junction
+// cell (cell_progress ~0.1, where the policy naturally reacts to is_turn) swings the player ~12 units
+// off-center -> it falls off the exit path (measured: 9/12 on-device deaths). Firing the SAME turn at
+// the cell CENTER (progress ~0.45) lands it centered every time (postLat <=2). So we don't execute the
+// turn byte immediately: we LATCH it and fire when the player reaches the cell center.
+const TURN_BUFFER = true;
+const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress crosses this (cell-center)
+const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
+let pendingTurn = 0;                // 0 none, 4 TurnLeft, 5 TurnRight (buffered, fires at cell center)
+let pendingTurnAge = 0;
+let pendingSawTurnCell = false;     // became true once we were on the turn cell while a turn is pending
+let cachedLane = 0.0;               // signed lateral offset from path center (+ = right of travel)
+let cachedCellProg = 0.0;           // longitudinal position within the nearest cell along travel, 0..1
+let cachedRawIsTurn = false;        // nearest cell is a turn piece (IsTurn()), pre-latch
 // One-turn-per-junction latch: the real game keeps is_turn TRUE for many frames AFTER a turn
 // (the sim consumes it), so a sim-trained policy over-turns into the approach cell and dies.
 let prevNearest = ptr(0), turnedHere = false, prevFacing = 0;
@@ -187,6 +212,10 @@ function resolve() {
   fn.CanTurnLeft = new NativeFunction(base.add(RVA.CanTurnLeft), 'bool', ['pointer', 'int', 'pointer']);   // (PathElement*, origin, mi) -> bool
   fn.CanTurnRight = new NativeFunction(base.add(RVA.CanTurnRight), 'bool', ['pointer', 'int', 'pointer']); // (PathElement*, origin, mi) -> bool
   fn.IsTurn = new NativeFunction(base.add(RVA.IsTurn), 'bool', ['pointer', 'pointer']);                    // (PathElement*, mi) -> bool
+  // Struct-by-value (arm64 HFA): Vector2 = {float,float} returned/passed in s0,s1 (libffi handles it).
+  fn.GetPosition2D = new NativeFunction(base.add(RVA.GetPosition2D), ['float', 'float'], ['pointer', 'pointer']); // (MovingObject*, mi) -> Vector2
+  fn.IsPointOverTurnArea2D = new NativeFunction(base.add(RVA.IsPointOverTurnArea2D),
+    'bool', ['pointer', ['float', 'float'], 'float', 'pointer']);  // (PathElement*, Vector2 point, float radius, mi) -> bool
   return true;
 }
 
@@ -251,6 +280,28 @@ function installHooks() {
           if (!pe.isNull()) {
             const facing = cp.add(OFF.Facing).readS32();
             const rawIsTurn = !!fn.IsTurn(pe, NULLPTR);
+            cachedRawIsTurn = rawIsTurn;
+            // Player horizontal position -> signed lane (lateral offset from path center, + = right of
+            // travel) + cell_progress (longitudinal position within the nearest cell, 0..1). Both drive
+            // turn-buffering (fire at center) and are exposed in the obs for the next retrain.
+            try {
+              const pos = fn.GetPosition2D(cp, NULLPTR); // [x, z]
+              const rx = readF32(pe, OFF_PE_Rectangle), rz = readF32(pe, OFF_PE_Rectangle + 4);
+              const rw = readF32(pe, OFF_PE_Rectangle + 8), rh = readF32(pe, OFF_PE_Rectangle + 12);
+              const cx = rx + rw / 2, cz = rz + rh / 2;
+              const px = pos[0], pz = pos[1];
+              // right-of-travel lateral + forward progress, per heading (N1 E2 S3 W4)
+              if (facing === 1) { cachedLane = px - cx; cachedCellProg = (pz - rz) / rh; }
+              else if (facing === 2) { cachedLane = -(pz - cz); cachedCellProg = (px - rx) / rw; }
+              else if (facing === 3) { cachedLane = -(px - cx); cachedCellProg = 1 - (pz - rz) / rh; }
+              else if (facing === 4) { cachedLane = pz - cz; cachedCellProg = 1 - (px - rx) / rw; }
+              if (DIAG_TURN) cachedTurnDiag = {
+                lane: Math.round(cachedLane * 10) / 10, prog: Math.round(cachedCellProg * 100) / 100,
+                raw: rawIsTurn, pend: pendingTurn, fac: facing,
+              };
+            } catch (e) { if (DIAG_TURN) cachedTurnDiag = { err: String(e) }; }
+            // Fire a buffered turn once the player reaches the cell center (lands centered, not off-edge).
+            maybeFireTurn(cp);
             // New junction cell -> reset the "already turned here" latch.
             if (!pe.equals(prevNearest)) { turnedHere = false; prevNearest = pe; }
             // Turned on this junction (heading changed while ON a turn cell)? Latch it so we stop
@@ -320,14 +371,47 @@ function maxAllUpgrades(gc) {
   return true;
 }
 
+// Fire a buffered turn (pendingTurn) once the player reaches the junction-cell center, so the turn
+// arc lands it ON the exit path instead of ~12 units off-edge (the dominant on-device death). Called
+// every Update frame (after lane/prog are refreshed) and again right after a turn byte is latched.
+function maybeFireTurn(cp) {
+  if (!pendingTurn || cp.isNull()) return;
+  pendingTurnAge++;
+  if (cachedRawIsTurn) pendingSawTurnCell = true;
+  if (cachedRawIsTurn && cachedCellProg >= TURN_FIRE_PROG) {
+    try { if (pendingTurn === 4) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); } catch (_) {}
+    dbg('turn_fire', pendingTurn, 'prog', Math.round(cachedCellProg * 100) / 100);
+    pendingTurn = 0; pendingTurnAge = 0; pendingSawTurnCell = false;
+    return;
+  }
+  // Give up: we were ON the turn cell and have now left it (missed the window), or it aged out.
+  if ((pendingSawTurnCell && !cachedRawIsTurn) || pendingTurnAge > TURN_PENDING_MAX_AGE) {
+    dbg('turn_drop', pendingTurn, 'prog', Math.round(cachedCellProg * 100) / 100, 'age', pendingTurnAge);
+    pendingTurn = 0; pendingTurnAge = 0; pendingSawTurnCell = false;
+  }
+}
+
 function dispatchAction(a, gc, cp) {
   switch (a) {
     case 0: if (!cp.isNull()) fn.StrafeLeft(cp, NULLPTR); break;
     case 1: if (!cp.isNull()) fn.StrafeRight(cp, NULLPTR); break;
     case 2: if (!cp.isNull()) fn.Jump(cp, 0.0, NULLPTR); break;
     case 3: if (!cp.isNull()) fn.Slide(cp, NULLPTR); break;
-    case 4: if (!cp.isNull()) fn.TurnLeft(cp, NULLPTR); break;
-    case 5: if (!cp.isNull()) fn.TurnRight(cp, NULLPTR); break;
+    case 4: // TurnLeft — BUFFERED: latch it, fire at the cell center (maybeFireTurn) so it lands on-path.
+    case 5: // TurnRight
+      if (!cp.isNull()) {
+        if (TURN_BUFFER) {
+          // Only latch a turn the policy issues AT a junction (on it, or the next cell is one). A turn
+          // on a pure straight is a policy error that would kill -> drop it (don't fire later, off-edge).
+          if (cachedRawIsTurn || cachedNextIsTurn) {
+            pendingTurn = a; pendingTurnAge = 0; pendingSawTurnCell = cachedRawIsTurn;
+            maybeFireTurn(cp); // a turn issued LATE (already past cell center) fires immediately
+          } else { dbg('turn_ignore_straight', a); }
+        } else {
+          if (a === 4) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR);
+        }
+      }
+      break;
     case 6: /* NoOp */ break;
     case 7: // RestartGame() per spec (resets game LOGIC only; the run stays in game-over limbo)
       if (!gc.isNull()) { fn.RestartGame(gc, NULLPTR); dbg('restartgame'); }
@@ -364,6 +448,7 @@ function snapshot() {
     distance: 0.0, obstacle: -1,
     next_is_turn: false, next_can_turn_left: false, next_can_turn_right: false,
     next_must_jump: false, next_must_slide: false,
+    lane: 0.0, cell_progress: 0.0,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
 
@@ -407,8 +492,11 @@ function snapshot() {
   s.next_can_turn_right = cachedNextCanRight;
   s.next_must_jump = cachedNextMustJump;
   s.next_must_slide = cachedNextMustSlide;
+  s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
+  s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
   s._hv = HOOK_VERSION;
   s._dbg = cachedDbg;
+  if (DIAG_TURN) s._turn = cachedTurnDiag;
   return s;
 }
 
