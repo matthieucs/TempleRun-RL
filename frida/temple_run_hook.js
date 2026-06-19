@@ -132,7 +132,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'nn-only-obs-10b'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'nn-only-obs-10c'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -591,7 +591,7 @@ function snapshot() {
     can_turn_left: false, can_turn_right: false, is_turn: false,
     distance: 0.0, obstacle: -1,
     next_is_turn: false, next_can_turn_left: false, next_can_turn_right: false,
-    next_must_jump: false, next_must_slide: false, next_wide_gap: false,
+    next_must_jump: false, next_must_slide: false, next_wide_gap: false, next_path_type: -1,
     lane: 0.0, cell_progress: 0.0,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
@@ -637,6 +637,7 @@ function snapshot() {
   s.next_must_jump = cachedNextMustJump;
   s.next_must_slide = cachedNextMustSlide;
   s.next_wide_gap = cachedNextIsLevelChange;  // forward cell is a 2-cell gap (long hole / level change)
+  s.next_path_type = cachedNextPathType;      // forward cell PE_Type (for narrow detection / mapping)
   s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
   s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
   s._hv = HOOK_VERSION;
