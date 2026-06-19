@@ -132,7 +132,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'crevasse-assist-8b'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'wide-gap-narrow-9b'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -156,12 +156,29 @@ let cachedRawIsTurn = false;        // nearest cell is a turn piece (IsTurn()), 
 // ~0.6 s airtime spans both cells. So near a crevasse we take over the jump: suppress the policy's jump
 // and fire one well-timed native Jump. Calibrate JUMP_FIRE_PROG live like the turn fire-progress.
 const OBST_LEVEL_CHANGE = 7;
+// WIDE GAPS need the same late, well-timed single jump as the crevasse: a 2-cell hole
+// (HoleLongA/B Vert 12/13, Horz 15/16) and the zone LevelChange caps (33-36). The policy jumps too
+// early (reacts to the 1-cell lookahead) and falls into the far half. Single 1-cell holes (11/14) and
+// trees are fine for the policy's early jump -> NOT assisted here.
+const WIDE_GAP_TYPES = [12, 13, 15, 16, 33, 34, 35, 36];
 const CREVASSE_ASSIST = true;
 const JUMP_FIRE_PROG = 0.90;        // fire the assisted jump once the pre-gap cell crosses this progress
                                     // (near the gap entry -> max airtime over the gap; 60 Hz Update = fine)
 let cachedIsLevelChange = false;    // nearest cell IS a LevelChange crevasse
 let cachedNextIsLevelChange = false;// forward-neighbor cell is a LevelChange crevasse (gap ahead)
 let crevasseJumped = false;         // one assisted jump per crevasse (reset when clear of LevelChange)
+// NARROW STRAFE-ASSIST: a NarrowLong piece (path_type 17..30) has a one-lane strip offset to one side;
+// the runner (which never strafes — sits at its home center lane) falls off the edge. The subtype
+// encodes the safe side: NarrowLong{Left 19-21 / Right 22-24} for N/S travel, {Up 25-27 / Down 28-30}
+// for E/W travel; NarrowSmall 17/18 is centered (no strafe). Strafe ONCE toward the safe lane on
+// approach. Up/Down direction is a best guess (verify live and flip NARROW_DIR if wrong).
+const NARROW_STRAFE = true;
+const NARROW_DIR = { 19: 'L', 20: 'L', 21: 'L', 22: 'R', 23: 'R', 24: 'R',
+                     25: 'L', 26: 'L', 27: 'L', 28: 'R', 29: 'R', 30: 'R' };
+const NARROW_STRAFE_PROG = 0.15;    // fire the approach strafe once the pre-narrow cell crosses this
+let cachedPathType = -1;            // nearest cell PE_Type
+let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
+let narrowStrafed = false;          // one assisted strafe per narrow (reset when clear of narrows)
 // One-turn-per-junction latch: the real game keeps is_turn TRUE for many frames AFTER a turn
 // (the sim consumes it), so a sim-trained policy over-turns into the approach cell and dies.
 let prevNearest = ptr(0), turnedHere = false, prevFacing = 0;
@@ -327,7 +344,9 @@ function installHooks() {
             cachedIsTurn = rawIsTurn && !turnedHere;
             cachedCanLeft = cachedIsTurn ? neighborExists(pe, LEFT_NEIGHBOR[facing]) : false;
             cachedCanRight = cachedIsTurn ? neighborExists(pe, RIGHT_NEIGHBOR[facing]) : false;
-            cachedIsLevelChange = (pe.add(OFF.PE_Obstacles).readS32() === OBST_LEVEL_CHANGE);
+            cachedPathType = pe.add(OFF.PE_Type).readS32();
+            cachedIsLevelChange = (pe.add(OFF.PE_Obstacles).readS32() === OBST_LEVEL_CHANGE)
+              || WIDE_GAP_TYPES.indexOf(cachedPathType) !== -1;  // wide gap (long hole / level change)
             // DEBUG: absolute neighbor existence + the query, to verify direction logic at junctions.
             cachedDbg = {
               fac: facing,
@@ -345,19 +364,25 @@ function installHooks() {
               const nobs = nxt.add(OFF.PE_Obstacles).readS32();
               cachedNextMustJump = MUST_JUMP_TYPES.indexOf(nobs) !== -1;
               cachedNextMustSlide = MUST_SLIDE_TYPES.indexOf(nobs) !== -1;
-              cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE);
+              cachedNextPathType = nxt.add(OFF.PE_Type).readS32();
+              cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE)
+                || WIDE_GAP_TYPES.indexOf(cachedNextPathType) !== -1;
             } else {
               cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
               cachedNextMustJump = cachedNextMustSlide = false;
               cachedNextIsLevelChange = false;
+              cachedNextPathType = -1;
             }
             // Fire one well-timed jump for an upcoming crevasse (after lane/prog are known this frame).
             maybeJumpCrevasse(cp);
+            // Strafe once toward a narrow piece's safe lane on approach.
+            maybeStrafeNarrow(cp);
           } else {
             cachedCanLeft = cachedCanRight = cachedIsTurn = false;
             cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
             cachedNextMustJump = cachedNextMustSlide = false;
             cachedIsLevelChange = cachedNextIsLevelChange = false;
+            cachedPathType = cachedNextPathType = -1;
           }
         } catch (_) {}
       }
@@ -425,6 +450,22 @@ function maybeJumpCrevasse(cp) {
     try { fn.Jump(cp, 0.0, NULLPTR); } catch (_) {}    // safety: on the gap and grounded -> jump now
     crevasseJumped = true;
     dbg('crevasse_jump_late', 'prog', Math.round(cachedCellProg * 100) / 100);
+  }
+}
+
+// Strafe once toward a narrow piece's safe lane so the runner doesn't fall off the strip edge.
+// One strafe per narrow approach (reset when clear of all narrow cells).
+function maybeStrafeNarrow(cp) {
+  if (!NARROW_STRAFE || cp.isNull()) return;
+  const nearNarrow = (cachedPathType >= 17 && cachedPathType <= 30);
+  const nextNarrow = (cachedNextPathType >= 17 && cachedNextPathType <= 30);
+  if (!nearNarrow && !nextNarrow) { narrowStrafed = false; return; }
+  if (narrowStrafed) return;
+  const dir = NARROW_DIR[cachedNextPathType] || NARROW_DIR[cachedPathType];
+  if (dir && cachedCellProg >= NARROW_STRAFE_PROG) {
+    try { if (dir === 'L') fn.StrafeLeft(cp, NULLPTR); else fn.StrafeRight(cp, NULLPTR); } catch (_) {}
+    narrowStrafed = true;
+    dbg('narrow_strafe', dir, 'pt', cachedNextPathType, cachedPathType, 'prog', Math.round(cachedCellProg * 100) / 100);
   }
 }
 
