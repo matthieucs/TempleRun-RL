@@ -417,6 +417,41 @@ the COMPOUNDING per-event death rate (≈99% per event still caps a 100-event ru
 deterministic obstacle autopilot (suppress policy jumps too — but the user wants a *policy*, weigh it)
 or a retrain with the new `lane`/`cell_progress` obs + a faithful 2-cell-gap / narrow-fall sim.
 
+## 12. NN-DECIDES retrain — no hook rules (2026-06-19, user-mandated)
+
+**User: the neural network must take the decisions; NO hardcoded hook rules ("a hook playing would
+kill the project").** So all §11 host-side ACTION assists are DISABLED (the hook only reads state +
+executes the policy's raw action bytes). The §11 diagnosis became the SIM SPEC so the policy learns it.
+
+New OBS (perception, not rules; `obs.py` OBS_LEN 26 -> 29; hook streams them): `cell_progress` (time
+turns), `lane` (3-lane bucket via `lane_to_obs`, for narrows), `next_wide_gap` (2-cell gap ahead).
+New SIM death models (`sim_env.py`):
+- **turn timing**: turn before `turn_early_frac` (0.30) OR after `turn_late_frac` (0.62) cell_progress
+  -> off-center Fall (death_type 9). The policy must aim the window CENTER (cprog ~0.45) via the
+  cell_progress obs — aiming the late edge + the real ~half-frame obs lag is what made turns fall.
+- **double-turn**: `turn_linger_frames` (use **3**) keeps is_turn True post-turn; a 2nd turn during it
+  = over-rotation Fall. The policy learns (via action-history K=4) to NOT re-turn. **linger 2 still
+  double-turned on device; linger 3 fixed it (0 double-turns / 19 turns).**
+- **wide gaps** (long holes 12/13/15/16, zone caps 33-36): a single must-jump cell needing a FRESH
+  jump on entry (`jump_t >= wide_gap_min_airtime` 0.30) so airtime spans it; jumping a cell early
+  falls in. `next_wide_gap` obs signals it.
+
+**Training recipe that works (`ppo_nn_best.zip` = turn4b @1.5M):** `--net-arch 128,128
+--action-history-len 4 --frame-stack 1 --turn-linger 3 --ent-coef 0.04 --action-cost 0.06
+--idle-action-penalty 0.12 --turn-spam-penalty 0.14 --redundant-action-penalty 0.12` (DR on).
+Pitfalls: ent-coef 0.03 -> NOOP-collapse (greedy policy stops turning, dies at the 1st junction at a
+fixed step count); keep **0.04**. PPO can COLLAPSE late (turn4b 910@1.5M -> 376@1.8M) — KEEP THE BEST
+CHECKPOINT, not the highest. Oracle (`train_sim._oracle`) must turn at cprog>=0.32 (aim center) +
+late-jump wide gaps, else its baseline reads as un-survivable.
+
+**On device, NN-only (eval_real --turn-cooldown 0, no assists):** median 235 (old policy) -> **median
+1210, best 2182** (turn4b). Turns land at cprog 0.31-0.59 (aim-center), 0 double-turns, wide-gaps
+cleared. Nearly matches the §11 rule-based assists (1605/2253) but the POLICY decides everything.
+**Remaining deaths = NARROWS** (path_type 17-30; ~half the deaths — the policy doesn't know the safe
+lane) + the odd missed slide/zone. NEXT: empirically map each narrow subtype+facing -> safe lane (host
+guesses were wrong), add a `narrow_safe_lane` obs + sim narrow-fall model, retrain. HOOK_VERSION
+`nn-only-obs-10b`.
+
 NOTE: HOOK_VERSION is now `crevasse-assist-8b`. The capture/analysis tooling lives in `/tmp`
 (`cap_turn.py` logs the stream incl. `lane`/`cell_progress`; `classify_deaths.py` buckets deaths
 turn/obstacle/zone/after-turn-hazard). Calibration method that works: capture at 10 Hz, correlate the
