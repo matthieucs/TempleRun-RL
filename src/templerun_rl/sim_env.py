@@ -112,6 +112,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # per narrow (so the policy MUST read `narrow_target_lane`, not memorize). The real subtype+facing
     # -> safe-lane map lives in the HOOK (from the device sweep); the policy is map-agnostic.
     "narrow_prob": 0.14,               # chance an obstacle-eligible cell is a narrow instead
+    # Strafing past the 3-lane edge drops the runner off the path on device (measured: lane -5.5 on a
+    # straight -> Fall). The cap-only sim hid this, so the policy strafe-spammed off-path. Model it.
+    "strafe_off_edge_kills": True,
     "wide_gap_prob": 0.40,             # chance a placed HOLE is a WIDE gap (jump-late-or-fall)
     "wide_gap_extra_cells": 0,         # 0 = single cell; the wideness is the LATE-jump requirement below
     # A wide gap needs a FRESH jump on entry (jumped at the gap edge) — its airtime can't span the gap
@@ -675,10 +678,15 @@ class TempleRunSimEnv(gym.Env):
             if self._lane > -1:
                 self._lane -= 1
                 self._strafe_t = float(cfg["strafe_duration"])
+            elif cfg.get("strafe_off_edge_kills"):
+                self._kill(1)   # strafed off the LEFT edge of the 3-lane path -> Fall (real: lane goes
+                                # past the edge and the runner drops; the cap-only sim hid this -> spam)
         elif a == int(C.Action.STRAFE_RIGHT):
             if self._lane < 1:
                 self._lane += 1
                 self._strafe_t = float(cfg["strafe_duration"])
+            elif cfg.get("strafe_off_edge_kills"):
+                self._kill(1)   # strafed off the RIGHT edge -> Fall
         elif a in (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT)):
             self._attempt_turn(a)
         # NOOP -> nothing

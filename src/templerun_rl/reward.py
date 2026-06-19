@@ -82,9 +82,10 @@ def shaping_reward(
         elif (action == int(C.Action.SLIDE)
                 and prev.get("must_slide") and not prev.get("next_must_slide")):
             r -= redundant_action_penalty
-    # STRAFE is never "needed" in this model (no strafe-required obstacle modelled) and strafing
-    # off-center BREAKS turns on the phone -> dock it like an idle action (always). Curbs the strafe
-    # spam that high ent_coef + a harder task (turn-linger) lets back through.
-    if idle_action_penalty and action in (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT)):
+    # STRAFE dock: curbs the strafe-spam (high ent_coef + action-history let it back). But strafe IS
+    # needed at NARROWS now -> only dock when there's NO narrow ahead (narrow_target_lane is None), so
+    # purposeful narrow strafes are free while spam on plain track is penalized.
+    if (idle_action_penalty and action in (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT))
+            and (prev is None or prev.get("narrow_target_lane") is None)):
         r -= idle_action_penalty
     return r
