@@ -85,7 +85,16 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # A junction is turnable only for the first this-fraction of the cell — ~2 control-steps,
     # matching the real ~217ms turn window (measured: is_turn True ~13 frames @60Hz over 206 human
     # turns). Forces the policy to turn promptly (else it learns lazy turns -> dies-too-late on phone).
-    "turn_window_frac": 0.5,           # [CALIBRATED] fraction of the junction cell that stays turnable
+    "turn_window_frac": 0.70,          # is_turn TRUE + turn executable for cell_progress in [0, this)
+    # EARLY-TURN TRAP (measured on device 2026-06-19): firing the turn too early in the junction cell
+    # (cell_progress < this) swings the runner ~12 units off-center -> off the exit path -> FALL. Real
+    # safe window is cell_progress ~0.30-0.65; turning on the FIRST is_turn frame (~0.1) is the trap the
+    # policy must learn (via the new cell_progress obs) to RESIST. Turn before this frac => off-center death.
+    "turn_early_frac": 0.30,           # [CALIBRATED] turn earlier than this in the cell = off-center fall
+    # LATE-TURN trap (measured): turning past cell-center also lands off-center -> fall (d=98 on device:
+    # turned at cell_progress 0.67 -> lane -15 -> fell). Real safe EXECUTE window ~ [0.30, 0.62]. With
+    # the 1-step obs lag (action_delay=1 in training) the policy must DECIDE ~1 frame early to land here.
+    "turn_late_frac": 0.62,            # [CALIBRATED] turn later than this in the cell = off-center fall
     "slides_after_distance": 300.0,    # [CALIBRATED] TreeSlide/FlameTower obstacles only past this distance
     "default_path_level": 2,           # [READ] sPathLevel = 2 (Temple) — the START zone (mid altitude)
     # ZONE / ALTITUDE TRANSITIONS (user-reported + captured live): the track runs through 3 altitude
@@ -94,6 +103,16 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # zone steps to an adjacent altitude and that cell is a must-jump LevelChange. path_level in the obs
     # follows the zone so the policy also sees the altitude.
     "zone_change_every_cells": 60,     # [CALIBRATED] cells between zone transitions (first real one ~dist600 ≈ 94 cells; spaced like an obstacle too)
+    # WIDE GAPS (2-cell): on device, long holes (path_type 12/13/15/16) and zone LevelChange caps
+    # (33-36) span TWO cells — a single jump must be timed at the gap EDGE to span both; jumping a cell
+    # early (the single-obstacle reflex) lands in the far half -> Fall. Modeled as 2 consecutive
+    # must-jump cells + a `next_wide_gap` obs so the NN learns to jump late (via cell_progress).
+    "wide_gap_prob": 0.40,             # chance a placed HOLE is a WIDE gap (jump-late-or-fall)
+    "wide_gap_extra_cells": 0,         # 0 = single cell; the wideness is the LATE-jump requirement below
+    # A wide gap needs a FRESH jump on entry (jumped at the gap edge) — its airtime can't span the gap
+    # if jumped a cell early. So require jump_t >= this on entry (jump_duration ~0.6; this forces a jump
+    # within ~0.15 s of the edge). Jumping early (the single-obstacle reflex) => jump_t too low => Fall.
+    "wide_gap_min_airtime": 0.30,
     # SIM-TO-REAL turn fidelity: on the phone is_turn stays True for ~2 frames AFTER a turn (the
     # facing-change lags the input), so the policy fires the turn on both frames and the 2nd
     # OVER-ROTATES the character off the corner -> Fall (the dominant on-device turn-death). The plain
@@ -156,7 +175,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # one exact timing. Ranges chosen so the oracle still survives the WHOLE range (fairness-checked).
     # OFF by default (fidelity harness/replay need determinism); train_sim flips it on.
     "domain_rand": False,
-    "dr_turn_window_frac": [0.40, 0.62],   # narrower window -> forces earlier turns
+    "dr_turn_window_frac": [0.62, 0.78],   # is_turn/exec upper bound (turn must land before this)
+    "dr_turn_early_frac":  [0.24, 0.34],   # early-turn off-center death threshold (jitter the trap)
+    "dr_turn_late_frac":   [0.58, 0.66],   # late-turn off-center death threshold
     "dr_jump_duration":    [0.55, 0.72],   # real airtime varies
     "dr_slide_duration":   [0.55, 0.72],
     "dr_velocity_scale":   [0.94, 1.08],   # multiply the curve velocity per episode
@@ -338,6 +359,11 @@ class TempleRunSimEnv(gym.Env):
         self._cells_since_zone = 0
         self._zone_level = int(self.cfg["default_path_level"])   # current altitude zone (mid at start)
         self._b2b_obstacles = 0
+        # wide-gap (2-cell long hole / zone change) continuation
+        self._pending_gap = 0
+        self._pending_gap_obst = 0
+        self._pending_gap_type = 1
+        self._pending_gap_level = 2
         # replay cursor (which injected element feeds the next generated cell)
         self._replay_cursor = 0
         # the live track window: a list of cells, [_cell_index] = current.
@@ -384,6 +410,17 @@ class TempleRunSimEnv(gym.Env):
         self._cells_since_turn += 1
         self._cells_since_bonus += 1
         self._cells_since_zone += 1
+
+        # WIDE-GAP continuation: the 2nd+ cell of a 2-cell gap (long hole / zone change). A single
+        # well-timed jump must span both -> jumping a cell early lands in this far half and falls.
+        if self._pending_gap > 0:
+            self._pending_gap -= 1
+            self._cells_since_obstacle = 0
+            e = _element(type=self._pending_gap_type, level=self._pending_gap_level,
+                         obstacles=self._pending_gap_obst, is_turn=False)
+            e["wide_gap"] = True
+            return e
+        wide = False   # this cell STARTS a 2-cell gap
 
         # Difficulty-ramped turn spacing/probability (lerp baseline -> late by distance).
         diff = self._difficulty()
@@ -432,6 +469,13 @@ class TempleRunSimEnv(gym.Env):
             else:
                 self._zone_level += 1 if self._rng.random() < 0.5 else -1
             level = int(self._zone_level)   # the crevasse cell already sits in the NEW zone (matches live capture)
+            # zone change is a 2-cell gap on device (StepDownCap A+B) -> queue the 2nd cell.
+            self._pending_gap = int(cfg["wide_gap_extra_cells"])
+            self._pending_gap_obst = OBST_LEVEL_CHANGE
+            self._pending_gap_type = 35    # ~ real SingleLevelStepDownCap path_type (obs match)
+            self._pending_gap_level = int(self._zone_level)
+            ptype = 35
+            wide = True
 
         # A turn cell carries no obstacle (the player must turn here); the cell right after a junction
         # is also kept clear (min_clear_after_turn) — a must-jump obstacle there is unclearable (you
@@ -447,6 +491,14 @@ class TempleRunSimEnv(gym.Env):
                 obstacle = self._sample_obstacle_type()
                 self._cells_since_obstacle = 0
                 self._b2b_obstacles += 1
+                # a HOLE is sometimes a 2-cell LONG hole (path_type 12/13/15/16 on device).
+                if obstacle == OBST_HOLE and self._rng.random() < float(cfg["wide_gap_prob"]):
+                    self._pending_gap = int(cfg["wide_gap_extra_cells"])
+                    self._pending_gap_obst = OBST_HOLE
+                    self._pending_gap_type = 12   # ~ real HoleLong path_type (obs match)
+                    self._pending_gap_level = level
+                    ptype = 12
+                    wide = True
             else:
                 self._b2b_obstacles = 0
         elif not is_turn:
@@ -460,8 +512,10 @@ class TempleRunSimEnv(gym.Env):
                 is_coin = True
                 self._cells_since_bonus = 0
 
-        return _element(type=ptype, level=level, obstacles=obstacle, is_turn=is_turn,
-                        can_turn_left=can_l, can_turn_right=can_r, is_coin=is_coin)
+        e = _element(type=ptype, level=level, obstacles=obstacle, is_turn=is_turn,
+                     can_turn_left=can_l, can_turn_right=can_r, is_coin=is_coin)
+        e["wide_gap"] = wide
+        return e
 
     def _sample_obstacle_type(self) -> int:
         weights = dict(self.cfg["obstacle_type_weights"])
@@ -489,6 +543,8 @@ class TempleRunSimEnv(gym.Env):
             lo, hi = self._base_cfg[key]
             return float(r.uniform(lo, hi))
         c["turn_window_frac"] = U("dr_turn_window_frac")
+        c["turn_early_frac"] = U("dr_turn_early_frac")
+        c["turn_late_frac"] = U("dr_turn_late_frac")
         c["jump_duration"] = U("dr_jump_duration")
         c["slide_duration"] = U("dr_slide_duration")
         c["obstacle_prob"] = U("dr_obstacle_prob")
@@ -615,6 +671,12 @@ class TempleRunSimEnv(gym.Env):
             cell.get("can_turn_left") if want_left else cell.get("can_turn_right")
         )
         if valid:
+            cp = self._cell_progress()
+            if cp < float(self.cfg["turn_early_frac"]) or cp > float(self.cfg["turn_late_frac"]):
+                # off-center turn (too early OR too late in the cell) -> lands off the exit path -> Fall.
+                self._kill(9)   # off-center turn death (measured on device, both edges)
+                return
+        if valid:
             self._facing = _LEFT_OF[self._facing] if want_left else _RIGHT_OF[self._facing]
             # consuming the turn: clear the junction's turnability so the cell is "taken".
             cell["is_turn"] = False
@@ -714,7 +776,10 @@ class TempleRunSimEnv(gym.Env):
     def _resolve_obstacle_on_enter(self, cell: dict) -> None:
         obst = int(cell.get("obstacles", 0))
         if obst in _MUST_JUMP:
-            if self._jump_t <= 0.0:
+            # Wide gap: need a FRESH jump (jumped at the edge) so airtime spans it; an early jump has
+            # too little airtime left on entry -> Fall (the device's wide-gap death the policy must learn).
+            need = float(self.cfg["wide_gap_min_airtime"]) if cell.get("wide_gap") else 0.0
+            if self._jump_t <= need:
                 self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / Tree
         elif obst in _MUST_SLIDE:
             if self._slide_t <= 0.0:
@@ -734,6 +799,13 @@ class TempleRunSimEnv(gym.Env):
     def _nearest_cell(self) -> dict:
         """The element the hook would report as NearestElement (the current/just-ahead cell)."""
         return self._current_cell()
+
+    def _cell_progress(self) -> float:
+        """Longitudinal position within the nearest cell, 0..1 — the obs the policy uses to TIME a turn
+        (turn at cell-center, not on the first is_turn frame) and to anticipate. Matches the hook's
+        cell_progress (CharacterPlayer pos vs PathElement.Rectangle)."""
+        cl = float(self.cfg["cell_length_real"] if self.track_source == "replay" else self.cfg["cell_length"])
+        return float(min(1.0, max(0.0, self._dist_into_cell / max(1e-6, cl))))
 
     def _turn_window_open(self) -> bool:
         """Procedural: a junction is turnable only for the first ``turn_window_frac`` of the cell
@@ -799,6 +871,11 @@ class TempleRunSimEnv(gym.Env):
             "next_can_turn_right": bool(nxt.get("can_turn_right")),
             "next_must_jump": nobst in _MUST_JUMP,
             "next_must_slide": nobst in _MUST_SLIDE,
+            "next_wide_gap": bool(nxt.get("wide_gap")),   # the upcoming gap is 2-cell -> jump LATE
+            # NN perception (replaces the host-side assists): cell_progress to TIME turns, lane (mapped
+            # to the real lane geometry so obs.lane_to_obs buckets sim/real identically) for narrows.
+            "cell_progress": self._cell_progress(),
+            "lane": (-5.0 if self._lane < 0 else (2.4 if self._lane > 0 else -1.3)),
         }
         return state
 
@@ -931,7 +1008,7 @@ def _reactive_policy(state: dict, last_action: int) -> int:
         return int(C.Action.JUMP)
     if state.get("must_slide"):
         return int(C.Action.SLIDE)
-    if state.get("is_turn"):
+    if state.get("is_turn") and float(state.get("cell_progress", 1.0)) >= 0.40:
         if state.get("can_turn_left"):
             return int(C.Action.TURN_LEFT)
         if state.get("can_turn_right"):

@@ -132,7 +132,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'reactor-9f'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'nn-only-obs-10b'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -141,7 +141,7 @@ let cachedTurnDiag = null;          // lane offset + cell progress, for calibrat
 // off-center -> it falls off the exit path (measured: 9/12 on-device deaths). Firing the SAME turn at
 // the cell CENTER (progress ~0.45) lands it centered every time (postLat <=2). So we don't execute the
 // turn byte immediately: we LATCH it and fire when the player reaches the cell center.
-const TURN_BUFFER = true;
+const TURN_BUFFER = false;      // NN decides turns (no hook buffering). lane/cell_progress obs stay on.
 const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress crosses this (cell-center)
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
 let pendingTurn = 0;                // 0 none, 4 TurnLeft, 5 TurnRight (buffered, fires at cell center)
@@ -161,7 +161,7 @@ const OBST_LEVEL_CHANGE = 7;
 // early (reacts to the 1-cell lookahead) and falls into the far half. Single 1-cell holes (11/14) and
 // trees are fine for the policy's early jump -> NOT assisted here.
 const WIDE_GAP_TYPES = [12, 13, 15, 16, 33, 34, 35, 36];
-const CREVASSE_ASSIST = true;
+const CREVASSE_ASSIST = false;  // NN decides jumps.
 const JUMP_FIRE_PROG = 0.90;        // fire the assisted jump once the pre-gap cell crosses this progress
                                     // (near the gap entry -> max airtime over the gap; 60 Hz Update = fine)
 let cachedIsLevelChange = false;    // nearest cell IS a LevelChange crevasse
@@ -172,7 +172,7 @@ let crevasseJumped = false;         // one assisted jump per crevasse (reset whe
 // encodes the safe side: NarrowLong{Left 19-21 / Right 22-24} for N/S travel, {Up 25-27 / Down 28-30}
 // for E/W travel; NarrowSmall 17/18 is centered (no strafe). Strafe ONCE toward the safe lane on
 // approach. Up/Down direction is a best guess (verify live and flip NARROW_DIR if wrong).
-const NARROW_STRAFE = true;
+const NARROW_STRAFE = false;    // NN decides strafes.
 // A narrow's safe strip is on an ABSOLUTE compass side; the strafe to reach it depends on heading.
 // NarrowLong{Left=West / Right=East} (N/S pieces), {Up=North / Down=South} (E/W pieces). Small 17/18
 // has no side (unverified -> left centered). (Left=West confirmed live: NarrowLeft facing N cleared
@@ -201,7 +201,7 @@ let cachedFacing = 0;              // player PathDirection (N1 E2 S3 W4), for fa
 // hole right AFTER a turn (busy turning -> reacts a frame too late). If the policy hasn't acted by the
 // last moment before a must_jump/must_slide cell, fire the reaction ourselves. Only fires when the
 // policy DIDN'T (we check IsJumping/IsSliding first), so no double-action. Excludes wide gaps (handled).
-const OBSTACLE_REACTOR = true;
+const OBSTACLE_REACTOR = false; // no safety net — the NN must react.
 const OBST_REACT_PROG = 0.72;       // fire when the pre-obstacle cell crosses this (about to enter)
 let cachedObst = 0;                 // nearest cell ObstacleType enum
 let cachedMustJump = false, cachedMustSlide = false;  // nearest single (non-wide-gap) must_jump/slide
@@ -591,7 +591,7 @@ function snapshot() {
     can_turn_left: false, can_turn_right: false, is_turn: false,
     distance: 0.0, obstacle: -1,
     next_is_turn: false, next_can_turn_left: false, next_can_turn_right: false,
-    next_must_jump: false, next_must_slide: false,
+    next_must_jump: false, next_must_slide: false, next_wide_gap: false,
     lane: 0.0, cell_progress: 0.0,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
@@ -636,6 +636,7 @@ function snapshot() {
   s.next_can_turn_right = cachedNextCanRight;
   s.next_must_jump = cachedNextMustJump;
   s.next_must_slide = cachedNextMustSlide;
+  s.next_wide_gap = cachedNextIsLevelChange;  // forward cell is a 2-cell gap (long hole / level change)
   s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
   s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
   s._hv = HOOK_VERSION;

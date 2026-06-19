@@ -60,11 +60,19 @@ def _oracle(st: dict) -> int:
     # (is_turn=1 AND next_must_jump=1) must be TURNED, not jumped — jumping misses the turn -> Fall.
     # (The generation keeps the cell right after a junction obstacle-free, so turning is always safe.)
     if st["is_turn"]:
+        # Don't turn on the FIRST is_turn frame (cell_progress ~0.1) — that's the off-center early-turn
+        # trap (death_type 9). Wait until ~cell-center, then turn once (matches the real safe window).
+        if float(st.get("cell_progress", 1.0)) < 0.32:   # aim the window CENTER, not the late edge
+            return int(C.Action.NOOP)
         if st["can_turn_left"]:
             return int(C.Action.TURN_LEFT)
         if st["can_turn_right"]:
             return int(C.Action.TURN_RIGHT)
         return int(C.Action.TURN_LEFT)
+    # WIDE gap (2-cell): jump LATE — at the gap edge (cell_progress high on the pre-gap cell) — so the
+    # airtime spans both cells. Jumping early (the single-obstacle reflex) lands in the far half -> Fall.
+    if st.get("next_wide_gap"):
+        return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= 0.55 else int(C.Action.NOOP)
     # Anticipate: jump/slide on the LOOKAHEAD (obstacle is the NEXT cell) so the action is active
     # when entering the obstacle cell (the sim resolves obstacles on entry).
     if st["must_jump"] or st.get("next_must_jump"):

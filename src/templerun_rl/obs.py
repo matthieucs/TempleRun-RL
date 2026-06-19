@@ -26,10 +26,35 @@ OBS_BOOL_FIELDS = (
     "can_turn_left", "can_turn_right", "is_turn",
     # 1-cell lookahead — anticipation (see a junction/obstacle before it's the nearest cell).
     "next_is_turn", "next_can_turn_left", "next_can_turn_right", "next_must_jump", "next_must_slide",
+    # the upcoming must-jump is a 2-CELL gap (long hole / zone LevelChange) -> jump LATE (at the gap
+    # edge) so airtime spans both cells; jumping 1 cell early (the single-obstacle reflex) falls in.
+    "next_wide_gap",
 )
 OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
-OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 22 bool/lookahead-inclusive + 4 scalar = 26
+# Perception added 2026-06-19 so the NN can time turns + control its lane natively (replacing the
+# host-side assists): cell_progress = longitudinal position in the nearest cell (0..1; lets the policy
+# fire a turn at cell-center instead of too early), lane = which of the 3 lanes (L/C/R) the runner is in
+# (for narrow strips). Both come from the hook (CharacterPlayer.GetPosition2D + PathElement.Rectangle)
+# and from the sim's own state — they are OBSERVATIONS, not actions.
+OBS_EXTRA_FIELDS = ("cell_progress", "lane")
+OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
+OBS_LEN = len(OBS_FIELDS)  # 22 bool/lookahead + 4 scalar + 2 extra = 28
+
+# Lane bucketing (real geometry): home/center ~ -1.3, lanes ~3.7 apart -> LEFT if < -3.15, RIGHT if
+# > 0.55, else CENTER. -> normalized {0.0 left, 0.5 center, 1.0 right}. The sim emits `lane` already in
+# these real-equivalent units so both bucket identically.
+LANE_LEFT_MAX = -3.15
+LANE_RIGHT_MIN = 0.55
+
+
+def lane_to_obs(lane) -> float:
+    if lane is None:
+        return 0.5
+    if lane < LANE_LEFT_MAX:
+        return 0.0
+    if lane > LANE_RIGHT_MIN:
+        return 1.0
+    return 0.5
 
 
 def _norm_enum(value: int, max_value: float) -> float:
@@ -71,6 +96,9 @@ def state_to_obs(state: dict) -> np.ndarray:
     out[base + 1] = _norm_enum(int(g("path_type")), PATH_TYPE_MAX)
     out[base + 2] = _norm_enum(int(g("path_level")), PATH_LEVEL_MAX)
     out[base + 3] = _norm_enum(int(g("facing")), FACING_MAX)
+    cp = g("cell_progress")
+    out[base + 4] = float(np.clip(cp if cp is not None else 0.0, 0.0, 1.0))
+    out[base + 5] = lane_to_obs(g("lane"))
     return out
 
 
