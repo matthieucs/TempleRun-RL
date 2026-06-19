@@ -393,12 +393,29 @@ wider Horz (33/34) gaps; 0.90 (fire near the gap entry, at the hook's 60 Hz Upda
 them.** One jump per crevasse + a safety late-jump. Validated: zones that were the ~580 m death wall
 now clear; runs reach 1600+.
 
-**Net on device (ppo_best, unchanged weights, both assists, turn-cooldown 3):** turn-buffer alone
-lifted median ~280→~1274; + crevasse-assist clears zones; best 1744. **Remaining deaths shifted to
-NARROW pieces** (path_type 17–30 `StraightNarrow*`): the runner falls off the edge of a narrow strip —
-the "strafe to the side" obstacle. Needs lane awareness (the new `lane` obs) + either a host-side
-narrow-strafe-assist (strafe to the safe lane, which the L/R/Up/Down subtype likely encodes) or a sim
-narrow-fall model + retrain. Also a rare missed single hole (obst=1) — a normal jump the policy skipped.
+**3. Narrow strafe-assist (open-loop, facing-aware).** NarrowLong pieces (path_type 17–30) have a
+one-lane strip on an ABSOLUTE compass side; the runner (sits at its home/center lane, never strafes)
+falls off the edge. The strip side per subtype: NarrowLong{Left=West / Right=East} (Vert/NS pieces),
+{Up=**South** / Down=**North**} (Horz/EW pieces — the Up/Down→S/N mapping is MEASURED, counter to the
+name). The strafe (L/R) to reach a compass side depends on heading (`narrowStrafeDirFor`). Open-loop:
+strafe ONCE to the side on approach, ONCE back to center on exit — a CLOSED-LOOP lane controller
+OSCILLATED catastrophically (noisy mid-strafe `lane` reads + recenter feedback → runner swung −6..+6,
+151 strafes; never do closed-loop). NarrowSmall 17/18 = center (survives). Lane geometry: home/center
+~ −1.3, one strafe ≈ one lane ≈ 3.7 units.
+
+**4. Obstacle reactor (safety net).** The policy clears plain holes/trees ~95% but misses some — esp.
+a hole right AFTER a turn (busy turning → reacts a frame late; the dominant residual death). If the
+policy hasn't jumped/slid by `cell_progress >= 0.72` of the pre-obstacle cell (or it's already the
+nearest must-jump/slide cell) AND the runner isn't already jumping/sliding, the hook fires it.
+Excludes wide gaps. Fires rarely (≈2–5/run) — never doubles a good policy play.
+
+**Net on device (ppo_best, unchanged weights, full assist stack, turn-cooldown 3):** median ~280→~1650,
+**best 2253** (was ~600/1610 at session start). All four obstacle families now handled host-side.
+Remaining deaths are rare edge cases (a specific narrow subtype mis-mapped, an after-turn hazard the
+reactor missed, an occasional fall). HOOK_VERSION `reactor-9f`. **Path to 10,000 m:** the limiter is now
+the COMPOUNDING per-event death rate (≈99% per event still caps a 100-event run); options are a fuller
+deterministic obstacle autopilot (suppress policy jumps too — but the user wants a *policy*, weigh it)
+or a retrain with the new `lane`/`cell_progress` obs + a faithful 2-cell-gap / narrow-fall sim.
 
 NOTE: HOOK_VERSION is now `crevasse-assist-8b`. The capture/analysis tooling lives in `/tmp`
 (`cap_turn.py` logs the stream incl. `lane`/`cell_progress`; `classify_deaths.py` buckets deaths

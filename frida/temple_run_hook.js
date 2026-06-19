@@ -132,7 +132,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'wide-gap-narrow-9b'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'reactor-9f'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -173,12 +173,39 @@ let crevasseJumped = false;         // one assisted jump per crevasse (reset whe
 // for E/W travel; NarrowSmall 17/18 is centered (no strafe). Strafe ONCE toward the safe lane on
 // approach. Up/Down direction is a best guess (verify live and flip NARROW_DIR if wrong).
 const NARROW_STRAFE = true;
-const NARROW_DIR = { 19: 'L', 20: 'L', 21: 'L', 22: 'R', 23: 'R', 24: 'R',
-                     25: 'L', 26: 'L', 27: 'L', 28: 'R', 29: 'R', 30: 'R' };
-const NARROW_STRAFE_PROG = 0.15;    // fire the approach strafe once the pre-narrow cell crosses this
+// A narrow's safe strip is on an ABSOLUTE compass side; the strafe to reach it depends on heading.
+// NarrowLong{Left=West / Right=East} (N/S pieces), {Up=North / Down=South} (E/W pieces). Small 17/18
+// has no side (unverified -> left centered). (Left=West confirmed live: NarrowLeft facing N cleared
+// with StrafeLeft. Up=North / Down=South still a guess — flip NARROW_SIDE if the map shows deaths.)
+const NARROW_SIDE = { 19: 'W', 20: 'W', 21: 'W', 22: 'E', 23: 'E', 24: 'E',
+                      25: 'S', 26: 'S', 27: 'S', 28: 'N', 29: 'N', 30: 'N' };  // Up=South/Down=North (measured)
+// compass side a StrafeLeft / StrafeRight moves the runner to, per facing (N1 E2 S3 W4).
+const STRAFE_L_SIDE = { 1: 'W', 2: 'N', 3: 'E', 4: 'S' };
+const STRAFE_R_SIDE = { 1: 'E', 2: 'S', 3: 'W', 4: 'N' };
+function narrowStrafeDirFor(subtype, facing) {   // -1 strafe left, +1 strafe right, 0 none/center
+  const side = NARROW_SIDE[subtype];
+  if (!side) return 0;
+  if (STRAFE_L_SIDE[facing] === side) return -1;
+  if (STRAFE_R_SIDE[facing] === side) return 1;
+  return 0;
+}
+// Measured geometry: home/center lane ~ -1.3, one StrafeLeft -> ~ -5, StrafeRight -> ~ +2.4 (spacing
+// ~3.7). Open-loop out-and-back, so no bucket thresholds needed — just one strafe each way.
+const STRAFE_COOLDOWN_TICKS = 14;   // ~0.25 s strafe settle @ 60 Hz Update — don't restrafe mid-strafe
 let cachedPathType = -1;            // nearest cell PE_Type
 let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
-let narrowStrafed = false;          // one assisted strafe per narrow (reset when clear of narrows)
+let lastStrafeTick = -1000;         // updateTicks of the last assisted strafe (cooldown)
+let narrowStrafeDir = 0;            // -1 strafed left / +1 right for the current narrow (0 = none/centered)
+let cachedFacing = 0;              // player PathDirection (N1 E2 S3 W4), for facing-aware narrow strafe
+// OBSTACLE REACTOR (safety net): the policy jumps/slides plain obstacles ~95% but misses some — esp. a
+// hole right AFTER a turn (busy turning -> reacts a frame too late). If the policy hasn't acted by the
+// last moment before a must_jump/must_slide cell, fire the reaction ourselves. Only fires when the
+// policy DIDN'T (we check IsJumping/IsSliding first), so no double-action. Excludes wide gaps (handled).
+const OBSTACLE_REACTOR = true;
+const OBST_REACT_PROG = 0.72;       // fire when the pre-obstacle cell crosses this (about to enter)
+let cachedObst = 0;                 // nearest cell ObstacleType enum
+let cachedMustJump = false, cachedMustSlide = false;  // nearest single (non-wide-gap) must_jump/slide
+let obstacleReacted = false;        // one safety reaction per obstacle (reset when none imminent)
 // One-turn-per-junction latch: the real game keeps is_turn TRUE for many frames AFTER a turn
 // (the sim consumes it), so a sim-trained policy over-turns into the approach cell and dies.
 let prevNearest = ptr(0), turnedHere = false, prevFacing = 0;
@@ -308,6 +335,7 @@ function installHooks() {
           const pe = gcInstance.add(OFF.NearestElement).readPointer();
           if (!pe.isNull()) {
             const facing = cp.add(OFF.Facing).readS32();
+            cachedFacing = facing;
             const rawIsTurn = !!fn.IsTurn(pe, NULLPTR);
             cachedRawIsTurn = rawIsTurn;
             // Player horizontal position -> signed lane (lateral offset from path center, + = right of
@@ -328,6 +356,7 @@ function installHooks() {
                 lane: Math.round(cachedLane * 10) / 10, prog: Math.round(cachedCellProg * 100) / 100,
                 raw: rawIsTurn, pend: pendingTurn, fac: facing,
                 lc: cachedIsLevelChange, nlc: cachedNextIsLevelChange, cj: crevasseJumped,
+                pt: cachedPathType, npt: cachedNextPathType,
               };
             } catch (e) { if (DIAG_TURN) cachedTurnDiag = { err: String(e) }; }
             // Fire a buffered turn once the player reaches the cell center (lands centered, not off-edge).
@@ -345,8 +374,11 @@ function installHooks() {
             cachedCanLeft = cachedIsTurn ? neighborExists(pe, LEFT_NEIGHBOR[facing]) : false;
             cachedCanRight = cachedIsTurn ? neighborExists(pe, RIGHT_NEIGHBOR[facing]) : false;
             cachedPathType = pe.add(OFF.PE_Type).readS32();
-            cachedIsLevelChange = (pe.add(OFF.PE_Obstacles).readS32() === OBST_LEVEL_CHANGE)
+            cachedObst = pe.add(OFF.PE_Obstacles).readS32();
+            cachedIsLevelChange = (cachedObst === OBST_LEVEL_CHANGE)
               || WIDE_GAP_TYPES.indexOf(cachedPathType) !== -1;  // wide gap (long hole / level change)
+            cachedMustJump = !cachedIsLevelChange && MUST_JUMP_TYPES.indexOf(cachedObst) !== -1;
+            cachedMustSlide = MUST_SLIDE_TYPES.indexOf(cachedObst) !== -1;
             // DEBUG: absolute neighbor existence + the query, to verify direction logic at junctions.
             cachedDbg = {
               fac: facing,
@@ -377,12 +409,15 @@ function installHooks() {
             maybeJumpCrevasse(cp);
             // Strafe once toward a narrow piece's safe lane on approach.
             maybeStrafeNarrow(cp);
+            // Safety net: fire jump/slide for a plain obstacle the policy hasn't reacted to in time.
+            maybeReactObstacle(cp);
           } else {
             cachedCanLeft = cachedCanRight = cachedIsTurn = false;
             cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
             cachedNextMustJump = cachedNextMustSlide = false;
             cachedIsLevelChange = cachedNextIsLevelChange = false;
             cachedPathType = cachedNextPathType = -1;
+            cachedMustJump = cachedMustSlide = false; cachedObst = 0;
           }
         } catch (_) {}
       }
@@ -453,19 +488,45 @@ function maybeJumpCrevasse(cp) {
   }
 }
 
-// Strafe once toward a narrow piece's safe lane so the runner doesn't fall off the strip edge.
-// One strafe per narrow approach (reset when clear of all narrow cells).
+// OPEN-LOOP narrow handling (no lane feedback -> no oscillation): on approach to a Left/Right narrow,
+// strafe ONCE toward its safe side; after clearing the narrow, strafe ONCE back to re-center. The
+// runner's home lane is center, so out-then-back keeps each narrow's single strafe starting from
+// center. Small narrows (no target) are left centered (their safe lane is still unverified).
 function maybeStrafeNarrow(cp) {
   if (!NARROW_STRAFE || cp.isNull()) return;
-  const nearNarrow = (cachedPathType >= 17 && cachedPathType <= 30);
+  if (cachedIsTurn || cachedNextIsTurn || cachedIsLevelChange || cachedNextIsLevelChange) return;
+  if (updateTicks - lastStrafeTick < STRAFE_COOLDOWN_TICKS) return;
+  if (readBool(cp, OFF.IsStrafing)) return;
   const nextNarrow = (cachedNextPathType >= 17 && cachedNextPathType <= 30);
-  if (!nearNarrow && !nextNarrow) { narrowStrafed = false; return; }
-  if (narrowStrafed) return;
-  const dir = NARROW_DIR[cachedNextPathType] || NARROW_DIR[cachedPathType];
-  if (dir && cachedCellProg >= NARROW_STRAFE_PROG) {
-    try { if (dir === 'L') fn.StrafeLeft(cp, NULLPTR); else fn.StrafeRight(cp, NULLPTR); } catch (_) {}
-    narrowStrafed = true;
-    dbg('narrow_strafe', dir, 'pt', cachedNextPathType, cachedPathType, 'prog', Math.round(cachedCellProg * 100) / 100);
+  const nearNarrow = (cachedPathType >= 17 && cachedPathType <= 30);
+  if (nextNarrow && narrowStrafeDir === 0) {
+    const d = narrowStrafeDirFor(cachedNextPathType, cachedFacing);
+    if (d === -1) { try { fn.StrafeLeft(cp, NULLPTR); } catch (_) {} narrowStrafeDir = -1; lastStrafeTick = updateTicks; dbg('narrow_strafe', 'L', cachedNextPathType, 'fac', cachedFacing); }
+    else if (d === 1) { try { fn.StrafeRight(cp, NULLPTR); } catch (_) {} narrowStrafeDir = 1; lastStrafeTick = updateTicks; dbg('narrow_strafe', 'R', cachedNextPathType, 'fac', cachedFacing); }
+  } else if (!nextNarrow && !nearNarrow && narrowStrafeDir !== 0) {
+    if (narrowStrafeDir === -1) { try { fn.StrafeRight(cp, NULLPTR); } catch (_) {} }
+    else { try { fn.StrafeLeft(cp, NULLPTR); } catch (_) {} }
+    dbg('narrow_recenter', -narrowStrafeDir);
+    narrowStrafeDir = 0; lastStrafeTick = updateTicks;
+  }
+}
+
+// Safety-net reaction for a plain (non-wide-gap) obstacle: if the policy hasn't jumped/slid by the
+// last moment before the obstacle cell, do it. Fires only when the runner isn't already jumping/sliding
+// (so it never doubles a good policy play). One reaction per obstacle.
+function maybeReactObstacle(cp) {
+  if (!OBSTACLE_REACTOR || cp.isNull()) return;
+  if (cachedIsLevelChange || cachedNextIsLevelChange) return;  // wide gaps owned by the jump-assist
+  const wantJump = cachedMustJump || (cachedNextMustJump && cachedCellProg >= OBST_REACT_PROG);
+  const wantSlide = cachedMustSlide || (cachedNextMustSlide && cachedCellProg >= OBST_REACT_PROG);
+  if (wantJump && !obstacleReacted && !readBool(cp, OFF.IsJumping)) {
+    try { fn.Jump(cp, 0.0, NULLPTR); } catch (_) {}
+    obstacleReacted = true; dbg('react_jump', cachedObst, 'prog', Math.round(cachedCellProg * 100) / 100);
+  } else if (wantSlide && !obstacleReacted && !readBool(cp, OFF.IsSliding)) {
+    try { fn.Slide(cp, NULLPTR); } catch (_) {}
+    obstacleReacted = true; dbg('react_slide', cachedObst);
+  } else if (!wantJump && !wantSlide) {
+    obstacleReacted = false;
   }
 }
 
