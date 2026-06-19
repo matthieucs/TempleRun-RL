@@ -360,3 +360,47 @@ needed) in `reward.py`/`env.py`; retrain `--idle-action-penalty 0.08` → strafe
 ### Device note
 New phone **nzqwrkbyfeey89fa** (replaces topaz e4de25a1). Same crash-loop after ~30-60 min of eval;
 recover with clean_inject + force-stop + relaunch + setup_device (see [[launch-recipe-multi-phone]]).
+
+## 11. Host-side action-timing assists — the big on-device wins (2026-06-19)
+
+Re-diagnosed the on-device deaths from scratch with a NEW hook capture: `lane` (signed lateral
+offset from path center, + = right of travel) + `cell_progress` (longitudinal position within the
+nearest cell, 0..1), both computed from `CharacterPlayer.GetPosition2D()` (Vector2, RVA `0x12E0E9C`,
+struct-by-value via libffi: retType `['float','float']`) and `PathElement.Rectangle` (@`0xA0`, a
+`Rect{xmin,zmin,w,h}`; grid cell = 60×60, `GridX/GridZ=60`). These are now broadcast as state fields
+`lane`/`cell_progress` (forward-compatible: existing 26-d obs ignores them). The deaths were NOT what
+§10 assumed — and two **host-side, no-retrain** fixes in the hook removed the two dominant causes:
+
+**1. Turn-buffering (commit 47cf1ab, the dominant death — 9/12 runs).** The off-center-after-turn
+fall was a TIMING bug, not over-rotation: the policy fires the turn on the FIRST `is_turn` frame
+(cell_progress ~0.1) and the turn arc from there swings the runner **~12 units off-center → off the
+exit path → fall**. Measured `progAtTurn → postLatMax`: 0.05–0.22 → 6–15 (falls); 0.42–0.56 → 1–3
+(centered); 0.90+ → 0. Fix: don't execute a TurnLeft/Right byte immediately — LATCH it (`pendingTurn`)
+and fire the native turn from the Update hook once `cell_progress >= TURN_FIRE_PROG=0.40` (cell
+center). A turn issued on a pure straight (neither `is_turn` nor `next_is_turn`) is dropped; buffered
+turns expire after 20 frames. Validated: 37 turns fired at progress 0.40–0.59, post-turn offset **0.0
+across 35 turns** (was 6–15), turn-deaths **→ 0**. The host-side `turn_cooldown` is now redundant but
+kept (composes fine).
+
+**2. Crevasse jump-assist (commits 72396a3 / 8b, the #2 death after turns).** The zone/altitude
+transition (`ObstacleType.LevelChange=7`, path_type 33–36 = `SingleLevelStepDownCap A/B Horz/Vert`) is
+a **~2-cell GAP**, not a single must-jump cell as the sim models it. The policy reacts to the 1-cell
+lookahead and jumps too EARLY → airtime ends mid-gap → falls in (or never jumps). Deterministic
+response, so handle it host-side: near a LevelChange (nearest or forward-neighbor obstacle == 7),
+SUPPRESS the policy's jump and fire ONE native Jump when the pre-gap cell reaches
+`cell_progress >= JUMP_FIRE_PROG` so airtime spans the gap. **0.70 fired too early and missed the
+wider Horz (33/34) gaps; 0.90 (fire near the gap entry, at the hook's 60 Hz Update precision) clears
+them.** One jump per crevasse + a safety late-jump. Validated: zones that were the ~580 m death wall
+now clear; runs reach 1600+.
+
+**Net on device (ppo_best, unchanged weights, both assists, turn-cooldown 3):** turn-buffer alone
+lifted median ~280→~1274; + crevasse-assist clears zones; best 1744. **Remaining deaths shifted to
+NARROW pieces** (path_type 17–30 `StraightNarrow*`): the runner falls off the edge of a narrow strip —
+the "strafe to the side" obstacle. Needs lane awareness (the new `lane` obs) + either a host-side
+narrow-strafe-assist (strafe to the safe lane, which the L/R/Up/Down subtype likely encodes) or a sim
+narrow-fall model + retrain. Also a rare missed single hole (obst=1) — a normal jump the policy skipped.
+
+NOTE: HOOK_VERSION is now `crevasse-assist-8b`. The capture/analysis tooling lives in `/tmp`
+(`cap_turn.py` logs the stream incl. `lane`/`cell_progress`; `classify_deaths.py` buckets deaths
+turn/obstacle/zone/after-turn-hazard). Calibration method that works: capture at 10 Hz, correlate the
+action's `cell_progress` with the outcome (off-center swing / cleared), pick the fire-progress.

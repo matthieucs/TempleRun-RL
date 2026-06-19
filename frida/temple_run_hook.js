@@ -132,7 +132,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'crevasse-assist-8a'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'crevasse-assist-8b'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -157,7 +157,8 @@ let cachedRawIsTurn = false;        // nearest cell is a turn piece (IsTurn()), 
 // and fire one well-timed native Jump. Calibrate JUMP_FIRE_PROG live like the turn fire-progress.
 const OBST_LEVEL_CHANGE = 7;
 const CREVASSE_ASSIST = true;
-const JUMP_FIRE_PROG = 0.70;        // fire the assisted jump once the pre-gap cell crosses this progress
+const JUMP_FIRE_PROG = 0.90;        // fire the assisted jump once the pre-gap cell crosses this progress
+                                    // (near the gap entry -> max airtime over the gap; 60 Hz Update = fine)
 let cachedIsLevelChange = false;    // nearest cell IS a LevelChange crevasse
 let cachedNextIsLevelChange = false;// forward-neighbor cell is a LevelChange crevasse (gap ahead)
 let crevasseJumped = false;         // one assisted jump per crevasse (reset when clear of LevelChange)
