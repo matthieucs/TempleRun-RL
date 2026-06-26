@@ -39,3 +39,13 @@ venv/
 # recorded phone traces (data; can be large)
 traces/
 logs/
+
+# --- sim-calibration session (2026-06-26): throwaway logs + device capture dumps ---
+*.log
+.human_log.out
+captures/deploy_*.jsonl
+captures/demo_baseline.jsonl
+captures/calib_passive.jsonl
+captures/turn6_partial.jsonl
+captures/human_snap.jsonl
+captures/human.jsonl

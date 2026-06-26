@@ -29,6 +29,7 @@ def shaping_reward(
     turn_spam_penalty: float = 0.0,
     idle_action_penalty: float = 0.0,
     redundant_action_penalty: float = 0.0,
+    strafe_penalty: float = 0.0,
 ) -> float:
     """Dense shaping term (0 unless a knob is set). Mirror of ``env._shaping_reward``.
 
@@ -37,7 +38,7 @@ def shaping_reward(
     previous step (for the turn-spam memory the policy lacks).
     """
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
-            and not idle_action_penalty and not redundant_action_penalty):
+            and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty):
         return 0.0
     r = 0.0
     if action_cost and action != int(C.Action.NOOP):
@@ -82,10 +83,14 @@ def shaping_reward(
         elif (action == int(C.Action.SLIDE)
                 and prev.get("must_slide") and not prev.get("next_must_slide")):
             r -= redundant_action_penalty
-    # STRAFE dock: curbs the strafe-spam (high ent_coef + action-history let it back). But strafe IS
-    # needed at NARROWS now -> only dock when there's NO narrow ahead (narrow_target_lane is None), so
-    # purposeful narrow strafes are free while spam on plain track is penalized.
-    if (idle_action_penalty and action in (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT))
+    # STRAFE dock: curbs the strafe-spam (high ent_coef + action-history let it back). On the DEVICE an
+    # off-track strafe drives the continuous lane far OOD (sim lane is 3 discrete values) -> the policy
+    # never saw lane=-15 in training -> erratic -> walks off the edge (the 2026-06-26 device failure).
+    # strafe IS needed at NARROWS -> only dock when there's NO narrow ahead (narrow_target_lane is None).
+    # Uses a DEDICATED strafe_penalty (hard dock) so non-narrow strafing is strongly suppressed without
+    # over-penalising idle jumps/slides; falls back to idle_action_penalty if strafe_penalty unset.
+    strafe_dock = strafe_penalty if strafe_penalty else idle_action_penalty
+    if (strafe_dock and action in (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT))
             and (prev is None or prev.get("narrow_target_lane") is None)):
-        r -= idle_action_penalty
+        r -= strafe_dock
     return r

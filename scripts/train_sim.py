@@ -44,6 +44,7 @@ def _make_env(args, rank: int):
             turn_spam_penalty=args.turn_spam_penalty,
             idle_action_penalty=args.idle_action_penalty,
             redundant_action_penalty=args.redundant_action_penalty,
+            strafe_penalty=args.strafe_penalty,
             action_history_len=args.action_history_len,
             frame_stack=args.frame_stack,
             config={"domain_rand": bool(args.domain_rand),
@@ -62,25 +63,32 @@ def _oracle(st: dict) -> int:
     if st["is_turn"]:
         # Don't turn on the FIRST is_turn frame (cell_progress ~0.1) — that's the off-center early-turn
         # trap (death_type 9). Wait until ~cell-center, then turn once (matches the real safe window).
-        if float(st.get("cell_progress", 1.0)) < 0.32:   # aim the window CENTER, not the late edge
+        # Also don't turn MID-STRAFE (turning while strafing throws the runner off-path).
+        if float(st.get("cell_progress", 1.0)) < 0.32 or st.get("is_strafing"):
             return int(C.Action.NOOP)
         if st["can_turn_left"]:
             return int(C.Action.TURN_LEFT)
         if st["can_turn_right"]:
             return int(C.Action.TURN_RIGHT)
         return int(C.Action.TURN_LEFT)
-    # WIDE gap (2-cell): jump LATE — at the gap edge (cell_progress high on the pre-gap cell) — so the
-    # airtime spans both cells. Jumping early (the single-obstacle reflex) lands in the far half -> Fall.
+    # WIDE gap (2-cell mid<->high crevasse / long hole): jump LATE — at the gap edge (high cell_progress
+    # on the pre-gap cell) so the airtime reserves enough to be airborne crossing into the FAR cell.
+    # Jumping early (the single-obstacle reflex) runs out of air by the 2nd cell -> Fall. 0.62 is the
+    # measured sweep optimum at crevasse speed (lower wastes airtime early; >0.65 skips the window at
+    # the ~0.38-cprog/step top-speed stepping). See sim_env wide_gap_extra_cells / sim-calibration memory.
     if st.get("next_wide_gap"):
-        return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= 0.55 else int(C.Action.NOOP)
+        return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= 0.62 else int(C.Action.NOOP)
     # Anticipate: jump/slide on the LOOKAHEAD (obstacle is the NEXT cell) so the action is active
     # when entering the obstacle cell (the sim resolves obstacles on entry).
     if st["must_jump"] or st.get("next_must_jump"):
         return int(C.Action.JUMP)
     if st["must_slide"] or st.get("next_must_slide"):
         return int(C.Action.SLIDE)
-    # LANE: be in the upcoming narrow's safe lane; otherwise RE-CENTER (so the next narrow is <=1 lane
-    # away -> reachable in the 1-cell window). Low priority (after jump/slide).
+    # LANE: be in the upcoming narrow's safe lane; otherwise RE-CENTER. Low priority (after jump/slide).
+    # Don't issue a new strafe MID-GLIDE (is_strafing) — the lane is still moving; re-strafing overshoots
+    # and oscillates off the edge (the on-device failure the gradual-strafe model reproduces).
+    if st.get("is_strafing"):
+        return int(C.Action.NOOP)
     ntl = st.get("narrow_target_lane")
     target = 0 if ntl is None else int(ntl)
     lane = float(st.get("lane", -1.3))
@@ -249,6 +257,10 @@ def main() -> None:
     p.add_argument("--redundant-action-penalty", type=float, default=0.0,
                    help="dock the trailing re-jump/re-slide (must_jump set but next_must_jump=0, "
                         "obstacle already entered) — curbs the 'double-jump'. try ~0.12")
+    p.add_argument("--strafe-penalty", type=float, default=0.0,
+                   help="HARD dock on any non-narrow strafe (narrow_target_lane is None). On device an "
+                        "off-track strafe drives the continuous lane OOD (sim lane is 3 discrete values) "
+                        "-> the policy walks off the edge. ~0.30 suppresses non-narrow strafing.")
     p.add_argument("--action-history-len", type=int, default=0,
                    help="append the one-hot of the last K actions to the obs (policy memory -> curbs "
                         "multiple-turns-at-a-junction). obs grows by K*7. try 3-6. needs a retrain.")

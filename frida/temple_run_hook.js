@@ -132,7 +132,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'nn-only-obs-10d'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'nn-only-obs-11a'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -169,16 +169,17 @@ let cachedNextIsLevelChange = false;// forward-neighbor cell is a LevelChange cr
 let crevasseJumped = false;         // one assisted jump per crevasse (reset when clear of LevelChange)
 // NARROW STRAFE-ASSIST: a NarrowLong piece (path_type 17..30) has a one-lane strip offset to one side;
 // the runner (which never strafes — sits at its home center lane) falls off the edge. The subtype
-// encodes the safe side: NarrowLong{Left 19-21 / Right 22-24} for N/S travel, {Up 25-27 / Down 28-30}
-// for E/W travel; NarrowSmall 17/18 is centered (no strafe). Strafe ONCE toward the safe lane on
-// approach. Up/Down direction is a best guess (verify live and flip NARROW_DIR if wrong).
+// encodes the safe side: NarrowLong{Left 19-21=W / Right 22-24=E} for N/S travel, {25-27=N / 28-30=S}
+// for E/W travel (device-measured); NarrowSmall 17/18 is multi-lane safe (no strafe). Strafe ONCE
+// toward the safe lane on approach.
 const NARROW_STRAFE = false;    // NN decides strafes.
 // A narrow's safe strip is on an ABSOLUTE compass side; the strafe to reach it depends on heading.
-// NarrowLong{Left=West / Right=East} (N/S pieces), {Up=North / Down=South} (E/W pieces). Small 17/18
-// has no side (unverified -> left centered). (Left=West confirmed live: NarrowLeft facing N cleared
-// with StrafeLeft. Up=North / Down=South still a guess — flip NARROW_SIDE if the map shows deaths.)
+// DEVICE-MEASURED (human capture 2026-06-26, captures/human_calib_2026-06-26.jsonl): the Vert group
+// 19-24 = W/W/W/E/E/E is CORRECT (confirmed 20N->L, 21S->R, 23N->R). The Horz group 25-30 was N<->S
+// SWAPPED in the old guess: it is really 25-27=N / 28-30=S (confirmed 26E->L=>N, 27W->R=>N, 29E->R=>S,
+// 30W->L=>S — all 4 contradicted the old map). Small 17/18 = multi-lane safe -> no side (center ok).
 const NARROW_SIDE = { 19: 'W', 20: 'W', 21: 'W', 22: 'E', 23: 'E', 24: 'E',
-                      25: 'S', 26: 'S', 27: 'S', 28: 'N', 29: 'N', 30: 'N' };  // Up=South/Down=North (measured)
+                      25: 'N', 26: 'N', 27: 'N', 28: 'S', 29: 'S', 30: 'S' };  // [device-measured] 25-27=N, 28-30=S
 // compass side a StrafeLeft / StrafeRight moves the runner to, per facing (N1 E2 S3 W4).
 const STRAFE_L_SIDE = { 1: 'W', 2: 'N', 3: 'E', 4: 'S' };
 const STRAFE_R_SIDE = { 1: 'E', 2: 'S', 3: 'W', 4: 'N' };

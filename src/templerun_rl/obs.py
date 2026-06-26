@@ -40,21 +40,53 @@ OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
 OBS_LEN = len(OBS_FIELDS)  # 22 bool/lookahead + 4 scalar + 2 extra = 28
 
-# Lane bucketing (real geometry): home/center ~ -1.3, lanes ~3.7 apart -> LEFT if < -3.15, RIGHT if
-# > 0.55, else CENTER. -> normalized {0.0 left, 0.5 center, 1.0 right}. The sim emits `lane` already in
-# these real-equivalent units so both bucket identically.
+# Lane geometry (real device units): home/center ~ -1.3, one strafe ~ 3.7 -> lanes at -5 / -1.3 / +2.4.
+# CONTINUOUS lane obs (2026-06-26): the old 3-bucket {0,0.5,1} aliased the safe left lane (-5) with an
+# OFF-TRACK lane (-15) -> on device the policy couldn't tell it was walking off the edge and kept
+# strafing into the void. Normalizing the continuous lane to [0,1] over [LANE_OBS_MIN, LANE_OBS_MAX]
+# (a bit past the fall thresholds) makes "near the edge" a distinct, recoverable obs.
+LANE_HOME = -1.3
+LANE_STEP = 3.7
+LANE_OBS_MIN = -7.0   # just past the left fall threshold
+LANE_OBS_MAX = 4.5    # just past the right fall threshold
+# kept for the capture/analysis scripts that bucket lane for display.
 LANE_LEFT_MAX = -3.15
 LANE_RIGHT_MIN = 0.55
 
 
 def lane_to_obs(lane) -> float:
+    """Continuous lane -> [0,1] (center ~0.5, left lane ~0.17, right lane ~0.82, off-edge -> 0/1)."""
     if lane is None:
-        return 0.5
-    if lane < LANE_LEFT_MAX:
+        lane = LANE_HOME
+    return float(np.clip((float(lane) - LANE_OBS_MIN) / (LANE_OBS_MAX - LANE_OBS_MIN), 0.0, 1.0))
+
+
+def narrow_lane_to_obs(ntl) -> float:
+    """Map the narrow's safe lane (-1 L / 0 C / +1 R) onto the SAME continuous scale as `lane`, so the
+    policy compares the two and strafes toward the target. None -> home/center (no constraint)."""
+    if ntl is None:
+        return lane_to_obs(LANE_HOME)
+    return lane_to_obs(LANE_HOME + int(ntl) * LANE_STEP)
+
+
+def path_type_obs(pt) -> float:
+    """COARSE path_type category (2026-06-26) — the raw enum/37 was a sim-to-real LEAK: the device emits
+    straight types the sim never did (pt 1 AND 2 for straights, + 8/9/10), so the policy saw OOD
+    path_type values on device and mis-reacted (strafed off the edge). Map to 5 stable buckets that the
+    sim and device AGREE on (action cues already live in is_turn/must_jump/must_slide/next_wide_gap/
+    narrow_target_lane, so the fine enum is redundant): straight / turn / hole-piece / narrow / cap."""
+    pt = int(pt) if pt is not None else -1
+    if pt < 0:
         return 0.0
-    if lane > LANE_RIGHT_MIN:
-        return 1.0
-    return 0.5
+    if pt <= 2:
+        return 0.16            # straight (StraightVert/Horz etc.)
+    if pt <= 7:
+        return 0.33            # turn / junction
+    if pt <= 16:
+        return 0.50            # hole / tree / holelong piece
+    if pt <= 30:
+        return 0.66            # narrow strip
+    return 0.83                # level cap / crevasse (31-37)
 
 
 def _norm_enum(value: int, max_value: float) -> float:
@@ -93,17 +125,15 @@ def state_to_obs(state: dict) -> np.ndarray:
     base = len(OBS_BOOL_FIELDS)
     v = float(g("velocity") or 0.0)
     out[base + 0] = float(np.clip((v - VEL_MIN) / (VEL_MAX - VEL_MIN), 0.0, 1.0))
-    out[base + 1] = _norm_enum(int(g("path_type")), PATH_TYPE_MAX)
+    out[base + 1] = path_type_obs(g("path_type"))   # COARSE category (robust to device enum variety)
     out[base + 2] = _norm_enum(int(g("path_level")), PATH_LEVEL_MAX)
     out[base + 3] = _norm_enum(int(g("facing")), FACING_MAX)
     cp = g("cell_progress")
     out[base + 4] = float(np.clip(cp if cp is not None else 0.0, 0.0, 1.0))
     out[base + 5] = lane_to_obs(g("lane"))
-    # narrow_target_lane: which lane to be in for the upcoming narrow (-1 L / 0 C / +1 R), or None ->
-    # 0.5 (center, the default home / "no constraint"). Same {0,0.5,1} encoding as `lane` so the
-    # policy compares them and strafes to match.
-    ntl = g("narrow_target_lane")
-    out[base + 6] = 0.5 if ntl is None else float(np.clip((int(ntl) + 1) / 2.0, 0.0, 1.0))
+    # narrow_target_lane: which lane to be in for the upcoming narrow (-1 L / 0 C / +1 R), mapped onto
+    # the SAME continuous scale as `lane` so the policy compares them and strafes to match (None -> home).
+    out[base + 6] = narrow_lane_to_obs(g("narrow_target_lane"))
     return out
 
 

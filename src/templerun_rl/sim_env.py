@@ -38,6 +38,16 @@ from . import constants as C
 from . import obs as O
 from . import reward as R
 
+# CONTINUOUS lane geometry (matches obs.py real device units): home -1.3, one strafe 3.7 -> lanes at
+# -5 / -1.3 / +2.4. The runner FALLS when it over-strafes past the edge lane (1.5 steps from home each
+# way: < -6.85 or > +4.25). Continuous (not 3 discrete lanes) so the policy sees how close to the edge
+# it is and learns to recover, instead of aliasing the safe edge lane with an off-track lane (the
+# 2026-06-26 on-device strafe-off-edge failure: lane drifted to -15, an obs the 3-bucket sim never had).
+LANE_HOME = O.LANE_HOME
+LANE_STEP = O.LANE_STEP
+LANE_FALL_LEFT = O.LANE_HOME - 1.5 * O.LANE_STEP    # -6.85 (2 lefts from center)
+LANE_FALL_RIGHT = O.LANE_HOME + 1.5 * O.LANE_STEP   # +4.25 (2 rights from center)
+
 
 # =============================================================================
 # DEFAULT_SIM_CONFIG — every INFERRED numeric knob, in one labeled place.
@@ -65,7 +75,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
-    "obstacle_prob": 0.45,             # [INFERRED] chance a non-gated cell carries an obstacle (real gen is deterministic+variation; approx)
+    "obstacle_prob": 0.52,             # [AUDIT 2026-06-26] denser to match real obstacle-frame rate (was 0.45, ~under)
     "double_obstacle_percent": 0.0,     # [READ] sDoubleObstaclePercent (no doubles in the baseline section)
     "max_back_to_back_obstacles": 2,    # [READ] sMaxBackToBackObstacles
     "turn_prob": 0.18,                 # [INFERRED] chance a turn-eligible cell becomes a junction (early game)
@@ -74,7 +84,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # the turn spacing down + turn prob up; slides only switch on past slides_after_distance (the
     # baseline statics have sAllowTreeSlide/FlameTowers = False -> no slides early).
     "ramp_distance": 6000.0,           # [CALIBRATED] distance over which difficulty goes 0 -> 1
-    "min_space_between_turns_late": 7, # [CALIBRATED] turn spacing at full difficulty (cells)
+    "min_space_between_turns_late": 5, # [AUDIT 2026-06-26] denser late turns to match real ~6.9%/frame (was 7)
     "turn_prob_late": 0.5,             # [CALIBRATED] turn probability at full difficulty
     # Clear run-out after a junction: the cell immediately after a turn carries NO obstacle. You can't
     # turn AND have a jump/slide active on the same cell-crossing, so a must-jump cell right after a
@@ -102,7 +112,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # JUMPED (captured: path_level 2->3 + obstacle=7 + no jump => fell). Model it: every ~N cells the
     # zone steps to an adjacent altitude and that cell is a must-jump LevelChange. path_level in the obs
     # follows the zone so the policy also sees the altitude.
-    "zone_change_every_cells": 60,     # [CALIBRATED] cells between zone transitions (first real one ~dist600 ≈ 94 cells; spaced like an obstacle too)
+    # [DEVICE-MEASURED 2026-06-26] crevasse frame-rate ~3.5% vs the old sim's 1.85% (2x too sparse);
+    # first crevasse at dist 587. Halve the spacing to match the real density (audit-tuned).
+    "zone_change_every_cells": 32,     # [MEASURED] cells between zone transitions (~2x denser to match real 3.5%)
     # WIDE GAPS (2-cell): on device, long holes (path_type 12/13/15/16) and zone LevelChange caps
     # (33-36) span TWO cells — a single jump must be timed at the gap EDGE to span both; jumping a cell
     # early (the single-obstacle reflex) lands in the far half -> Fall. Modeled as 2 consecutive
@@ -111,16 +123,29 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # safe lane. The sim teaches the SKILL "strafe to the lane the obs says" using a RANDOM safe lane
     # per narrow (so the policy MUST read `narrow_target_lane`, not memorize). The real subtype+facing
     # -> safe-lane map lives in the HOOK (from the device sweep); the policy is map-agnostic.
-    "narrow_prob": 0.14,               # chance an obstacle-eligible cell is a narrow instead
+    # [DEVICE-MEASURED 2026-06-26] narrows appear ONLY past ~1800m (first at 1824) and at ~7% frame-rate
+    # after that; the old sim spawned them from dist 0 at ~3.5% (wrong onset + 2x too sparse).
+    "narrows_after_distance": 1800.0,  # [MEASURED] no narrows before this distance
+    "narrow_prob": 0.40,               # [MEASURED] denser to approach real ~7% frame-rate (after onset)
+    # DEVICE-MEASURED strip length (human capture 2026-06-26): {1:12, 2:16, 3:13, 4:6, 5:2, 7:1} cells.
+    # A strip is multiple cells -> the runner must HOLD the safe lane across all of them (a per-cell
+    # off-lane Fall), capped at 4 here. The OLD 1-cell model let the policy strafe back too early.
+    "narrow_len_weights": {1: 0.25, 2: 0.34, 3: 0.27, 4: 0.14},
     # Strafing past the 3-lane edge drops the runner off the path on device (measured: lane -5.5 on a
     # straight -> Fall). The cap-only sim hid this, so the policy strafe-spammed off-path. Model it.
     "strafe_off_edge_kills": True,
+    "turn_while_strafing_kills": True,  # a turn issued mid-strafe lands off-path (strafe-heavy policy fix)
     "wide_gap_prob": 0.40,             # chance a placed HOLE is a WIDE gap (jump-late-or-fall)
-    "wide_gap_extra_cells": 0,         # 0 = single cell; the wideness is the LATE-jump requirement below
-    # A wide gap needs a FRESH jump on entry (jumped at the gap edge) — its airtime can't span the gap
-    # if jumped a cell early. So require jump_t >= this on entry (jump_duration ~0.6; this forces a jump
-    # within ~0.15 s of the edge). Jumping early (the single-obstacle reflex) => jump_t too low => Fall.
-    "wide_gap_min_airtime": 0.30,
+    # DEVICE-MEASURED gap spans (human capture 2026-06-26, captures/human_calib_2026-06-26.jsonl):
+    # same-level long holes span 1-3 cells (model the wide ones as 2 = extra 1). The OLD value 0 made
+    # every gap a single cell, so the policy never learned the 2-cell timing -> jumped early -> fell in.
+    "wide_gap_extra_cells": 1,         # 1 => the gap is 2 cells (a single jump must span both)
+    # Wide-gap death: a 2-cell gap is self-timing — the runner must be AIRBORNE at BOTH gap-cell entries,
+    # and a single jump (airtime ~0.6s) only spans ~2 cells at the crevasse velocity (~210, top speed),
+    # so an early jump runs out of air before the 2nd cell -> Fall, a late/no jump isn't airborne at the
+    # 1st -> Fall. The span enforces the timing, so the entry check is just "still airborne" (need ~0).
+    # (The old need=0.30 was a hack to fake timing on a SINGLE-cell gap; the real 2-cell gap does it.)
+    "wide_gap_min_airtime": 0.0,
     # SIM-TO-REAL turn fidelity: on the phone is_turn stays True for ~2 frames AFTER a turn (the
     # facing-change lags the input), so the policy fires the turn on both frames and the 2nd
     # OVER-ROTATES the character off the corner -> Fall (the dominant on-device turn-death). The plain
@@ -130,6 +155,11 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "turn_linger_frames": 0,
     "zone_min_level": 1,               # low altitude
     "zone_max_level": 3,               # high altitude (start = default_path_level = 2 = mid)
+    # DEVICE-MEASURED (human capture 2026-06-26): the crevasse gap WIDTH depends on the altitude pair.
+    # mid<->high (2<->3) transitions are 2-3 cell gaps (the wide ones the policy jumps too early on);
+    # low<->mid (1<->2) are ~1 cell (forgiving). So a transition touching HIGH gets the wide 2-cell gap.
+    "zone_gap_extra_cells_high": 1,    # mid<->high transition => 2-cell gap (extra 1)
+    "zone_gap_extra_cells_lowmid": 0,  # low<->mid transition => single cell (extra 0)
     # Powerup spawn probabilities are all 0 in the baseline read (sProbabilityBoost/Invincibility/
     # Vacuum/CoinBonus = 0) — why human runs saw 0 boost frames; the sim models no powerups (v1).
     "min_spaces_between_coin_runs": 12, # [READ] sMinSpacesBetweenCoinRuns
@@ -166,9 +196,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # there + the difficulty ramp already keyed to distance). 0 = always start slow.
     "curriculum_max_start_dist": 0.0,  # if >0, sample episode start distance uniform [0, this]
     # --- D. Action timings (seconds; durations of the transient flags) -------
-    "jump_duration": 0.6,             # [INFERRED] airtime — IsJumping true for this long
-    "slide_duration": 0.6,            # [INFERRED] SlideDuration@0x108
+    # [DEVICE-MEASURED 2026-06-26] is_jumping run-length median 8 frames @10Hz = 0.80s (tight: p90=0.8);
+    # is_sliding median 7 = 0.70s. The old 0.6 made the runner airborne ~2x too little vs real (14% vs
+    # 22-32%) AND made the 2-cell crevasse too harsh — a real 0.8s jump spans ~2.8 cells at top speed.
+    "jump_duration": 0.8,             # [MEASURED] airtime — IsJumping true ~0.80s
+    "slide_duration": 0.7,            # [MEASURED] SlideDuration ~0.70s
     "strafe_duration": 0.25,          # [INFERRED] strafe lane-shift dur@0x12C
+    # [DEVICE-MEASURED 2026-06-26] a strafe is a GRADUAL lateral glide, not an instant lane jump: one
+    # StrafeLeft moved lane -2.3 -> -6.6 over ~4 frames (~0.4s). The old instant model left the policy
+    # OOD whenever it saw the lane mid-move on device -> it over-corrected -> oscillated off the edge.
+    # The lane now glides toward a target at LANE_STEP/strafe_glide_time per second.
+    "strafe_glide_time": 0.35,        # [MEASURED] seconds for the lane to complete one strafe-step
     "stumble_duration": 0.5,          # [INFERRED] StumbleDuration; unrecovered -> death window
     # --- E. Geometry ---------------------------------------------------------
     "cell_length": 60.0,              # PROCEDURAL mode: cells crossed per (velocity*dt) of model distance
@@ -191,8 +229,8 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "dr_turn_window_frac": [0.62, 0.78],   # is_turn/exec upper bound (turn must land before this)
     "dr_turn_early_frac":  [0.24, 0.34],   # early-turn off-center death threshold (jitter the trap)
     "dr_turn_late_frac":   [0.58, 0.66],   # late-turn off-center death threshold
-    "dr_jump_duration":    [0.55, 0.72],   # real airtime varies
-    "dr_slide_duration":   [0.55, 0.72],
+    "dr_jump_duration":    [0.72, 0.88],   # [MEASURED] real airtime ~0.80s (run-len 7-9 frames)
+    "dr_slide_duration":   [0.62, 0.80],   # [MEASURED] real ~0.70s
     "dr_velocity_scale":   [0.94, 1.08],   # multiply the curve velocity per episode
     "dr_obstacle_prob":    [0.35, 0.55],   # obstacle density jitter
     "dr_turn_prob":        [0.12, 0.28],   # early-game turn density jitter
@@ -262,6 +300,7 @@ class TempleRunSimEnv(gym.Env):
         turn_spam_penalty: float = C.DEFAULT_TURN_SPAM_PENALTY,
         idle_action_penalty: float = C.DEFAULT_IDLE_ACTION_PENALTY,
         redundant_action_penalty: float = C.DEFAULT_REDUNDANT_ACTION_PENALTY,
+        strafe_penalty: float = 0.0,
         action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
         frame_stack: int = C.DEFAULT_FRAME_STACK,
         **_ignored: Any,
@@ -303,6 +342,7 @@ class TempleRunSimEnv(gym.Env):
         self.turn_spam_penalty = float(turn_spam_penalty)
         self.idle_action_penalty = float(idle_action_penalty)
         self.redundant_action_penalty = float(redundant_action_penalty)
+        self.strafe_penalty = float(strafe_penalty)
 
         # Velocity curve (distance -> velocity) for fast interpolation in _advance.
         vc = self.cfg.get("velocity_curve") or []
@@ -345,7 +385,8 @@ class TempleRunSimEnv(gym.Env):
     def _reset_internal_state(self) -> None:
         self._velocity = float(self.cfg["start_velocity"])
         self._facing = DIR_N
-        self._lane = 0                       # -1 L, 0 C, +1 R (3 lanes; SPEC §3)
+        self._lane = LANE_HOME               # CONTINUOUS lateral offset (home -1.3); GLIDES toward target
+        self._lane_target = LANE_HOME        # the lane the runner is gliding toward (strafe sets it)
         self._distance = 0.0
         self._distance_real = float(self.cfg["start_distance"])  # real-scale DistanceTraveled (reward signal)
         # high-speed curriculum: jump-start a fraction of episodes deep into the run (fast + dense).
@@ -384,6 +425,12 @@ class TempleRunSimEnv(gym.Env):
         self._pending_gap_obst = 0
         self._pending_gap_type = 1
         self._pending_gap_level = 2
+        # NARROW strip continuation: device strips span 1-7 cells (commonly 2-3), so the runner must
+        # HOLD the safe lane across N cells, not just match it for one frame (the old 1-cell model let a
+        # policy strafe back too early and fall off the 2nd/3rd cell on the phone).
+        self._pending_narrow = 0
+        self._pending_narrow_lane = 0
+        self._pending_narrow_type = 17
         # replay cursor (which injected element feeds the next generated cell)
         self._replay_cursor = 0
         # the live track window: a list of cells, [_cell_index] = current.
@@ -440,6 +487,14 @@ class TempleRunSimEnv(gym.Env):
                          obstacles=self._pending_gap_obst, is_turn=False)
             e["wide_gap"] = True
             return e
+        # NARROW-strip continuation: the 2nd+ cell of a multi-cell narrow (same safe lane). Each cell
+        # re-applies the off-lane Fall on entry, so the policy must HOLD the safe lane across the strip.
+        if self._pending_narrow > 0:
+            self._pending_narrow -= 1
+            self._cells_since_obstacle = 0
+            e = _element(type=self._pending_narrow_type, level=int(self._zone_level), is_turn=False)
+            e["narrow_lane"] = self._pending_narrow_lane
+            return e
         wide = False         # this cell STARTS a 2-cell gap
         narrow_lane = None   # if set (-1/0/+1), this cell is a narrow needing that lane (else Fall)
 
@@ -483,15 +538,21 @@ class TempleRunSimEnv(gym.Env):
             self._cells_since_obstacle = 0
             self._b2b_obstacles = 0
             lo, hi = int(cfg["zone_min_level"]), int(cfg["zone_max_level"])
+            prev_zone = self._zone_level
             if self._zone_level <= lo:
                 self._zone_level += 1
             elif self._zone_level >= hi:
                 self._zone_level -= 1
             else:
-                self._zone_level += 1 if self._rng.random() < 0.5 else -1
+                # [AUDIT 2026-06-26] real spends ~32% low / 13% high (biased LOW); a symmetric walk gave
+                # 22/23. Bias the mid-step DOWN so the stationary time matches (down 0.65 / up 0.35).
+                self._zone_level += -1 if self._rng.random() < 0.65 else 1
             level = int(self._zone_level)   # the crevasse cell already sits in the NEW zone (matches live capture)
-            # zone change is a 2-cell gap on device (StepDownCap A+B) -> queue the 2nd cell.
-            self._pending_gap = int(cfg["wide_gap_extra_cells"])
+            # DEVICE-MEASURED gap width: a transition touching HIGH (mid<->high) is a 2-cell gap; low<->mid
+            # is a single cell. Queue the extra cell(s) accordingly (continuation emitted at _next_cell top).
+            involves_high = (prev_zone >= hi) or (self._zone_level >= hi)
+            self._pending_gap = int(cfg["zone_gap_extra_cells_high"] if involves_high
+                                    else cfg["zone_gap_extra_cells_lowmid"])
             self._pending_gap_obst = OBST_LEVEL_CHANGE
             self._pending_gap_type = 35    # ~ real SingleLevelStepDownCap path_type (obs match)
             self._pending_gap_level = int(self._zone_level)
@@ -511,11 +572,21 @@ class TempleRunSimEnv(gym.Env):
             if place:
                 self._cells_since_obstacle = 0
                 self._b2b_obstacles += 1
-                if self._rng.random() < float(cfg["narrow_prob"]):
-                    # NARROW: a one-lane strip with a RANDOM safe lane; runner falls off elsewhere. The
-                    # policy must read narrow_target_lane (not the subtype). ptype ~ a real narrow value.
+                if (self._distance_real >= float(cfg["narrows_after_distance"])
+                        and self._rng.random() < float(cfg["narrow_prob"])):
+                    # NARROW: a multi-cell one-lane strip with a RANDOM safe lane; runner falls off
+                    # elsewhere. The policy must read narrow_target_lane (not the subtype) and HOLD it
+                    # across the strip. ptype ~ a real narrow value. Gated to past narrows_after_distance.
                     narrow_lane = int(self._rng.integers(-1, 2))   # -1 / 0 / +1
                     ptype = {-1: 19, 0: 17, 1: 22}[narrow_lane]
+                    # device-measured strip length -> queue the continuation cells (same safe lane).
+                    lw = cfg["narrow_len_weights"]
+                    lens = list(lw.keys())
+                    probs = np.array([lw[k] for k in lens], dtype=float)
+                    strip = int(self._rng.choice(lens, p=probs / probs.sum()))
+                    self._pending_narrow = strip - 1
+                    self._pending_narrow_lane = narrow_lane
+                    self._pending_narrow_type = ptype
                 else:
                     obstacle = self._sample_obstacle_type()
                     # a HOLE is sometimes a 2-cell LONG hole (path_type 12/13/15/16 on device).
@@ -634,7 +705,7 @@ class TempleRunSimEnv(gym.Env):
             a, self._prev_state, self._last_action,
             action_cost=self.action_cost, reaction_bonus=self.reaction_bonus,
             turn_spam_penalty=self.turn_spam_penalty, idle_action_penalty=self.idle_action_penalty,
-            redundant_action_penalty=self.redundant_action_penalty,
+            redundant_action_penalty=self.redundant_action_penalty, strafe_penalty=self.strafe_penalty,
         )
         terminated = bool(state["is_dead"] or state["is_game_over"])
         if terminated:
@@ -675,18 +746,13 @@ class TempleRunSimEnv(gym.Env):
             if self._slide_t <= 0.0 and self._jump_t <= 0.0:
                 self._slide_t = float(cfg["slide_duration"])
         elif a == int(C.Action.STRAFE_LEFT):
-            if self._lane > -1:
-                self._lane -= 1
-                self._strafe_t = float(cfg["strafe_duration"])
-            elif cfg.get("strafe_off_edge_kills"):
-                self._kill(1)   # strafed off the LEFT edge of the 3-lane path -> Fall (real: lane goes
-                                # past the edge and the runner drops; the cap-only sim hid this -> spam)
+            # set the GLIDE target a lane-step left; the lane moves there gradually in _advance (the
+            # off-edge Fall fires there when the ACTUAL lane crosses the threshold mid-glide).
+            self._lane_target -= LANE_STEP
+            self._strafe_t = float(cfg["strafe_glide_time"])
         elif a == int(C.Action.STRAFE_RIGHT):
-            if self._lane < 1:
-                self._lane += 1
-                self._strafe_t = float(cfg["strafe_duration"])
-            elif cfg.get("strafe_off_edge_kills"):
-                self._kill(1)   # strafed off the RIGHT edge -> Fall
+            self._lane_target += LANE_STEP
+            self._strafe_t = float(cfg["strafe_glide_time"])
         elif a in (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT)):
             self._attempt_turn(a)
         # NOOP -> nothing
@@ -708,6 +774,13 @@ class TempleRunSimEnv(gym.Env):
             if cp < float(self.cfg["turn_early_frac"]) or cp > float(self.cfg["turn_late_frac"]):
                 # off-center turn (too early OR too late in the cell) -> lands off the exit path -> Fall.
                 self._kill(9)   # off-center turn death (measured on device, both edges)
+                return
+            if self.cfg.get("turn_while_strafing_kills") and self._strafe_t > 0.0:
+                # turning MID-STRAFE: the lateral strafe momentum carries through the turn and throws the
+                # runner way off the exit path -> Fall (device: the strafe-heavy policy's turns landed at
+                # lane +-18 half the time, vs the clean policy's <=8). The policy must finish the strafe
+                # (or not strafe) before turning.
+                self._kill(9)
                 return
         if valid:
             self._facing = _LEFT_OF[self._facing] if want_left else _RIGHT_OF[self._facing]
@@ -741,6 +814,18 @@ class TempleRunSimEnv(gym.Env):
         self._jump_t = max(0.0, self._jump_t - dt)
         self._slide_t = max(0.0, self._slide_t - dt)
         self._strafe_t = max(0.0, self._strafe_t - dt)
+
+        # GRADUAL lane glide toward the strafe target (device strafe is a multi-frame slide, not a jump).
+        if self._lane != self._lane_target:
+            rate = float(LANE_STEP) / max(1e-3, float(cfg["strafe_glide_time"]))   # units/sec
+            step = rate * dt
+            if abs(self._lane_target - self._lane) <= step:
+                self._lane = self._lane_target
+            else:
+                self._lane += step if self._lane_target > self._lane else -step
+            # Fall when the ACTUAL lane crosses the track edge mid-glide (over-strafed off the side).
+            if cfg.get("strafe_off_edge_kills") and (self._lane < LANE_FALL_LEFT or self._lane > LANE_FALL_RIGHT):
+                self._kill(1)
         if self._stumble_t > 0.0:
             self._stumble_t = max(0.0, self._stumble_t - dt)
         if self._post_turn_linger > 0:          # post-turn is_turn linger (sim-to-real trap) counts down
@@ -807,22 +892,26 @@ class TempleRunSimEnv(gym.Env):
             entered["is_coin"] = False
 
     def _resolve_obstacle_on_enter(self, cell: dict) -> None:
-        # NARROW strip: must be in the safe lane on entry, else fall off the edge.
+        # NARROW strip: must be within the safe lane's range on entry (continuous lane), else fall off.
         nl = cell.get("narrow_lane")
-        if nl is not None and self._lane != int(nl):
-            self._kill(1)   # fell off the narrow strip (wrong lane)
-            return
+        if nl is not None:
+            target = LANE_HOME + int(nl) * LANE_STEP
+            if abs(self._lane - target) > 0.5 * LANE_STEP:
+                self._kill(1)   # not in the narrow's safe lane -> fell off the strip
+                return
         obst = int(cell.get("obstacles", 0))
         if obst in _MUST_JUMP:
-            # Wide gap: need a FRESH jump (jumped at the edge) so airtime spans it; an early jump has
-            # too little airtime left on entry -> Fall (the device's wide-gap death the policy must learn).
+            # Must be AIRBORNE crossing into the cell. For a 2-cell wide gap BOTH cells carry this check,
+            # so a single jump (airtime spans ~2 cells at crevasse speed) clears it only if timed at the
+            # gap edge; an early jump runs out of air by the 2nd cell -> Fall (the device wide-gap death).
+            # wide_gap_min_airtime is ~0 now (the 2-cell SPAN enforces the timing, not an airtime hack).
             need = float(self.cfg["wide_gap_min_airtime"]) if cell.get("wide_gap") else 0.0
             if self._jump_t <= need:
-                self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / Tree
+                self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / LevelChange/Tree
         elif obst in _MUST_SLIDE:
             if self._slide_t <= 0.0:
                 self._kill(5 if obst == OBST_FLAME_TOWER else 3)  # Burnt / Slide
-        # OBST_NARROW / OBST_NONE / OBST_LEVEL_CHANGE: no death in v0.
+        # OBST_NARROW / OBST_NONE: no death here (narrow handled above; LevelChange is in _MUST_JUMP).
 
     def _kill(self, death_type: int) -> None:
         self._is_dead = True
@@ -911,10 +1000,10 @@ class TempleRunSimEnv(gym.Env):
             "next_must_slide": nobst in _MUST_SLIDE,
             "next_wide_gap": bool(nxt.get("wide_gap")),   # the upcoming gap is 2-cell -> jump LATE
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
-            # NN perception (replaces the host-side assists): cell_progress to TIME turns, lane (mapped
-            # to the real lane geometry so obs.lane_to_obs buckets sim/real identically) for narrows.
+            # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
+            # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).
             "cell_progress": self._cell_progress(),
-            "lane": (-5.0 if self._lane < 0 else (2.4 if self._lane > 0 else -1.3)),
+            "lane": float(self._lane),
         }
         return state
 
@@ -947,7 +1036,8 @@ class TempleRunSimEnv(gym.Env):
         self._score = float(s.get("score", self.cfg["start_score"]))
 
         lane = hidden.get("lane")
-        self._lane = int(lane) if lane is not None else 0
+        self._lane = float(lane) if lane is not None else LANE_HOME
+        self._lane_target = self._lane
         self._distance = float(hidden.get("distance") or 0.0)
         self._distance_real = float(hidden.get("distance") or self.cfg["start_distance"])
         self._ground_height = float(hidden.get("ground_height") or 0.0)

@@ -1,0 +1,43 @@
+loaded 3 episodes, 7205 frames, 3 ended in death
+
+=== CREVASSES — A) altitude transitions (path_level change) ===
+  low->mid (1->2): n=16  survived=16 fell=0
+      path_types={2: 103, 1: 100, 36: 15, 33: 13, 34: 12, 35: 9}  obstacles={0: 203, 7: 49, 1: 4}
+      gap cell-span={1: 14, 2: 2}  (span>=2 => need wide_gap_extra_cells>=1)
+      jump-takeoff cprog  survived=[0.17, 0.19, 0.2, 0.31, 0.35, 0.36, 0.41, 0.46, 0.49, 0.49, 0.51, 0.56, 0.56, 0.61, 1.01, 1.04] fell=[]
+  mid->low (2->1): n=11  survived=11 fell=0
+      path_types={2: 91, 1: 51, 33: 9, 34: 9, 35: 7, 36: 6}  obstacles={0: 142, 7: 31, 6: 3}
+      gap cell-span={1: 10, 2: 1}  (span>=2 => need wide_gap_extra_cells>=1)
+      jump-takeoff cprog  survived=[0.42, 0.49, 0.99] fell=[]
+  mid->high (2->3): n=10  survived=10 fell=0
+      path_types={2: 50, 1: 49, 35: 16, 36: 15, 33: 15, 34: 15}  obstacles={0: 97, 7: 61, 5: 2}
+      gap cell-span={2: 8, 3: 2}  (span>=2 => need wide_gap_extra_cells>=1)
+      jump-takeoff cprog  survived=[0.11, 0.14, 0.23, 0.23, 0.23, 0.39, 0.57, 0.58, 1.05, 1.05] fell=[]
+  high->low (3->1): n=6  survived=6 fell=0
+      path_types={1: 39, 2: 39, 36: 6, 34: 6, 35: 3, 33: 3}  obstacles={0: 78, 7: 18}
+      gap cell-span={1: 6}  (span>=2 => need wide_gap_extra_cells>=1)
+      jump-takeoff cprog  survived=[0.29, 0.53, 0.71, 0.75] fell=[]
+  high->mid (3->2): n=3  survived=3 fell=0
+      path_types={2: 20, 1: 9, 33: 6, 34: 6, 36: 4, 35: 3}  obstacles={0: 28, 7: 19, 5: 1}
+      gap cell-span={2: 1, 3: 2}  (span>=2 => need wide_gap_extra_cells>=1)
+      jump-takeoff cprog  survived=[0.28, 0.3, 1.02] fell=[]
+
+=== CREVASSES — B) same-level gaps (obstacle==7 or HoleLong, NO level change) ===
+  events=44 survived=43 fell=1  cell-span={1: 30, 2: 12, 3: 2}
+  path_types={35: 19, 34: 27, 36: 27, 16: 18, 15: 19, 33: 25, 13: 15, 12: 382}
+  jump-takeoff cprog  survived=[0.05, 0.11, 0.17, 0.19, 0.2, 0.29, 0.31, 0.35, 0.36, 0.41, 0.46, 0.49, 0.49, 0.49, 0.51, 0.53, 0.56, 0.56, 0.59, 0.61, 0.71, 0.75, 0.83, 0.83, 0.85, 0.87, 0.89, 0.9, 0.99, 1.01, 1.01, 1.04, 1.04] fell=[]
+
+=== NARROWS (path_type 17-30): subtype x facing -> surviving lane ===
+strip length (cells) distribution = {1: 12, 3: 13, 2: 16, 4: 6, 5: 2, 7: 1}
+ sub fac | lane: surv/died              | hook_guess | inferred_safe
+  17   N | L:1/0 C:1/0 R:2/0            |     C      | R  <-- HOOK MAP WRONG
+  17   S | L:1/0 R:3/0                  |     C      | R  <-- HOOK MAP WRONG
+  18   W | L:3/0 R:2/0                  |     C      | L  <-- HOOK MAP WRONG
+  20   N | L:10/0                       |     L      | L
+  21   S | R:5/0                        |     R      | R
+  23   N | R:4/0                        |     R      | R
+  24   S | L:1/0 R:1/0                  |     L      | L
+  26   E | L:5/0                        |     R      | L  <-- HOOK MAP WRONG
+  27   W | R:3/0                        |     L      | R  <-- HOOK MAP WRONG
+  29   E | R:4/0                        |     L      | R  <-- HOOK MAP WRONG
+  30   W | L:4/0                        |     R      | L  <-- HOOK MAP WRONG
