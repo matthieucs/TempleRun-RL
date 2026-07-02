@@ -886,9 +886,18 @@ class TempleRunSimEnv(gym.Env):
                 cell.get("can_turn_left") if want_left else cell.get("can_turn_right")):
             self._execute_turn(cell, want_left, cp)
             return
-        # ANY other swipe (approach cell, straight, wrong side, before/after the window) -> hit the wall
-        # -> survivable STUMBLE (2nd too soon -> Fall). A missed MANDATORY turn is the Fall on cell exit.
-        self._stumble()
+        # TURN ON A STRAIGHT = FATAL [DEVICE-MEASURED 2026-07-02, single TurnLeft on a plain centered
+        # straight: 8/8 DIED, lane thrown to +/-8-14 off the path]. The native turn rotates the runner
+        # off the path -> water. This SUPERSEDES the old "swipe on a straight = survivable stumble"
+        # (§13/§14, wrong under the accel-tilt hook). It is THE reason every policy spam-turned: the sim
+        # gave free turns anywhere (stumble), the device kills each one. A turn with NO junction context
+        # (not on a turn cell, not approaching one) -> Fall. Only a MISTIMED turn AT/NEAR a junction
+        # (right place, wrong cprog/side) is a survivable stumble.
+        near_junction = bool(cell.get("is_turn")) or bool(self._next_cell().get("is_turn"))
+        if near_junction:
+            self._stumble()      # mistimed at a junction -> survivable wobble (2nd too soon -> Fall)
+        else:
+            self._kill(1)        # turn on a plain straight -> rotates off the path -> water
 
     def _execute_turn(self, cell: dict, want_left: bool, swipe_cp: float) -> None:
         """Round the corner and LAND at a lateral offset set by the swipe cprog (device-measured):

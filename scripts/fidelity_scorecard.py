@@ -271,33 +271,29 @@ def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:
 
 
 def check_stumble(ref) -> dict:
-    """Scripted 2-strike test on a pure straight: 1 mistimed turn = survivable slowdown; a 2nd
-    within the kill window dies; a 2nd after it survives."""
+    """2-strike test: 1 stumble = survivable slowdown; a 2nd within the kill window dies; a 2nd after
+    it survives. Triggers the mechanic DIRECTLY via _stumble() (a wall-hit) — NOT via a turn-on-straight
+    (that is now a Fall, device-measured 2026-07-02), which is what the mechanic actually models."""
     doc = ref["stumble"]["values"]["documented"]
     win, slow = float(doc["kill_window_s"]), float(doc["slowdown"])
 
     def episode(gap_s: float):
         env = _env(STRAIGHT_CFG, 800)
         _, i = env.reset(seed=41000)
-        st = i["raw_state"]
-        # settle a few frames, then mistimed turn #1
         for _ in range(5):
-            st = env.step(int(C.Action.NOOP))[4]["raw_state"]
-        v_before = st["velocity"]
-        st = env.step(int(C.Action.TURN_LEFT))[4]["raw_state"]
-        v_trough = st["velocity"]
+            env.step(int(C.Action.NOOP))
+        v_before = env._velocity
+        env._stumble()                                  # wall-hit #1
+        v_trough = env._velocity
         for _ in range(3):
             st = env.step(int(C.Action.NOOP))[4]["raw_state"]
-            v_trough = min(v_trough, st["velocity"])
+            v_trough = min(v_trough, env._velocity)
         first_survived = not st["is_dead"]
-        for _ in range(int(round(gap_s / 0.1)) - 4):
+        for _ in range(max(0, int(round(gap_s / 0.1)) - 4)):
             st = env.step(int(C.Action.NOOP))[4]["raw_state"]
-        st = env.step(int(C.Action.TURN_LEFT))[4]["raw_state"]
-        for _ in range(3):
-            if st["is_dead"]:
-                break
-            st = env.step(int(C.Action.NOOP))[4]["raw_state"]
-        return first_survived, bool(st["is_dead"]), v_trough / max(1.0, v_before)
+        env._stumble()                                  # wall-hit #2
+        died = bool(env._is_dead)
+        return first_survived, died, v_trough / max(1.0, v_before)
 
     s1, died_fast, ratio = episode(win - 0.5)
     s2, died_slow, _ = episode(win + 0.5)
