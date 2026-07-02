@@ -46,6 +46,8 @@ LOG_FIELDS = (
     "dist_to_change_temple", "dist_to_change_other", "dist_since_level_change", "dist_remainder",
     "ground_height", "is_over_ground", "ground_change_higher",
     "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
+    # --- Region2D narrow-band probe (hook 15c): game-polygon safe band of the upcoming narrow ---
+    "narrow_band_lo", "narrow_band_hi", "on_region", "_hv",
 )
 
 NARROW_LO, NARROW_HI = 17, 30
@@ -83,6 +85,14 @@ def main() -> None:
     p.add_argument("--max-steps", type=int, default=4000)
     p.add_argument("--turn-cooldown", type=int, default=0)
     p.add_argument("--out", default="captures/calib.jsonl")
+    p.add_argument("--lateral-mode", choices=["accel", "legacy"], default="accel",
+                   help="hook lateral semantics: accel (15a: strafe=hold, NoOp=recenter) or legacy "
+                        "(native persistent-px strafes: strafe once, opposite-strafe to recenter)")
+    p.add_argument("--gap-override", default="off",
+                   help="controlled crevasse-jump sweep: comma list of target cell_progress values "
+                        "(e.g. '0.2,0.4,0.6,0.8') cycled per gap encounter. Near a wide gap the "
+                        "policy's jumps are suppressed and ONE jump fires at the target cprog — "
+                        "gives an unambiguous device takeoff->outcome curve. 'off' = policy jumps.")
     p.add_argument("--narrow-override", choices=["off", "L", "C", "R", "cycle"], default="off",
                    help="force a commanded lane at each narrow (isolates the sweep from the hook guess)")
     a = p.parse_args()
@@ -113,6 +123,9 @@ def main() -> None:
     cyc_lbl = {SL: "L", NOP: "C", SR: "R"}
     n_written = 0
     narrow_count = 0   # global counter for --narrow-override cycle
+    gap_targets = ([float(x) for x in a.gap_override.split(",")]
+                   if a.gap_override != "off" else None)
+    gap_count = 0      # global counter for --gap-override cycling
 
     f = out.open("w")
     try:
@@ -123,11 +136,40 @@ def main() -> None:
             narrow_active = False
             narrow_strafed = False
             narrow_cmd = ""
+            # per-episode gap-override state
+            gap_active = False
+            gap_jumped = False
+            gap_target = None
 
             for step in range(a.max_steps):
                 act, _ = m.predict(adapt(o), deterministic=True)
                 act = int(act)
                 cmd_log = ""
+
+                if gap_targets is not None:
+                    # controlled crevasse sweep: while a wide gap is next/current, suppress the
+                    # policy's jump and fire exactly ONE at the target cprog of the PRE-GAP cell.
+                    near_gap = bool(st.get("next_wide_gap"))
+                    if near_gap and not gap_active:
+                        gap_active = True
+                        gap_jumped = False
+                        gap_target = gap_targets[gap_count % len(gap_targets)]
+                        gap_count += 1
+                    if gap_active:
+                        cp = float(st.get("cell_progress") or 0.0)
+                        if near_gap and not gap_jumped:
+                            if cp >= gap_target:
+                                act = 2
+                                gap_jumped = True
+                                cmd_log = f"gapjump@{cp:.2f}/tgt{gap_target}"
+                            else:
+                                act = NOP if act == 2 else act   # suppress early policy jumps
+                                cmd_log = f"gapwait/tgt{gap_target}"
+                        elif not near_gap:
+                            # gap passed (or entered): stop overriding; policy resumes
+                            if not gap_jumped:
+                                cmd_log = f"gapmissed/tgt{gap_target}"
+                            gap_active = False
 
                 if a.narrow_override != "off":
                     npt = int(st.get("next_path_type") or -1)
@@ -144,22 +186,26 @@ def main() -> None:
                             else:
                                 narrow_cmd = a.narrow_override
                             narrow_count += 1
-                        # ANALOG TILT (lateral-accel-15a, 2026-07-02): a strafe byte is a HOLD and
-                        # NoOp RECENTERS — so re-send the hold EVERY step while the narrow is active
-                        # (the old strafe-once-then-NoOp drifted back to center mid-strip and would
-                        # silently mismeasure the safe lane). A due jump/slide substitutes ONE tick —
-                        # safe: the hook tilt command is level-triggered (sticky until the next 0/1/6).
+                        # accel (15a): a strafe byte is a HOLD and NoOp RECENTERS -> re-send the hold
+                        # EVERY step (strafe-once-then-NoOp would drift back mid-strip and silently
+                        # mismeasure). legacy (native px strafes): px persists -> strafe ONCE on
+                        # approach, NoOp holds. A due jump/slide substitutes one tick (accel tilt is
+                        # level-triggered/sticky, and legacy px persists — both safe).
                         hold = {"L": SL, "R": SR, "C": NOP}[narrow_cmd]
                         if st.get("must_jump") or st.get("next_must_jump") or st.get("next_wide_gap"):
                             act = 2
                         elif st.get("must_slide") or st.get("next_must_slide"):
                             act = 3
+                        elif a.lateral_mode == "legacy":
+                            act = NOP if narrow_strafed else hold
+                            narrow_strafed = True
                         else:
                             act = hold
                         cmd_log = narrow_cmd
                     elif narrow_active:
-                        # cleared the narrow -> LEVEL the tilt (NoOp recenters natively).
-                        act = NOP
+                        # cleared the narrow -> recenter: accel = LEVEL (NoOp, native recenter);
+                        # legacy = opposite strafe (px persists, must be actively un-set).
+                        act = NOP if a.lateral_mode == "accel" else {"L": SR, "R": SL, "C": NOP}[narrow_cmd]
                         narrow_active = False
                         cmd_log = "recenter"
 

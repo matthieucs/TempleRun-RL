@@ -456,3 +456,162 @@ NOTE: HOOK_VERSION is now `crevasse-assist-8b`. The capture/analysis tooling liv
 (`cap_turn.py` logs the stream incl. `lane`/`cell_progress`; `classify_deaths.py` buckets deaths
 turn/obstacle/zone/after-turn-hazard). Calibration method that works: capture at 10 Hz, correlate the
 action's `cell_progress` with the outcome (off-center swing / cleared), pick the fire-progress.
+
+## 13. STEP-BACK: turns are a STRUCTURAL failure — the high-fidelity-sim roadmap (2026-07-01)
+
+Goal reframed by user: **a high-fidelity sim to train different policies** (distance first, coins modeled).
+40+ policies trained project-wide, ALL fail turns → NOT a training/hyperparameter problem, it's
+**structural** (obs / sim / reward). We kept tuning the sim turn window + retraining inside a loop we
+never validated. See memory [[turn-investigation-roadmap]], [[device-calibration-2026-07-01]],
+[[lateral-control-recenter-mechanic]].
+
+**What we got RIGHT this session (real progress):**
+- **Controls understood + device-CONFIRMED:** lateral = CONTINUOUS TILT (recenters to center 0 when not
+  steered; edges ±7), NOT lock-lanes. A mistimed swipe / over-tilt = a survivable **STUMBLE** (velocity
+  ×0.85 + recenter; 2nd stumble within `stumble_kill_window` → death). `stumble_kill_timer` counts UP =
+  time-since-stumble. The OLD sim instant-killed on mistimed turns — the core fidelity bug.
+- **Sim reworked** (sim_env.py): continuous tilt+recenter, wall-stumble + 2-strike death, step-up jump
+  must-fire-late. obs.py lane range symmetric ±8 center 0. **Result: mid→high crevasses now RELIABLE on
+  device (user-confirmed, first time).** Deploy candidate `runs/ppo_faithful_stumble_1300000_steps` (device median 736).
+- **Instrumentation:** hook `obs-probe-13a` streams the game's own metric signals — `over_turn_area`
+  (IsPointOverTurnArea, the REAL turn-window test), `dist_to_turn`, `dist_to_change_*` (crevasse),
+  `stumble_kill_timer`, real `death_type` enum, + COINS (`has_coins`/`coin_loc_start/end`/`coin_count`/
+  `next_*`). Coins matter: **a tilt = collect coins OR ride a narrow** (player lane follows the coin lane
+  L→−4/C→0/R→+5) — so "tilt→narrow" is false-positive-prone; coin placement disambiguates + lets a
+  coin-collecting policy be trained. New scripts: probe_fields.py, probe_turn_mistake.py, capture_calib.py
+  (+coins), log_stream.py (+flush). Human calib capture: `captures/human_calib_v2.jsonl` (a 14,956 m run).
+
+**THE TWO ROOT GAPS on turns (why they still fail):**
+1. **The policy times turns off a PROXY** (`is_turn` bool + `cell_progress`), NOT the game's real
+   `over_turn_area` (instrumented but never fed to the obs or analyzed).
+2. **No rigorous sim-vs-real turn comparison** (fidelity_audit spot-checked, never for turns); never read
+   the game's turn CODE.
+LESSON: tightening the sim turn window BACKFIRED (ppo_stumble2 regressed 736→193 — over-fit a tight
+window that doesn't match device). The answer is the REAL SIGNAL + fidelity validation, NOT window tuning.
+
+**ROADMAP (in order, stop blind retraining):** (1) read the game turn mechanic in dump.cs (TurnLeft/
+IsPointOverTurnArea/TurnRect geometry/GetPathElementIfPointOverTurn2D) → (2) capture real turns on device
+logging over_turn_area/is_turn/cell_progress/dist_to_turn/facing → (3) compare sim-vs-real turns
+frame-by-frame → (4) fix the obs to feed the REAL turn signal + re-model the sim turn → (5) retrain ONCE.
+
+**STEPS 0 + 1 DONE (2026-07-01, 2nd session — all MEASURED from the capture, NO phone):**
+- **Step 0 (harness) BUILT:** `scripts/fidelity_audit.py` gained **section E = TURN WINDOW** — measures
+  is_turn cprog distribution + run length + facing-change cprog + next_is_turn window for BOTH the human
+  capture AND an oracle sim rollout, side by side. This is the phone-free gate we never had.
+  Run: `.venv/bin/python scripts/fidelity_audit.py captures/human_calib_v2.jsonl`.
+- **`over_turn_area` IS DEAD (roadmap premise CORRECTED — do NOT feed it to the obs):** measured on
+  `human_calib_v2` (365 executed turns) it is True in only **3/7441** frames; `dist_to_turn`∈{750,850,1000}
+  + `dist_to_turn_end`≡100 are generation-pacing CONFIG, NOT live countdowns. The reliable turn signal is
+  the EXISTING obs — **`is_turn` + `next_is_turn` + `can_turn_left/right`** (already in the obs; no obs
+  change needed).
+- **REAL turn window MEASURED:** is_turn is a **~1-FRAME flash at cell START** (cprog med 0.23 / p90 0.38,
+  91% 1-frame). Human swipes the instant it appears (cprog med 0.25); facing flips ~1 step later (0.68);
+  next_is_turn ≈ 3-frame warning. Old sim taught "aim centre [0.30,0.62]" → on device is_turn is GONE by
+  0.40 → policy waited, missed the flash, ran off a MANDATORY turn → Fall. That is the structural death.
+- **RE-MODEL DONE in `sim_env.py` (validated on the harness):** (1) DELETED the off-center
+  `turn_early_frac`/`turn_late_frac` death (early turns are how humans play). (2) `turn_window_frac`
+  0.70→**0.45** so the sim reproduces the 1-frame flash. (3) **BUFFERED early swipe** (`turn_buffer_cells`,
+  `_attempt_turn` rewrite + `_execute_turn` + `_pending_turn` fired in `_cross_into_next_cell`): a swipe on
+  the approach cell (next_is_turn) is latched and fires on entering the turn area (the game's
+  HandleDelayedTurning). (4) ONLY turn death = miss a mandatory turn → Fall; swipe on a straight →
+  survivable stumble. Oracle turns on the FIRST is_turn frame + pre-fires on next_is_turn.
+- **BEHAVIORAL GATE PASSED:** re-modeled sim, 120 eps each — prompt/oracle survive 120/120; a **late-aim
+  policy (the OLD center-aim behavior) dies 120/120 at the 1st turn (Fall)**. The sim now rewards prompt
+  turns + punishes late aim = the device reality.
+
+**RESUME — NEXT: RETRAIN ONCE, then device-eval (step 1 tail).**
+- Recipe (CLAUDE.md §12) on the re-modeled sim, but **use `--turn-linger 0`** (device is_turn = a
+  measured 1-frame flash; and BUFFERING already prevents double-turns — the pre-fired turn is consumed on
+  cell entry so is_turn never re-shows. linger 3 is now INCOMPATIBLE: it kills the prompt+buffer oracle
+  80/80 by re-firing during the linger → repeated stumbles. Verified: linger 0 oracle survives 80/80).
+  Keep the BEST checkpoint (PPO collapses late). Then `scripts/eval_real.py <model> --turn-cooldown 0`.
+  Success = turn-Falls drop on device (classify via real `death_type`); target past the ~1000 m turn wall.
+- THEN step 2 (crevasse jump-clear window: the sim `stepup_min_takeoff_prog` gate vs measured takeoff)
+  and step 3 (narrows: audit section D shows sim under-represents narrows 1500-3000 m, real 11.5% vs sim
+  4.6% — read the narrow mechanic in dump.cs + measure, then model). Narrows are ~half the residual deaths.
+
+Rule going forward: **measure/read the real mechanic + validate on the offline harness BEFORE retraining.**
+No more blind train→eval→tweak loops. Deploy model so far: `runs/ppo_faithful_stumble_1300000_steps`
+(device median 736, crevasses reliable).
+
+## 14. SESSION 2 (2026-07-01) — the turn "problem" was really LATERAL. RESUME HERE (2026-07-02)
+
+**The whole arc this session (turns → really lateral):** re-modelled turns (window flash, buffering) and
+retrained TWICE — both REGRESSED on device (226, 201 < the 736 baseline). Root-caused each with a device
+capture (not guesses):
+1. Buffering (pre-fire on next_is_turn) was a SIM EXPLOIT — safe in-sim, on device it turned off-path into
+   the water. Removed it. Built `scripts/turn_gate.py` (adversarial gate: PRE-FIRE/SPAM/OFF-CENTER must DIE).
+2. Un-buffered still regressed → the policy turned OFF-CENTER (lane ~4.7) and fell off the path. Added a
+   lateral-HOLD model + off-center-turn Fall + oracle centering → device 295 (better, still < 736).
+3. **THE REAL ROOT (device probe `scripts/probe_strafe.py` + dump.cs):** our discrete `StrafeLeft/Right`
+   call `CharacterPlayer.StrafeLeft()`/`Right()` which SET a PERSISTENT `PlayerXOffset` (±7, slam-to-edge
+   + HOLD). px is only 0 at run start → **the policy can NEVER return to lane 0 after strafing → off-center
+   at the next turn → Fall.** The human uses ANALOG tilt (`GetAccelerometerForceX`; level phone → recenter),
+   which we never drove. THIS is why 40+ policies + this session failed turns. See [[lateral-control-recenter-mechanic]].
+
+**USER DECISIONS:** (a) the character MUST be able to strafe (don't train it away); (b) add FINER lateral
+control — **3 levels: Left / Center / Right**.
+
+**DONE (code, NOT device-verified — phone unplugged mid-verify):**
+- Hook `frida/temple_run_hook.js` = **`lateral-tilt-14b`**, `LATERAL_TILT=true` (line ~179). Actions now:
+  byte0=hold LEFT, byte1=hold RIGHT, byte6/NoOp=LEVEL (recenter). The hook OWNS the lateral: sets a target
+  px (LEFT→+reach, RIGHT→−reach; measured `lane = −px`) and GLIDES `PlayerXOffset` toward it in the Update
+  **onLeave** (must be onLeave — an onEnter write is overwritten by the game's char-update; the first attempt
+  14a failed for this reason). `LAT_REACH=7`, `LAT_GLIDE=0.30`/Update-frame. All other assists still false.
+- Sim/harness from step 2 in place (lateral hold `lane_recenter_time=100`, `turn_center_tol=4.0`, un-buffered
+  turns, `turn_gate.py`). Model `runs/ppo_lateral_best` (device 295). Calibrated strafe reach (`strafe_reach
+  7`, `strafe_glide_time 0.6`) but that models the OLD coarse strafe — will change once tilt is verified.
+
+**RESUME STEP 1 — VERIFY THE TILT CONTROL ON DEVICE (make-or-break, do FIRST):**
+- Recover injector: `adb -s 3f80a3a shell am force-stop com.imangi.templerun` → `am start -n
+  com.imangi.templerun/com.imangi.unityactivity.ImangiUnityActivity` → wait ~12 s → forward ports 27042/
+  9999/9998 → `setsid nohup .venv/bin/python frida/gadget_inject.py frida/temple_run_hook.js
+  127.0.0.1:27042 &` (setsid so it survives; injector is FLAKY after kill cycles — force-stop+relaunch is
+  the fix). Verify `_hv=lateral-tilt-14b` on :9999.
+- Run `python scripts/probe_strafe.py --runs 6 --out captures/strafe_probe_tilt.jsonl` → CONFIRM: StrafeLeft
+  glides lane toward −7, StrafeRight toward +7, **NoOp glides lane back to 0 (the new centering)**. If the px
+  write does NOT move the runner (lane unchanged), fall back to hooking `GetAccelerometerForceX` (TouchInput
+  RVA 0x12AD500) to return a commanded tilt force instead of writing px.
+
+**RESUME STEP 2 (after verify): re-model the sim lateral as ANALOG-TILT + retrain.**
+- Sim `sim_env.py`: a strafe glides `_lane` toward ±reach WHILE the tilt is held; NoOp glides back toward 0
+  (recenter) — this REVERTS toward the original recenter model (which was right for analog tilt, wrong for
+  the discrete-persistent strafes). Calibrate the glide rate to the device probe. Keep off-center-turn Fall.
+- Add LATERAL fidelity to the harness (we only ever validated TURNS): replay the strafe script in the sim,
+  diff the lane trajectory vs `captures/strafe_probe_tilt.jsonl`. Then `turn_gate.py` must still PASS.
+- Retrain (`train_sim.py`, recipe §12, linger 0). Device-eval `eval_real.py --turn-cooldown 0`. Target > 736.
+
+Hook re-inject one-liner (verify `_hv` on :9999 after): `setsid nohup .venv/bin/python
+frida/gadget_inject.py frida/temple_run_hook.js 127.0.0.1:27042 &`. Device serial **3f80a3a**.
+
+## 15. THE FIDELITY SCORECARD — the cheap feedback loop (2026-07-02). RULE: scorecard before retrain.
+
+**WORKFLOW RULE (user's #1 gap, now closed): no retrain, no deploy, no sim-knob commit without
+`fidelity_scorecard.py` green. The retrain gate is `--strict` green (0 FAIL, 0 SKIP).**
+
+- `scripts/extract_device_reference.py` — freezes device truth from captures into
+  **`captures/device_reference.json`** (committed): turn window stats, velocity curve, event rates
+  per band, stumble mechanics, narrow safe-lane map (prefilled from human play), crevasse takeoff
+  bands, lateral tilt dynamics (`--lateral <probe>`). Re-run only when new captures land.
+- `scripts/fidelity_scorecard.py [--json out] [--fast] [--strict]` — one command, phone-free, ~4 min:
+  9 checks vs the reference (velocity MAE, turn.window, turn.gates via turn_gate.run_gates(),
+  lateral.step = REPLAY of the probe_strafe TILT_SCRIPT in-sim, narrow.rates / .semantics
+  (per-strip aim-survives/wrong-dies) / .map (hook NARROW_SIDE vs measured), crevasse.curve
+  (jump-at-cprog sweep vs device band), stumble.window). PASS/FAIL/SKIP; SKIP ≠ PASS.
+- First run already caught: stumble slowdown overwritten next tick by the velocity curve (fixed:
+  `_stumble_vel` + `stumble_recover_rate` 1.0 u/s measured), narrow under-density (onset 1600,
+  prob 0.7 calibrated), narrow_lane_tol 2.2→3.0 (device band ±3), and reproduced the §11 crevasse
+  too-early-jump death offline (sim window [0.5,0.6] vs device fatal~0.82/clear~0.92 — OPEN, Phase 4).
+
+**LATERAL = ANALOG ACCEL (hook `lateral-accel-15a`, VERIFIED on device 2026-07-02):** the 14b px-write
+tilt FAILED (char-update owns PlayerXOffset outside GameController.Update — write war, px pinned).
+15a replaces `TouchInput.GetAccelerometerForceX` (RVA 0x12AD500, Interceptor.replace + NativeCallback
+— float return rides s0, attach/retval can't) with commanded `tiltCmd`: byte0=hold LEFT (−0.6·sign),
+byte1=hold RIGHT, byte6=LEVEL→game recenters natively. MEASURED (captures/strafe_probe_tilt2.jsonl,
+`probe_strafe.py --script tilt --start-dist 50`): lane = first-order lag toward ±7/0, **alpha 0.446
+per 0.1 s frame both directions (lat_tau 0.169 s)**, tilt persists mid-jump, **early-run input lock**
+(lateral ignored below ~dist 25–45), holding INTO the wall can scrape-bounce (snap −6.6→+1..3, then
+re-glide). Sim `sim_env.py` remodeled to exactly this (`_lat_target` + `lat_tau`; nudge-timer/near-hold
+model DEAD; NoOp recenters). Oracle: center = NoOp; narrow lane ±3.7 = bang-bang dither (only stable
+commanded points are −7/0/+7). Old policies' strafe outputs now mean HOLDS — expect degraded old-model
+captures.

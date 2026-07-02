@@ -35,6 +35,18 @@ LOG_FIELDS = (
     "is_dead", "is_game_over", "is_turn", "next_is_turn",
     "can_turn_left", "can_turn_right", "must_jump", "must_slide",
     "next_must_jump", "next_must_slide", "next_wide_gap", "narrow_target_lane",
+    # --- Phase-0 PROBE fields (hook obs-probe-12a): the game's own metric signals ---
+    "player_x_offset", "over_turn_area",
+    "dist_to_turn", "dist_to_turn_end", "dist_since_turn",
+    "dist_to_change_temple", "dist_to_change_other", "dist_since_level_change", "dist_remainder",
+    "ground_height", "is_over_ground", "ground_change_higher",
+    "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
+    "time_since_strafe", "strafe_duration", "max_velocity", "vel_x", "vel_z",
+    # coins (hook obs-probe-13a): a tilt = coins OR narrow -> need coin placement to disambiguate
+    "has_coins", "coin_loc_start", "coin_loc_end", "coin_in_air", "coin_count",
+    "next_has_coins", "next_coin_loc_start", "next_coin_loc_end",
+    # --- Region2D narrow-band probe (hook 15c): game-polygon safe band of the upcoming narrow ---
+    "narrow_band_lo", "narrow_band_hi", "on_region", "_hv",
 )
 
 
@@ -94,6 +106,8 @@ def main() -> None:
             f.write(json.dumps(rec) + "\n")
             n += 1
             step += 1
+            if n % 40 == 0:
+                f.flush()   # periodic flush so a mid-run peek / early stop keeps the data
 
             now = time.monotonic()
             if now - last_print > 1.0:

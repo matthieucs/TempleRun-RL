@@ -121,7 +121,7 @@ def check_narrow_semantics(n=30, seed0=21000) -> dict:
             # aim the OPPOSITE lane (center-safe -> aim right): must fall off the strip
             bad = -int(ntl) if int(ntl) != 0 else 1
             lane = float(st.get("lane", 0.0))
-            tgt = bad * 3.7
+            tgt = bad * 4.5
             if lane < tgt - 1.0:
                 return C.Action.STRAFE_RIGHT
             if lane > tgt + 1.0:
@@ -160,22 +160,35 @@ def check_narrow_semantics(n=30, seed0=21000) -> dict:
 
 
 def check_narrow_map(ref) -> dict:
+    """Hook NARROW_SIDE (compass map -> runner-relative side via facing) vs the Region2D-sampled
+    bands (game-polygon ground truth, human_narrows.jsonl). 17/18 skipped (bimodal NarrowSmall)."""
     nm = ref.get("narrow_map", {})
-    if nm.get("confidence") != "measured":
-        return {"skip": f"reference confidence={nm.get('confidence')} — run the device sweep (Phase 3)"}
-    # hook literal: NARROW_SIDE = { 19:'W', 20:'W', ... } style map
+    bands = nm.get("region_bands")
+    if nm.get("confidence") != "measured" or not bands:
+        return {"skip": f"reference confidence={nm.get('confidence')} — run the device band capture"}
     m = re.search(r"NARROW_SIDE\s*=\s*\{([^}]*)\}", HOOK_JS.read_text())
     if not m:
-        return {"ref": "measured map", "sim": "NARROW_SIDE not found in hook", "tol": "exact",
+        return {"ref": "measured bands", "sim": "NARROW_SIDE not found in hook", "tol": "sign match",
                 "pass": False}
-    hook = dict(re.findall(r"(\d+)\s*:\s*'(\w)'", m.group(1)))
+    hook = {int(k): v for k, v in re.findall(r"(\d+)\s*:\s*'(\w)'", m.group(1))}
+    # mirror the hook's narrowStrafeDirFor: compass side a left/right strafe reaches, per facing
+    l_side = {"N": "W", "E": "N", "S": "E", "W": "S"}
+    r_side = {"N": "E", "E": "S", "S": "W", "W": "N"}
     mism = []
-    for key, d in nm["values"]["map"].items():
-        sub = key.split(",")[0]
-        if d["safe"] in ("L", "C", "R") and sub in hook and hook[sub] != d["safe"]:
-            mism.append(f"{key}: hook {hook[sub]} != device {d['safe']}")
-    return {"ref": "device-measured safe lanes", "sim": "match" if not mism else "; ".join(mism),
-            "tol": "exact", "pass": not mism}
+    for key, bnds in bands.items():
+        sub_s, fac = key.split(",")
+        sub = int(sub_s)
+        if not (19 <= sub <= 30) or fac not in l_side or sub not in hook:
+            continue
+        center = float(np.mean([lo + hi for lo, hi in bnds])) / 2.0
+        want = -1 if center < 0 else 1                       # runner-relative strip side (ground truth)
+        side = hook[sub]
+        got = -1 if l_side[fac] == side else (1 if r_side[fac] == side else 0)
+        if got != want:
+            mism.append(f"{key}: hook->{got:+d} vs band center {center:+.1f}")
+    return {"ref": f"{len(bands)} region bands (game polygons)",
+            "sim": "map agrees with polygons" if not mism else "; ".join(mism),
+            "tol": "side sign match", "pass": not mism}
 
 
 def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:

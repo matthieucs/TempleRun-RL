@@ -39,8 +39,12 @@ CREVASSE_SRC = ["eval_stumble.jsonl", "eval_stumble2.jsonl", "turnfix_eval.jsonl
                 "turnfix2_eval.jsonl", "lateral_eval.jsonl",
                 "deploy_faithful.jsonl", "deploy_faithful3.jsonl", "deploy_faithful4.jsonl",
                 "deploy_faithful4b.jsonl", "deploy_faithful5.jsonl", "deploy_faithful6.jsonl",
-                "deploy_faithful6b.jsonl"]
+                "deploy_faithful6b.jsonl",
+                # human play (passive, is_jumping edges give takeoffs): reliable CLEARING cprogs
+                "human_narrows.jsonl", HUMAN]
 NARROW_SRC = [HUMAN, "human_calib_2026-06-26.jsonl", "human.jsonl", "human_turn_calib.jsonl"]
+# hook 15c+ capture with Region2D band sampling (the ground truth for narrow safe lanes)
+NARROW_BAND_SRC = "human_narrows.jsonl"
 
 VEL_EDGES = [0, 200, 500, 1000, 1500, 2000, 3000, 4000, 6000, 10000]
 BANDS = [(500, 1500), (1500, 3000), (3000, 6000)]
@@ -190,9 +194,26 @@ def main() -> None:
     ref["stumble"] = {"source": st_used, "values": stumble_stats(st_eps)}
 
     na_eps, na_used = _load_many(NARROW_SRC)
-    ref["narrow_map"] = {"source": na_used, "confidence": "partial",
-                         "note": "human-play mined; needs the --narrow-override device sweep",
-                         "values": narrow_stats(na_eps)}
+    nm = {"source": na_used, "confidence": "partial",
+          "note": "human-play mined; needs the --narrow-override device sweep",
+          "values": narrow_stats(na_eps)}
+    bp = CAP / NARROW_BAND_SRC
+    if bp.exists():
+        # Region2D GROUND TRUTH (hook 15c): per (next subtype, facing) the game-polygon safe band,
+        # validated against human on-strip outcomes (every strip death rode OUTSIDE its band,
+        # captures/human_narrows.jsonl 2026-07-02). Long-narrow strip center ~ +/-4.5, half-width
+        # ~2.0-2.5; NarrowSmall 17/18 is BIMODAL (two side strips), lo/hi spans one side per sample.
+        bands: dict = {}
+        for f in _frames(bp):
+            lo = f.get("narrow_band_lo")
+            if lo is None:
+                continue
+            key = f"{f.get('next_path_type')},{ {1:'N',2:'E',3:'S',4:'W'}.get(f.get('facing'),'?') }"
+            bands.setdefault(key, set()).add((int(lo), int(f["narrow_band_hi"])))
+        nm["region_bands"] = {k: sorted(v) for k, v in sorted(bands.items())}
+        nm["confidence"] = "measured"
+        nm["source"] = na_used + [NARROW_BAND_SRC]
+    ref["narrow_map"] = nm
 
     cr_eps, cr_used = _load_many(CREVASSE_SRC)
     ref["crevasse"] = {"source": cr_used, "confidence": "partial",

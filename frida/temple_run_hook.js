@@ -122,6 +122,11 @@ const RVA = {
   // drives PlayerXOffset with the game's OWN glide/recenter dynamics. Replacing this = commanding the
   // tilt the way a human hand does (px writes lost the write-war with the char-update; see 15a note).
   GetAccelerometerForceX_Touch: 0x12AD500, // float TouchInput.GetAccelerometerForceX() override
+  // NARROW GROUND TRUTH (2026-07-02, user prompt "isn't there a variable?"): each PathElement's
+  // walkable surface is a set of Region2D POLYGONS (List<Vector2> Points) — the narrow strip's side
+  // is GEOMETRY, not an enum (why all name-based side maps kept failing). This is the game's own
+  // "is this point on ground" test (drives the narrow fall, gated by AllowFallOnNarrows/"FON").
+  IsPointInsideAnyRegion2D: 0x12E8A90, // bool PathElement.IsPointInsideAnyRegion2D(Vector3 point)
 };
 
 // Player lateral offset within the cell (strafe lane). CharacterPlayer.PlayerXOffset @ 0x190.
@@ -165,7 +170,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-15a'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'legacy-strafe-15c'; // 15c: + Region2D narrow-band sampling. Flip LATERAL_ACCEL -> 'lateral-accel-15?'
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -192,7 +197,9 @@ let latTarget = 0.0;            // commanded lateral target (set by action bytes
 // The game's HandleAccelerometerForce then applies its own sensitivity/glide/recenter — identical
 // dynamics to a human tilting the phone. byte0 = hold LEFT, byte1 = hold RIGHT, byte6/NoOp = LEVEL
 // (game recenters px itself). Still a pure control mapping: the policy decides L/R/level every step.
-const LATERAL_ACCEL = true;
+const LATERAL_ACCEL = false;    // TEMP false for the Phase-3 narrow sweep (legacy strafes so the old
+                                // ppo_nn_best plays at its 1210 median; the safe-lane MAP is geometry,
+                                // control-independent). FLIP BACK true for tilt-era work + the retrain.
 const TILT_FORCE = 0.60;        // |accel force| a held tilt commands (probe: tune so reach ~ lane ±7)
 const TILT_LEFT_SIGN = -1.0;    // sign of force X that moves the runner LEFT (verify via probe; flip if wrong)
 let tiltCmd = 0.0;              // commanded accelerometer force X (0 = level phone)
@@ -256,6 +263,11 @@ function narrowStrafeDirFor(subtype, facing) {   // -1 strafe left, +1 strafe ri
 const STRAFE_COOLDOWN_TICKS = 14;   // ~0.25 s strafe settle @ 60 Hz Update — don't restrafe mid-strafe
 let cachedPathType = -1;            // nearest cell PE_Type
 let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
+// REGION-SAMPLED narrow band (perception, replaces the guessed NARROW_SIDE map): when the forward
+// cell is a narrow (17-30), test lane offsets -7..+7 against ITS Region2D polygons via the game's
+// IsPointInsideAnyRegion2D -> the true safe lateral band [lo, hi] in lane units (+ = right of travel).
+let cachedNarrowBandLo = null, cachedNarrowBandHi = null;
+let cachedOnRegion = true;          // player's own point vs the nearest element's regions (probe)
 let lastStrafeTick = -1000;         // updateTicks of the last assisted strafe (cooldown)
 let narrowStrafeDir = 0;            // -1 strafed left / +1 right for the current narrow (0 = none/centered)
 let cachedFacing = 0;              // player PathDirection (N1 E2 S3 W4), for facing-aware narrow strafe
@@ -334,6 +346,8 @@ function resolve() {
   fn.GetPosition2D = new NativeFunction(base.add(RVA.GetPosition2D), ['float', 'float'], ['pointer', 'pointer']); // (MovingObject*, mi) -> Vector2
   fn.IsPointOverTurnArea2D = new NativeFunction(base.add(RVA.IsPointOverTurnArea2D),
     'bool', ['pointer', ['float', 'float'], 'float', 'pointer']);  // (PathElement*, Vector2 point, float radius, mi) -> bool
+  fn.IsPointInsideAnyRegion2D = new NativeFunction(base.add(RVA.IsPointInsideAnyRegion2D),
+    'bool', ['pointer', ['float', 'float', 'float'], 'pointer']);  // (PathElement*, Vector3 point, mi) -> bool ("2D" = projects x,z)
   if (LATERAL_ACCEL) {
     // Command the game's own tilt input: TouchInput.GetAccelerometerForceX() -> tiltCmd. Full replace
     // (no original call): a flat phone reads ~0 anyway, and tiltCmd IS the commanded phone angle.
@@ -426,6 +440,9 @@ function installHooks() {
               // (native call -> main thread only). Compare against is_turn/cell_progress in the capture.
               try { cachedOverTurnArea = !!fn.IsPointOverTurnArea2D(pe, [px, pz], TURN_AREA_RADIUS, NULLPTR); }
               catch (_) { cachedOverTurnArea = false; }
+              // probe: the game's own on-ground test for the player's current point (drives narrow falls)
+              try { cachedOnRegion = !!fn.IsPointInsideAnyRegion2D(pe, [px, 0.0, pz], NULLPTR); }
+              catch (_) { cachedOnRegion = true; }
               if (DIAG_TURN) cachedTurnDiag = {
                 lane: Math.round(cachedLane * 10) / 10, prog: Math.round(cachedCellProg * 100) / 100,
                 raw: rawIsTurn, pend: pendingTurn, fac: facing,
@@ -476,12 +493,35 @@ function installHooks() {
               cachedNextHasCoins = readBool(nxt, OFF.PE_HasCoins);
               cachedNextCoinStart = readI32(nxt, OFF.PE_CoinLocStart);
               cachedNextCoinEnd = readI32(nxt, OFF.PE_CoinLocEnd);
+              // Region-sample the upcoming narrow's safe band from the game's own polygons.
+              cachedNarrowBandLo = cachedNarrowBandHi = null;
+              if (cachedNextPathType >= 17 && cachedNextPathType <= 30) {
+                try {
+                  const nrx = readF32(nxt, OFF_PE_Rectangle), nrz = readF32(nxt, OFF_PE_Rectangle + 4);
+                  const nrw = readF32(nxt, OFF_PE_Rectangle + 8), nrh = readF32(nxt, OFF_PE_Rectangle + 12);
+                  const ncx = nrx + nrw / 2, ncz = nrz + nrh / 2;
+                  let lo = null, hi = null;
+                  for (let k = -7; k <= 7; k++) {
+                    let sx = ncx, sz = ncz;              // lane +k = right of travel (mirror of cachedLane)
+                    if (facing === 1) sx = ncx + k;
+                    else if (facing === 2) sz = ncz - k;
+                    else if (facing === 3) sx = ncx - k;
+                    else if (facing === 4) sz = ncz + k;
+                    if (fn.IsPointInsideAnyRegion2D(nxt, [sx, 0.0, sz], NULLPTR)) {
+                      if (lo === null) lo = k;
+                      hi = k;
+                    }
+                  }
+                  cachedNarrowBandLo = lo; cachedNarrowBandHi = hi;
+                } catch (_) { cachedNarrowBandLo = cachedNarrowBandHi = null; }
+              }
             } else {
               cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
               cachedNextMustJump = cachedNextMustSlide = false;
               cachedNextIsLevelChange = false;
               cachedNextHasCoins = false; cachedNextCoinStart = 0; cachedNextCoinEnd = 0;
               cachedNextPathType = -1;
+              cachedNarrowBandLo = cachedNarrowBandHi = null;
             }
             // Fire one well-timed jump for an upcoming crevasse (after lane/prog are known this frame).
             maybeJumpCrevasse(cp);
@@ -795,6 +835,12 @@ function snapshot() {
   // null if no narrow ahead. The NN reads it and decides the strafe (no hook action).
   s.narrow_target_lane = (cachedNextPathType >= 17 && cachedNextPathType <= 30)
     ? narrowStrafeDirFor(cachedNextPathType, cachedFacing) : null;
+  // REGION-SAMPLED band (game's own Region2D polygons, lane units + = right of travel): the true
+  // safe lateral extent of the upcoming narrow. Candidate replacement for narrow_target_lane's
+  // guessed map — validate against sweep outcomes, then feed the obs.
+  s.narrow_band_lo = cachedNarrowBandLo;
+  s.narrow_band_hi = cachedNarrowBandHi;
+  s.on_region = cachedOnRegion;      // probe: player point vs nearest element's regions
   s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
   s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
   s.over_turn_area = cachedOverTurnArea; // PROBE: game's real turn-window test (IsPointOverTurnArea2D)

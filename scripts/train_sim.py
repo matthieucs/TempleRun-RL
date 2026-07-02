@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train a PPO policy in the headless sim (``TempleRunSim-v0``) — fast, parallel, free.
 
-The sim mirrors the real env's obs/action spaces (Box(21)/Discrete(7)) and reward (distance-delta),
+The sim mirrors the real env's obs/action spaces (Box(OBS_LEN)/Discrete(7)) and reward (distance-delta),
 so a policy trained here is drop-in on the phone (``scripts/evaluate.py`` / deploy). The sim runs at
 ~10k+ steps/s, so we vectorize across cores and train millions of steps in minutes.
 
@@ -60,6 +60,7 @@ def _make_env(args, rank: int):
 # at ~+-LANE_EDGE. The oracle strafes toward a narrow's safe lane (target = ntl * LANE_STEP) and NEVER
 # strafes on a straight — the lane auto-recenters, so gratuitous strafing only risks a wall-stumble.
 _LANE_STEP = 3.7
+_NARROW_CENTER = 4.5   # [MEASURED 2026-07-02] long-narrow strip center (Region2D bands [2,7]/[3,7])
 
 
 def _oracle(st: dict) -> int:
@@ -91,11 +92,11 @@ def _oracle(st: dict) -> int:
     if st["must_slide"] or st.get("next_must_slide"):
         return int(C.Action.SLIDE)
     # LANE (ANALOG TILT, 2026-07-02): a strafe byte = HOLD toward +/-edge (first-order lag), NoOp =
-    # LEVEL = the game recenters. Center needs NO action; an off-center target (narrow safe lane
-    # +/-3.7) is held by bang-bang DITHER (hold past it / release short of it) since the only stable
-    # commanded points are -edge/0/+edge. Deadzone 0.4*step keeps the dither inside the strip band.
+    # LEVEL = the game recenters. Center needs NO action; an off-center target (narrow strip center
+    # +/-4.5, Region2D-measured) is held by bang-bang DITHER (hold past it / release short of it)
+    # since the only stable commanded points are -edge/0/+edge.
     ntl = st.get("narrow_target_lane")
-    target = int(ntl) * _LANE_STEP if ntl is not None else 0.0
+    target = int(ntl) * _NARROW_CENTER if ntl is not None else 0.0
     lane = float(st.get("lane", 0.0))
     if lane < target - 0.4 * _LANE_STEP:
         return int(C.Action.STRAFE_RIGHT)
@@ -270,7 +271,7 @@ def main() -> None:
                         "multiple-turns-at-a-junction). obs grows by K*7. try 3-6. needs a retrain.")
     p.add_argument("--frame-stack", type=int, default=1,
                    help="stack the last N base-26 obs frames (temporal context -> anticipate turns). "
-                        "obs grows to N*26 (+K*7). try 2-4. needs a retrain.")
+                        "obs grows to N*OBS_LEN (+K*7). try 2-4. needs a retrain.")
     p.add_argument("--turn-linger", type=int, default=0,
                    help="sim-to-real: keep is_turn True N frames after a turn (a 2nd turn during them "
                         "= over-rotation death) so the policy learns to NOT double-turn. try 2. needs K>0.")

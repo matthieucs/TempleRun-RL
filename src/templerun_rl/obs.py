@@ -1,6 +1,6 @@
 """Observation encoding: raw game-state dict -> normalized float32 vector.
 
-The policy sees a 21-element ``Box(0, 1)`` vector. We deliberately exclude the raw
+The policy sees an OBS_LEN-element ``Box(0, 1)`` vector (see OBS_FIELDS; 30 as of 2026-07-02). We deliberately exclude the raw
 ``score`` (unbounded / accumulating -> would break MlpPolicy normalization); it feeds
 the reward instead and is always available in ``info["raw_state"]``.
 """
@@ -38,35 +38,37 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # and from the sim's own state — they are OBSERVATIONS, not actions.
 OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 22 bool/lookahead + 4 scalar + 2 extra = 28
+OBS_LEN = len(OBS_FIELDS)  # 23 bool/lookahead + 4 scalar + 3 extra = 30 (keep derived from OBS_FIELDS)
 
-# Lane geometry (real device units): home/center ~ -1.3, one strafe ~ 3.7 -> lanes at -5 / -1.3 / +2.4.
-# CONTINUOUS lane obs (2026-06-26): the old 3-bucket {0,0.5,1} aliased the safe left lane (-5) with an
-# OFF-TRACK lane (-15) -> on device the policy couldn't tell it was walking off the edge and kept
-# strafing into the void. Normalizing the continuous lane to [0,1] over [LANE_OBS_MIN, LANE_OBS_MAX]
-# (a bit past the fall thresholds) makes "near the edge" a distinct, recoverable obs.
-LANE_HOME = -1.3
+# Lane geometry (real device units, 2026-07-01 tilt-controlled model): the lateral position is
+# CONTINUOUS and centered on 0 — center 0, one strafe ~ 3.7 -> lanes at -3.7 / 0 / +3.7, side walls
+# at ~+-7. Normalizing over a SYMMETRIC [LANE_OBS_MIN, LANE_OBS_MAX] centered on 0 maps center -> 0.5
+# and the edges +-7 -> ~0.06/0.94, so "near which wall" is a distinct, recoverable obs (the old
+# asymmetric -7..+4.5 range was for the retired home=-1.3 lock-lane model).
+LANE_HOME = 0.0
 LANE_STEP = 3.7
-LANE_OBS_MIN = -7.0   # just past the left fall threshold
-LANE_OBS_MAX = 4.5    # just past the right fall threshold
-# kept for the capture/analysis scripts that bucket lane for display.
-LANE_LEFT_MAX = -3.15
-LANE_RIGHT_MIN = 0.55
+NARROW_CENTER = 4.5   # [MEASURED 2026-07-02] long-narrow strip center (Region2D bands [2,7]/[3,7])
+LANE_OBS_MIN = -8.0   # symmetric, just past the left wall
+LANE_OBS_MAX = 8.0    # symmetric, just past the right wall
+# kept for the capture/analysis scripts that bucket lane for display (center-0 lane boundaries).
+LANE_LEFT_MAX = -1.85
+LANE_RIGHT_MIN = 1.85
 
 
 def lane_to_obs(lane) -> float:
-    """Continuous lane -> [0,1] (center ~0.5, left lane ~0.17, right lane ~0.82, off-edge -> 0/1)."""
+    """Continuous lane -> [0,1] (center 0 -> 0.5, left wall -7 -> ~0.06, right wall +7 -> ~0.94)."""
     if lane is None:
-        lane = LANE_HOME
+        lane = 0.0
     return float(np.clip((float(lane) - LANE_OBS_MIN) / (LANE_OBS_MAX - LANE_OBS_MIN), 0.0, 1.0))
 
 
 def narrow_lane_to_obs(ntl) -> float:
-    """Map the narrow's safe lane (-1 L / 0 C / +1 R) onto the SAME continuous scale as `lane`, so the
-    policy compares the two and strafes toward the target. None -> home/center (no constraint)."""
+    """Map the narrow's safe lane (-1 L / 0 C / +1 R) onto the SAME continuous (center-0) scale as
+    `lane`, so the policy compares the two and strafes toward the target. None -> center (no
+    constraint). Target = the MEASURED strip center +/-4.5 (Region2D bands), not the coin-lane step."""
     if ntl is None:
-        return lane_to_obs(LANE_HOME)
-    return lane_to_obs(LANE_HOME + int(ntl) * LANE_STEP)
+        return lane_to_obs(0.0)
+    return lane_to_obs(int(ntl) * NARROW_CENTER)
 
 
 def path_type_obs(pt) -> float:
@@ -101,8 +103,8 @@ def _norm_enum(value: int, max_value: float) -> float:
 
 
 def full_obs_len(frame_stack: int = 1, action_history_len: int = 0) -> int:
-    """Total obs length = ``frame_stack`` stacked 26-d frames + ``action_history_len`` one-hot
-    action frames (7 each). frame_stack=1, K=0 -> the base 26-d obs."""
+    """Total obs length = ``frame_stack`` stacked OBS_LEN-d frames + ``action_history_len`` one-hot
+    action frames (7 each). frame_stack=1, K=0 -> the base OBS_LEN-d obs."""
     return max(1, int(frame_stack)) * OBS_LEN + int(action_history_len) * C.N_ACTIONS
 
 
@@ -116,7 +118,7 @@ def state_to_obs(state: dict) -> np.ndarray:
 
     Tolerant of missing keys (falls back to ``constants.STATE_DEFAULTS``) so a
     malformed/truncated JSON line never crashes a step. Action history (if any) is appended
-    separately by ``obs_with_history`` — this stays 26-d for the fidelity harness/replay.
+    separately by ``obs_with_history`` — this stays OBS_LEN-d for the fidelity harness/replay.
     """
     g = lambda k: state.get(k, C.STATE_DEFAULTS.get(k))  # noqa: E731
     out = np.empty(OBS_LEN, dtype=np.float32)
@@ -157,7 +159,7 @@ def action_history_vec(history, action_history_len: int) -> np.ndarray:
 
 
 def obs_with_history(state: dict, history, action_history_len: int = 0) -> np.ndarray:
-    """Base obs (26) optionally concatenated with the one-hot action history (K*7)."""
+    """Base obs (OBS_LEN) optionally concatenated with the one-hot action history (K*7)."""
     base = state_to_obs(state)
     if not action_history_len:
         return base
@@ -167,7 +169,7 @@ def obs_with_history(state: dict, history, action_history_len: int = 0) -> np.nd
 def stacked_obs(frame_deque, history, frame_stack: int = 1, action_history_len: int = 0) -> np.ndarray:
     """Full obs = the last ``frame_stack`` base frames (oldest->newest) + one-hot action history.
 
-    ``frame_deque`` holds recent base (26-d) obs vectors (most recent LAST); it is left-padded by
+    ``frame_deque`` holds recent base (OBS_LEN-d) obs vectors (most recent LAST); it is left-padded by
     repeating the OLDEST available frame so the vector is fixed-size from the first step. Stacking
     frames gives the MLP the temporal context (how is_turn/facing/velocity are *evolving*) it needs
     to ANTICIPATE a junction and fire the turn on the exact frame — beating the 1-frame reactive

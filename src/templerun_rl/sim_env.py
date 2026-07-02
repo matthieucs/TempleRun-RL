@@ -156,11 +156,12 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "narrows_after_distance": 1600.0,  # [MEASURED] first narrows at 1605-1752 across human_calib_v2 eps
     "narrow_prob": 0.70,               # [CALIBRATED 2026-07-02] band 1500-3000 narrow%: sim ~8 vs real
                                        # 11.5 (scorecard tol ratio [0.6,1.6]); long-run real avg ~8%
-    "narrow_lane_tol": 3.0,            # [MEASURED-prefill] |lane - safe_lane*3.7| beyond this on a strip
-                                       # cell entry = fall. Human capture survivors reach |dist| ~3 from
-                                       # the strip center (29,E lane 0.77; 23,N lane -3.0) -> band ±3.0.
-                                       # Was 0.6*LANE_STEP=2.2 (too tight: kills a 10 Hz bang-bang dither
-                                       # that the device tolerates). Phase-3 sweep finalizes.
+    # NARROW strip geometry [MEASURED 2026-07-02, Region2D polygon sampling, human_narrows.jsonl]:
+    # long-narrow safe band = [2,7]/[3,7] (or mirrored) -> strip CENTER ~ +/-4.5 (NOT the +/-3.7
+    # coin-lane step), half-width ~2.0-2.5. Validated: every human on-strip death rode OUTSIDE its
+    # band. NarrowSmall 17/18 is bimodal (two side strips) — modeled center-safe with the same tol.
+    "narrow_lane_center": 4.5,         # [MEASURED] |lane| of a long-narrow strip center
+    "narrow_lane_tol": 2.5,            # [MEASURED] half-width of the safe band around that center
     # DEVICE-MEASURED strip length (human capture 2026-06-26): {1:12, 2:16, 3:13, 4:6, 5:2, 7:1} cells.
     # A strip is multiple cells -> the runner must HOLD the safe lane across all of them (a per-cell
     # off-lane Fall), capped at 4 here. The OLD 1-cell model let the policy strafe back too early.
@@ -357,7 +358,7 @@ class TempleRunSimEnv(gym.Env):
         **_ignored: Any,
     ):
         super().__init__()
-        # IDENTICAL spaces to TempleRunEnv -> drop-in. obs = frame_stack*26 (+ K*7 action history).
+        # IDENTICAL spaces to TempleRunEnv -> drop-in. obs = frame_stack*OBS_LEN (+ K*7 action history).
         self.action_history_len = int(action_history_len)
         self.frame_stack = max(1, int(frame_stack))
         self.observation_space = O.make_observation_space(self.frame_stack, self.action_history_len)
@@ -999,13 +1000,14 @@ class TempleRunSimEnv(gym.Env):
             entered["is_coin"] = False
 
     def _resolve_obstacle_on_enter(self, cell: dict) -> None:
-        # NARROW strip: must be within the safe lane's range on entry (continuous lane, center 0), else
-        # fall off. safe lane offset = narrow_lane * LANE_STEP around center 0 (-LANE_STEP / 0 / +LANE_STEP).
+        # NARROW strip: must be inside the safe band on every strip-cell entry, else fall off.
+        # Band center = narrow_lane * narrow_lane_center (+/-4.5 measured from the game's Region2D
+        # polygons), half-width narrow_lane_tol (2.5). NarrowSmall (nl=0) center-safe simplification.
         nl = cell.get("narrow_lane")
         if nl is not None:
-            target = int(nl) * LANE_STEP
+            target = int(nl) * float(self.cfg["narrow_lane_center"])
             if abs(self._lane - target) > float(self.cfg["narrow_lane_tol"]):
-                self._kill(1)   # not in the narrow's safe lane -> fell off the strip
+                self._kill(1)   # outside the narrow's safe band -> fell off the strip
                 return
         obst = int(cell.get("obstacles", 0))
         if obst in _MUST_JUMP:
