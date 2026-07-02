@@ -176,7 +176,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-16d'; // 16d = 16c + is_turn latch re-enabled to 0.60 (aim cell center)
+const HOOK_VERSION = 'lateral-accel-16e'; // 16e = 16d + track forcing (PathElement statics via IL2CPP API)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -330,6 +330,106 @@ function readI32(p, off) {
 function readF32(p, off) {
   try { return p.add(off).readFloat(); } catch (_) { return 0.0; }
 }
+// ---------------------------------------------------------------------------
+// TRACK FORCING (2026-07-02): control the DEVICE track generation so we can test one mechanic in
+// isolation (many turns/run) AND do a cheap DIRECT sim-vs-real comparison (same track config + policy
+// on both, diff outcomes) — the eval-loop inefficiency the user flagged. The game reads
+// PathElement.s* STATIC flags (sAllowTurns/Holes/Narrows/... @0x7.., sMinSpaceBetweenTurns @0x2C);
+// we set them via the IL2CPP static-field API (il2cpp_field_static_set_value). Re-applied each Update
+// (the game may reset them at level start). NN still decides actions; this only shapes the terrain.
+const TRACK_MODE = 'turns'; // 'off' (normal) | 'turns' (turn-dense, no obstacles) | 'clean' (pure straight)
+// per-mode PathElement static overrides. bools -> u8, ints -> i32. Not listed = left as the game set it.
+const TRACK_CONFIGS = {
+  turns: { sAllowTurns: 1, sAllowPathHoles: 0, sAllowPathNarrows: 0, sAllowFlameTowers: 0,
+           sAllowTreeStumble: 0, sAllowTreeJump: 0, sAllowTreeSlide: 0, sAllowSidePaths: 0,
+           sMinSpaceBetweenTurns: 3, sMinSpaceBetweenObstacles: 999 },
+  clean: { sAllowTurns: 0, sAllowPathHoles: 0, sAllowPathNarrows: 0, sAllowFlameTowers: 0,
+           sAllowTreeStumble: 0, sAllowTreeJump: 0, sAllowTreeSlide: 0, sAllowSidePaths: 0 },
+};
+const TRACK_INT_FIELDS = { sMinSpaceBetweenTurns: 1, sMinSpaceBetweenObstacles: 1, sMaxBackToBackObstacles: 1 };
+let il2 = null;             // resolved IL2CPP API (lazy)
+let peClass = null;         // PathElement Il2CppClass*
+let peFields = {};          // name -> FieldInfo*
+let trackScratch = null;    // scratch buffer for set_value
+let trackApplied = false;   // logged once
+let cachedTrackStatics = null;   // current static values (streamed for verification)
+
+function resolveIl2Api() {
+  if (il2) return il2;
+  try {
+    const lib = Process.findModuleByName('libil2cpp.so');
+    if (!lib) { dbg('il2_no_lib'); return null; }
+    const E = (n) => {
+      const p = lib.findExportByName ? lib.findExportByName(n) : lib.getExportByName(n);
+      if (!p || p.isNull()) throw new Error('missing export ' + n);
+      return p;
+    };
+    il2 = {
+      domain_get: new NativeFunction(E('il2cpp_domain_get'), 'pointer', []),
+      assembly_open: new NativeFunction(E('il2cpp_domain_assembly_open'), 'pointer', ['pointer', 'pointer']),
+      asm_image: new NativeFunction(E('il2cpp_assembly_get_image'), 'pointer', ['pointer']),
+      class_from_name: new NativeFunction(E('il2cpp_class_from_name'), 'pointer', ['pointer', 'pointer', 'pointer']),
+      field_from_name: new NativeFunction(E('il2cpp_class_get_field_from_name'), 'pointer', ['pointer', 'pointer']),
+      field_set: new NativeFunction(E('il2cpp_field_static_set_value'), 'void', ['pointer', 'pointer']),
+      field_get: new NativeFunction(E('il2cpp_field_static_get_value'), 'void', ['pointer', 'pointer']),
+    };
+  } catch (e) { dbg('il2_resolve_err', String(e)); il2 = null; }
+  return il2;
+}
+
+function resolvePathElementStatics() {
+  if (peClass) return true;
+  const a = resolveIl2Api();
+  if (!a) return false;
+  try {
+    const dom = a.domain_get();
+    const asm = a.assembly_open(dom, Memory.allocUtf8String('Assembly-CSharp'));
+    if (asm.isNull()) { dbg('track_no_asm'); return false; }
+    const img = a.asm_image(asm);
+    peClass = a.class_from_name(img, Memory.allocUtf8String(''), Memory.allocUtf8String('PathElement'));
+    if (peClass.isNull()) { dbg('track_no_class'); peClass = null; return false; }
+    const names = ['sAllowTurns', 'sAllowPathHoles', 'sAllowPathNarrows', 'sAllowFlameTowers',
+                   'sAllowTreeStumble', 'sAllowTreeJump', 'sAllowTreeSlide', 'sAllowSidePaths',
+                   'sMinSpaceBetweenTurns', 'sMinSpaceBetweenObstacles', 'sMaxBackToBackObstacles'];
+    names.forEach((n) => { peFields[n] = a.field_from_name(peClass, Memory.allocUtf8String(n)); });
+    trackScratch = Memory.alloc(8);
+    dbg('track_resolved', Object.keys(peFields).filter((k) => !peFields[k].isNull()).length);
+    return true;
+  } catch (e) { dbg('track_resolve_err', String(e)); peClass = null; return false; }
+}
+
+function forceTrack() {
+  if (TRACK_MODE === 'off') return;
+  if (!resolvePathElementStatics()) return;
+  const cfg = TRACK_CONFIGS[TRACK_MODE];
+  if (!cfg) return;
+  const a = il2;
+  try {
+    for (const name in cfg) {
+      const f = peFields[name];
+      if (!f || f.isNull()) continue;
+      if (TRACK_INT_FIELDS[name]) trackScratch.writeS32(cfg[name] | 0);
+      else trackScratch.writeU8(cfg[name] ? 1 : 0);
+      a.field_set(f, trackScratch);
+    }
+    if (!trackApplied) { trackApplied = true; log('track forced: ' + TRACK_MODE); }
+  } catch (e) { dbg('track_force_err', String(e)); }
+}
+
+function readTrackStatics() {   // for the state stream — verify the forced values landed
+  if (!peClass || !il2) return null;
+  const out = {};
+  try {
+    for (const name in peFields) {
+      const f = peFields[name];
+      if (!f || f.isNull()) continue;
+      if (TRACK_INT_FIELDS[name]) { il2.field_get(f, trackScratch); out[name] = trackScratch.readS32(); }
+      else { il2.field_get(f, trackScratch); out[name] = trackScratch.readU8(); }
+    }
+  } catch (_) {}
+  return out;
+}
+
 function readIl2CppString(p) { // Il2CppString: length @0x10, UTF-16 chars @0x14
   try {
     if (p.isNull()) return null;
@@ -439,6 +539,9 @@ function installHooks() {
       gcInstance = args[0];
       updateTicks++;
       if (!upgradesMaxed && maxAllUpgrades(gcInstance)) upgradesMaxed = true; // one-shot, on main thread
+      resolvePathElementStatics();   // resolve the PathElement class/fields once (for read + force)
+      forceTrack();   // shape the device track (turns-only / clean / off) via PathElement statics
+      if ((updateTicks % 30) === 0) cachedTrackStatics = readTrackStatics();  // verify, ~2 Hz
       // turn-buffer state (GameInput @0x78) — the delayed-turn queue the probe measures
       try {
         const gi = gcInstance.add(OFF.GameInput).readPointer();
@@ -909,6 +1012,8 @@ function snapshot() {
   s.just_turned = cachedJustTurned;
   s.time_since_should_turn = cachedTimeSinceShouldTurn;
   s.time_since_last_turn = cachedTimeSinceLastTurn;
+  s.track_mode = TRACK_MODE;
+  s.track_statics = cachedTrackStatics;   // current PathElement.s* (verify a forced track landed)
   s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
   s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
   s.over_turn_area = cachedOverTurnArea; // PROBE: game's real turn-window test (IsPointOverTurnArea2D)
