@@ -485,6 +485,7 @@ class TempleRunSimEnv(gym.Env):
         self._stumble_kill_t = float(self.cfg["stumble_kill_window"])
         self._stumble_count = 0
         self._stumble_vel = None          # persistent post-stumble velocity (None = on the curve)
+        self._turn_landed = False         # a turn landed this step -> skip the recenter (device timing)
         self._gap_grace_cell = None       # wide-gap cell entered grounded (lip grace pending)
         self._post_turn_linger = 0      # frames is_turn stays True after a turn (sim-to-real trap)
         self._linger_can_l = False
@@ -907,7 +908,11 @@ class TempleRunSimEnv(gym.Env):
         scale = float(self.cfg["turn_offset_scale"])
         kill = float(self.cfg["turn_land_kill"])
         carry = float(self.cfg["turn_lane_carry"])
-        sign = -1.0 if want_left else 1.0
+        # SIGN [DEVICE-MEASURED 2026-07-02, replay_diff turn-landing detail]: TurnLeft lands the runner
+        # to the RIGHT of the new-path center when swiped late (cp>center), TurnRight to the LEFT — i.e.
+        # left -> +offset, right -> -offset. (Was backwards, giving turn_land_err ~4.6; the magnitude
+        # (cp-0.44)*45 and the recenter rate were already right.)
+        sign = 1.0 if want_left else -1.0
         # LANDING OFFSET = cprog term + AMPLIFIED pre-turn lane. [DEVICE-MEASURED 2026-07-02, forced
         # turns-only track]: a policy that STRAFES into the turn (pre-turn lane ~5) lands at ~18 off
         # (the turn rotates + the held tilt keeps pushing) -> off-path water. So the pre-turn lane is
@@ -922,6 +927,7 @@ class TempleRunSimEnv(gym.Env):
             return
         self._lane = offset          # lands here; the HELD tilt keeps pushing (lat_target unchanged)
         self._tilt_dir = 0
+        self._turn_landed = True      # device shows the FULL landing at f+1; skip the recenter THIS step
         cell["is_turn"] = False
         cell["can_turn_left"] = False
         cell["can_turn_right"] = False
@@ -956,9 +962,13 @@ class TempleRunSimEnv(gym.Env):
         # alpha 0.446 per 0.1 s frame both ways (tau ~0.165 s); full 0->7 reach ~0.5 s; recenter is the
         # exact mirror. The OLD nudge-timer/near-hold model is DEAD (it modeled the persistent-px strafe).
         edge = float(cfg["lane_edge"])
-        alpha = 1.0 - math.exp(-dt / max(1e-3, float(cfg["lat_tau"])))
-        self._lane += (self._lat_target - self._lane) * alpha
-        self._lane = max(-edge, min(edge, self._lane))
+        if getattr(self, "_turn_landed", False):
+            self._turn_landed = False     # a turn just landed this step -> show the FULL landing (device
+                                          # recenters starting NEXT frame, not the landing frame)
+        else:
+            alpha = 1.0 - math.exp(-dt / max(1e-3, float(cfg["lat_tau"])))
+            self._lane += (self._lat_target - self._lane) * alpha
+            self._lane = max(-edge, min(edge, self._lane))
         self._stumble_kill_t += dt          # time since the last stumble (drives the 2nd-stumble kill)
         if self._stumble_t > 0.0:
             self._stumble_t = max(0.0, self._stumble_t - dt)

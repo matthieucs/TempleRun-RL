@@ -132,12 +132,12 @@ def main() -> None:
                 b["lane_err"] += abs(float(sim.get("lane", 0)) - float(nxt.get("lane")))
             if nxt.get("velocity"):
                 b["vel_err"] += abs(float(sim.get("velocity", 0)) - float(nxt.get("velocity")))
-            # TURN LANDING: for a turn that BOTH sides survive, compare where the runner LANDS a couple
-            # frames later (the turn takes ~2 frames on device). This is the direct turn-model target.
+            # TURN LANDING: for a turn both sides survive, compare where the runner LANDS. sim after 1
+            # step == device f+1 (the landing frame; the device recenters starting f+2). This is the
+            # direct turn-model target — |sim landing - device landing|.
             if int(act) in (4, 5) and not sim_dead and not real_dead_soon:
-                j = min(len(fr) - 1, i + 2)
-                dev_land = fr[j].get("lane")
-                if dev_land is not None:
+                dev_land = nxt.get("lane")
+                if dev_land is not None and abs(float(dev_land)) < 9:
                     b["landn"] += 1
                     b["land_err"] += abs(float(sim.get("lane", 0)) - float(dev_land))
 
