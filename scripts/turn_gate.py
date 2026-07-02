@@ -32,6 +32,7 @@ from train_sim import _oracle  # noqa: E402
 
 _spam_ctr = [0]
 _oc_ctr = [0]
+_prompt_mem = {"was_turn": False, "prev_dist": 0.0}
 
 
 def _base(st):
@@ -56,11 +57,17 @@ def _recenter(st):
     return C.Action.NOOP
 
 
-def prompt(st):                     # device-correct: keep centered, turn only on the is_turn flash
+def prompt(st):                     # device-correct: keep centered, turn ONCE on the is_turn RISING edge
     b = _base(st)
     if b is not None:
         return b
-    if st["is_turn"]:
+    d = float(st.get("distance", 0.0))
+    if d < _prompt_mem["prev_dist"] - 20.0:
+        _prompt_mem["was_turn"] = False
+    _prompt_mem["prev_dist"] = d
+    rising = bool(st["is_turn"]) and not _prompt_mem["was_turn"]
+    _prompt_mem["was_turn"] = bool(st["is_turn"])
+    if rising:                      # fire once; the held linger frames are NOT a fresh junction
         return _side(st)
     return _recenter(st)
 
@@ -91,12 +98,24 @@ def spam(st):                       # device-FATAL: fire turns on straights
     return C.Action.NOOP
 
 
+def double_turn(st):                # device-FATAL: turn on EVERY is_turn frame (the linger re-fire)
+    b = _base(st)
+    if b is not None:
+        return b
+    if st["is_turn"]:               # fires again during the post-turn linger -> over-rotation Fall
+        return _side(st)
+    return _recenter(st)
+
+
 def run(pol, n=80, seed0=13000):
     # narrows excluded: this gate isolates TURN/LATERAL semantics; the gate policies have no
     # narrow-lane logic and narrow deaths would drown the turn signal (narrow.semantics covers those).
+    # turn_linger 3 ON: models the device post-turn is_turn persistence (facing-lag) so the DOUBLE-TURN
+    # policy can re-fire and MUST die — the exact device regression (ppo_tilt_v1: 12 double-bursts,
+    # 8/8 turn deaths). Mirrors the training config.
     env = gym.make("TempleRunSim-v0", max_episode_steps=6000,
                    config=dict(domain_rand=True, curriculum_max_start_dist=0.0,
-                               narrows_after_distance=1e9)).unwrapped
+                               narrows_after_distance=1e9, turn_linger_frames=3)).unwrapped
     dists, surv, lane_at_turn = [], 0, []
     for ep in range(n):
         o, i = env.reset(seed=seed0 + ep)
@@ -120,7 +139,7 @@ def run_gates(n=80, seed0=13000) -> list[dict]:
     Importable by fidelity_scorecard.py; main() keeps the CLI."""
     rows = [("oracle", _oracle, "survive"), ("prompt(centered)", prompt, "survive"),
             ("PRE-FIRE", prefire, "die"), ("OFF-CENTER turn", off_center, "die"),
-            ("SPAM(straights)", spam, "die")]
+            ("SPAM(straights)", spam, "die"), ("DOUBLE-TURN(linger)", double_turn, "die")]
     out = []
     for name, pol, want in rows:
         m, s, nn, ml = run(pol, n=n, seed0=seed0)

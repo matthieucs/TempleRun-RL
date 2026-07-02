@@ -603,6 +603,35 @@ frida/gadget_inject.py frida/temple_run_hook.js 127.0.0.1:27042 &`. Device seria
   prob 0.7 calibrated), narrow_lane_tol 2.2→3.0 (device band ±3), and reproduced the §11 crevasse
   too-early-jump death offline (sim window [0.5,0.6] vs device fatal~0.82/clear~0.92 — OPEN, Phase 4).
 
+## 16. DOUBLE-TURN REGRESSION + FIX (2026-07-02, user-caught)
+
+**Symptom (user, device eval of ppo_tilt_v1):** turns unreliable — the policy swipes MULTIPLE times
+in one turn → over-rotation Fall. Device capture confirmed: 12 double-turn bursts, **8/8 deaths at
+turns**, all at velocity ~150-163 (mid-speed early junctions), dying at dist 180-540.
+
+**Root cause = trained with `--turn-linger 0`.** In the sim a turn instantly consumes is_turn (goes
+False same frame), so the policy NEVER saw is_turn still True post-turn → never learned to resist a
+2nd swipe. Device is_turn is True for **~2 frames** at a junction (facing-change lags the swipe;
+measured 91% 1-frame / 8% 2-frame, but at mid-speed more often 2) → the policy fires on BOTH → double.
+This is the §10 #1 mechanism. The model that NAILED turns (`ppo_nn_best`, median 1210, "0 double-turns
+/19 turns") trained with **`turn-linger 3`** — the value §12 found necessary ("linger 2 still
+double-turned on device; linger 3 fixed it"). The §13/§14 "use linger 0" note was for a buffering
+variant that no longer exists; following it was the regression.
+
+**FIX (retrain `ppo_tilt_v2`, `--turn-linger 3`):**
+- The sim forces is_turn True 3 frames post-turn; K=4 action-history + `turn_spam_penalty 0.14` +
+  `redundant_action_penalty 0.12` (both ALREADY in the recipe) now get exercised → the policy learns
+  to fire ONCE. Yes, the obs HAS action history (K=4) and the recipe HAS a turn-spam penalty — they
+  just never trained against the double-turn because linger was 0.
+- Oracle + turn_gate `prompt` made linger-safe via RISING-EDGE turn detection (turn only on
+  is_turn False→True; the held linger frames are not a fresh junction). `train_sim._oracle_mem` /
+  `turn_gate._prompt_mem`.
+- New adversarial gate `turn_gate.double_turn` (turn on EVERY is_turn frame) MUST die — verified:
+  dies 0/80 under linger 3 while oracle/prompt survive 80/80. This guards the exact regression.
+- Hook is_turn LATCH (16a, held is_turn to cprog 0.45) DISABLED → `lateral-accel-16b` uses RAW is_turn
+  (natural 1-2 frame). The latch ADDED is_turn frames = more double-turn temptation; ppo_nn_best nailed
+  turns on raw is_turn. Double-turn is a TRAINING fix (linger 3), not a perception one.
+
 **LATERAL = ANALOG ACCEL (hook `lateral-accel-15a`, VERIFIED on device 2026-07-02):** the 14b px-write
 tilt FAILED (char-update owns PlayerXOffset outside GameController.Update — write war, px pinned).
 15a replaces `TouchInput.GetAccelerometerForceX` (RVA 0x12AD500, Interceptor.replace + NativeCallback

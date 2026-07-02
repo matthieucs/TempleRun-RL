@@ -62,6 +62,12 @@ def _make_env(args, rank: int):
 _LANE_STEP = 3.7
 _NARROW_CENTER = 4.5   # [MEASURED 2026-07-02] long-narrow strip center (Region2D bands [2,7]/[3,7])
 
+# RISING-EDGE turn memory (single sequential env). The oracle turns only when is_turn goes
+# False->True, so under turn_linger (is_turn HELD True N frames post-turn to model the device
+# facing-lag double-turn temptation) it fires ONCE per junction — never re-turns during the linger.
+# Reset on episode boundary (distance drops). This is what the trained policy must learn via K=4.
+_oracle_mem = {"was_turn": False, "prev_dist": 0.0}
+
 
 def _oracle(st: dict) -> int:
     # TURN has priority over the lookahead-jump: a junction with an obstacle in the cell AFTER it
@@ -72,12 +78,22 @@ def _oracle(st: dict) -> int:
     # junction cell is correct, no off-center death). Do NOT pre-fire on next_is_turn: there is no safe
     # early buffer on device — a swipe before the junction hits the wall (stumble) and, repeated, turns
     # you off the path. Pre-firing was a sim exploit that regressed the device (226 vs 736). Turn once.
-    if st["is_turn"]:
+    d = float(st.get("distance", 0.0))
+    if d < _oracle_mem["prev_dist"] - 20.0:       # new episode -> reset the edge memory
+        _oracle_mem["was_turn"] = False
+    _oracle_mem["prev_dist"] = d
+    rising = bool(st["is_turn"]) and not _oracle_mem["was_turn"]
+    _oracle_mem["was_turn"] = bool(st["is_turn"])
+    if rising:                                    # turn ONCE on the junction (edge, not the held linger)
         if st["can_turn_left"]:
             return int(C.Action.TURN_LEFT)
         if st["can_turn_right"]:
             return int(C.Action.TURN_RIGHT)
         return int(C.Action.TURN_LEFT)
+    if st["is_turn"]:
+        # is_turn still True but NOT a fresh junction = post-turn linger. Do NOT re-turn (that's the
+        # fatal double-turn). Fall through to jump/slide/lane so the oracle stays busy + centered.
+        pass
     # WIDE gap (2-cell mid<->high crevasse / long hole): jump LATE — at the gap edge (high cell_progress
     # on the pre-gap cell) so the airtime reserves enough to be airborne crossing into the FAR cell.
     # Jumping early (the single-obstacle reflex) runs out of air by the 2nd cell -> Fall. 0.62 is the

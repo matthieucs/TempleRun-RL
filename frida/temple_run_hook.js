@@ -170,7 +170,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-16a'; // 16a = accel tilt + Region2D narrow band + is_turn latch (the deploy stack)
+const HOOK_VERSION = 'lateral-accel-16b'; // 16b = accel tilt + Region2D narrow band, RAW is_turn (latch off)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -272,6 +272,11 @@ let cachedOnRegion = true;          // player's own point vs the nearest element
 // sides) true from the first flash until progress 0.45 along the FLASHED cell's rect (the measured
 // executable window: probe_turn_window 2026-07-02 — turns execute 0.14-0.56, reliable core <=0.45),
 // or until the turn is taken / facing changes. Device obs now matches sim semantics; no obs resize.
+// DISABLED 2026-07-02: the latch ADDS is_turn frames -> more double-turn temptation. The model that
+// nailed turns (ppo_nn_best) used RAW is_turn (natural 1-2 frame flash) + turn_linger 3 training to
+// resist the 2nd frame. The double-turn is a TRAINING issue (was trained linger 0), not a perception
+// one — so revert to raw is_turn and fix it in the sim (linger 3). Kept behind a flag for reference.
+const TURN_LATCH = false;
 const TURN_LATCH_FRAC = 0.45;
 let latchRect = null;               // Rect of the flashed junction cell {rx, rz, rw, rh}
 let latchFacing = 0;                // heading when the flash was latched (facing change = turned)
@@ -454,15 +459,15 @@ function installHooks() {
               catch (_) { cachedOnRegion = true; }
               // IS_TURN LATCH (15d): capture the flash + hold the window open along the FLASHED
               // cell's rect until TURN_LATCH_FRAC (works across the nearest-element handoff).
-              if (rawIsTurn && !turnedHere) {
+              if (TURN_LATCH && rawIsTurn && !turnedHere) {
                 latchRect = { rx: rx, rz: rz, rw: rw, rh: rh };
                 latchFacing = facing;
                 latchCanL = neighborExists(pe, LEFT_NEIGHBOR[facing]);
                 latchCanR = neighborExists(pe, RIGHT_NEIGHBOR[facing]);
               }
-              if (latchRect !== null && (facing !== latchFacing || turnedHere)) latchRect = null;
+              if (latchRect !== null && (!TURN_LATCH || facing !== latchFacing || turnedHere)) latchRect = null;
               cachedLatchOpen = false;
-              if (latchRect !== null) {
+              if (TURN_LATCH && latchRect !== null) {
                 let lprog;
                 if (facing === 1) lprog = (pz - latchRect.rz) / latchRect.rh;
                 else if (facing === 2) lprog = (px - latchRect.rx) / latchRect.rw;
