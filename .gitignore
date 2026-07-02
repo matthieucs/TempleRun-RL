@@ -41,6 +41,8 @@ venv/
 traces/
 logs/
 captures/
+# keep only the committed device-truth reference the scorecard reads (not raw capture dumps)
+!captures/device_reference.json
 
 # --- sim-calibration session (2026-06-26): throwaway logs + device capture dumps ---
 *.log

@@ -734,3 +734,50 @@ lateral-death frames, then ONE retrain from the v1 recipe (NOT v2's). Deploy mod
 **`runs/ppo_valid_v1_best.zip`** (median 1173, best 1956). Hook: `lateral-accel-16f`. Device serial
 **3f80a3a**; injector must run as a PERSISTENT background task (it exits -> in-phone agent unloads ->
 stream dies; re-launches race each other, so run exactly ONE).
+
+## 18. THE LATERAL "OVER-STRAFE" WAS A MISDIAGNOSIS - it's off-center TURN LANDING (2026-07-02)
+
+**Context:** under hook 16f, v1's dominant death looked like LATERAL over-strafe (5/8 deaths, lane driven
+to -9..-23 past the +-7 edge). Hypothesis: the policy strafes randomly on straights, drifts off-center,
+and turn_lane_carry (~3x) amplifies it into a >kill turn landing. Fix tried: a RECENTER incentive.
+
+**FIX BUILT (`off_center_penalty`, `reward.py` + sim_env + train_sim `--off-center-penalty`):** dock
+`off_center_penalty*(|lane|-1.5)` on non-narrow cells (narrows + narrow_target_lane approach EXEMPT, so
+strip-holding stays free). Reward-only -> sim dynamics untouched -> `fidelity_scorecard.py --strict`
+stayed GREEN 10/10. Retrained `ppo_valid_v3` = v1 recipe + `--off-center-penalty 0.03` (linger 3, ent
+0.04, narrow-hold 0.05). NO `_best` auto-saved (train_sim only checkpoints + `_final`; `_final` is
+late-COLLAPSED) -> picked the best periodic checkpoint by an OFFLINE lateral rollout (scratchpad
+`eval_lateral.py`: median + mean|lane|-on-straight + off-center-turn%).
+
+**IN-SIM: the fix worked PERFECTLY** - |lane|-on-straight 0.41->**0.07**, off-center-turn 31%->**0%**,
+median 1700. **ON DEVICE (v3 @1100k, 8 eps): HARD REGRESSION - median ~382 (v1 was 1173), best 968.**
+The penalty made the policy PASSIVE/turn-shy (86% NoOp, StrafeRight 0) -> dies EARLY at the first turns.
+
+**THE REAL DIAGNOSIS (v3 exposed it - trace `captures/valid_v3_16f.jsonl`):** the killer is the turn
+LANDING itself, and it happens **EVEN FROM A CENTERED APPROACH.** ep5: policy arrives **lane 0.0**, fires
+TurnRight (correct direction), and **lands at -14.6 -> off path.** So off-center-at-the-turn is NOT caused
+by strafing-on-straights (that's a real but SECONDARY contributor) - the device **executes turns LATE**
+(landing -14.6 from center implies exec ~cprog 0.76 via `offset=-(cp-0.44)*45`, vs the safe aim 0.44).
+This is a TURN-TIMING problem. `off_center_penalty` addressed the wrong cause and suppressed the lateral
+motion a turn NEEDS -> net worse. **KEEP v1 (median 1173). DO NOT deploy v3.** The knob is kept opt-in
+(default 0, harmless).
+
+**BUG FOUND + FIXED en route: the "0% can_turn" scare was a LOGGING omission.** Analyzing the captures,
+`can_turn_left/right` read as 0 across ALL is_turn frames (0/124 v1, 0/90 v3) - looked like the 16f fix
+was dead. It was NOT: the **raw :9999 stream carries can_turn at 100%** (re-verified live, correct per
+facing) and the policy's obs is built from that full state. The captures just never LOGGED the two fields
+- `capture_calib.py LOG_FIELDS` omitted `can_turn_left/right` (now added). 16f works; the policy was
+never blind. Death classification (lane/path_type based) is unaffected.
+
+**REGRESSION LEDGER - all three retrains since v1 trace to TURN LANDING/TIMING, not the thing tuned:**
+v2 (aim-center + velocity-drop + ent 0.035) -> 469; the turnfix BUFFERING variant -> 226; v3
+(off_center_penalty) -> 382. Lesson: stop tuning lateral/reward around the turn; the turn EXECUTION
+timing is the structural gap. **RULE reaffirmed: measure the real mechanic + validate offline BEFORE
+retraining.**
+
+**NEXT (task #21, NOT started):** measure the turn command->execution latency on device with the
+now-logged `can_turn` + facing-flip cprog (does the policy command turns late, or does cmd->native-exec
+latency push 0.54->0.76? does the 16f is_turn LATCH to cprog 0.60 pull the aim to the LATE edge?). Then
+model that latency in the sim so the policy learns to PRE-AIM toward exec-at-0.44, validate via
+replay_diff on the turn frames, retrain ONCE from the v1 recipe (NOT off_center, NOT v2's knobs). Keep v1
+deployed until beaten.

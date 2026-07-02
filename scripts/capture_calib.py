@@ -38,7 +38,7 @@ LOG_FIELDS = (
     "distance", "path_type", "next_path_type", "obstacle", "path_level",
     "lane", "cell_progress", "facing", "velocity",
     "is_jumping", "is_sliding", "is_strafing", "is_dead", "is_game_over",
-    "is_turn", "next_is_turn", "must_jump", "must_slide",
+    "is_turn", "next_is_turn", "can_turn_left", "can_turn_right", "must_jump", "must_slide",
     "next_must_jump", "next_must_slide", "next_wide_gap", "narrow_target_lane",
     # --- Phase-0 PROBE fields (hook obs-probe-12a) ---
     "player_x_offset", "over_turn_area",
