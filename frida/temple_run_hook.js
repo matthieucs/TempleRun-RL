@@ -176,7 +176,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-16c'; // 16c = 16b + GameInput turn-buffer probe fields
+const HOOK_VERSION = 'lateral-accel-16d'; // 16d = 16c + is_turn latch re-enabled to 0.60 (aim cell center)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -284,12 +284,14 @@ let cachedTimeSinceShouldTurn = 0.0, cachedTimeSinceLastTurn = 0.0;
 // sides) true from the first flash until progress 0.45 along the FLASHED cell's rect (the measured
 // executable window: probe_turn_window 2026-07-02 — turns execute 0.14-0.56, reliable core <=0.45),
 // or until the turn is taken / facing changes. Device obs now matches sim semantics; no obs resize.
-// DISABLED 2026-07-02: the latch ADDS is_turn frames -> more double-turn temptation. The model that
-// nailed turns (ppo_nn_best) used RAW is_turn (natural 1-2 frame flash) + turn_linger 3 training to
-// resist the 2nd frame. The double-turn is a TRAINING issue (was trained linger 0), not a perception
-// one — so revert to raw is_turn and fix it in the sim (linger 3). Kept behind a flag for reference.
-const TURN_LATCH = false;
-const TURN_LATCH_FRAC = 0.45;
+// RE-ENABLED 2026-07-02 (extended to 0.60): probe_turn_exec MEASURED the turn executes at the swipe
+// cprog and lands at offset ~(cprog-0.44)*45 -> the policy must swipe at cell CENTER (~0.44) to land
+// centered. Raw is_turn is a 1-frame flash at ~0.23 -> the policy can only swipe there -> lands ~8 off
+// -> water. The latch holds is_turn True across the executable window [flash, 0.60] so the policy
+// (via cell_progress) can AIM the center. Double-turn is prevented by turn_linger-3 TRAINING, not by
+// hiding the signal. The sim presents is_turn identically ([turn_exec_early, turn_exec_late]).
+const TURN_LATCH = true;
+const TURN_LATCH_FRAC = 0.60;
 let latchRect = null;               // Rect of the flashed junction cell {rx, rz, rw, rh}
 let latchFacing = 0;                // heading when the flash was latched (facing change = turned)
 let latchCanL = false, latchCanR = false;

@@ -62,11 +62,13 @@ def _make_env(args, rank: int):
 _LANE_STEP = 3.7
 _NARROW_CENTER = 4.5   # [MEASURED 2026-07-02] long-narrow strip center (Region2D bands [2,7]/[3,7])
 
-# RISING-EDGE turn memory (single sequential env). The oracle turns only when is_turn goes
-# False->True, so under turn_linger (is_turn HELD True N frames post-turn to model the device
-# facing-lag double-turn temptation) it fires ONCE per junction — never re-turns during the linger.
-# Reset on episode boundary (distance drops). This is what the trained policy must learn via K=4.
-_oracle_mem = {"was_turn": False, "prev_dist": 0.0}
+# Turn timing memory (single sequential env). Device-measured (probe_turn_exec 2026-07-02): the turn
+# executes instantly and lands at offset ~ (swipe_cprog - 0.44)*45 -> swipe at CELL CENTER (~0.44) to
+# land centered; swiping at the is_turn flash (0.15-0.23) lands 8-12 off -> water. So the oracle waits
+# for cprog >= _TURN_AIM before swiping. A cooldown avoids re-turning during the linger (double-turn).
+_TURN_AIM = 0.28                      # swipe at the first frame in the survival window [0.24,0.64];
+                                      # aiming ~0.44 exactly is too tight for the 10Hz step (~0.35/step)
+_oracle_mem = {"cooldown": 0, "prev_dist": 0.0}
 
 
 def _oracle(st: dict) -> int:
@@ -79,21 +81,20 @@ def _oracle(st: dict) -> int:
     # early buffer on device — a swipe before the junction hits the wall (stumble) and, repeated, turns
     # you off the path. Pre-firing was a sim exploit that regressed the device (226 vs 736). Turn once.
     d = float(st.get("distance", 0.0))
-    if d < _oracle_mem["prev_dist"] - 20.0:       # new episode -> reset the edge memory
-        _oracle_mem["was_turn"] = False
+    if d < _oracle_mem["prev_dist"] - 20.0:       # new episode -> reset
+        _oracle_mem["cooldown"] = 0
     _oracle_mem["prev_dist"] = d
-    rising = bool(st["is_turn"]) and not _oracle_mem["was_turn"]
-    _oracle_mem["was_turn"] = bool(st["is_turn"])
-    if rising:                                    # turn ONCE on the junction (edge, not the held linger)
+    if _oracle_mem["cooldown"] > 0:
+        _oracle_mem["cooldown"] -= 1              # inside a post-turn linger -> never re-turn (double-turn)
+    elif st["is_turn"] and float(st.get("cell_progress", 0.0)) >= _TURN_AIM:
+        _oracle_mem["cooldown"] = 5               # aim CELL CENTER; block re-turns for the linger
         if st["can_turn_left"]:
             return int(C.Action.TURN_LEFT)
         if st["can_turn_right"]:
             return int(C.Action.TURN_RIGHT)
         return int(C.Action.TURN_LEFT)
-    if st["is_turn"]:
-        # is_turn still True but NOT a fresh junction = post-turn linger. Do NOT re-turn (that's the
-        # fatal double-turn). Fall through to jump/slide/lane so the oracle stays busy + centered.
-        pass
+    # is_turn True but cprog < aim (too early to swipe) OR in the cooldown: don't turn, fall through
+    # to jump/slide/lane so the oracle stays centered until the cell center.
     # WIDE gap (2-cell mid<->high crevasse / long hole): jump LATE — at the gap edge (high cell_progress
     # on the pre-gap cell) so the airtime reserves enough to be airborne crossing into the FAR cell.
     # Jumping early (the single-obstacle reflex) runs out of air by the 2nd cell -> Fall. 0.62 is the

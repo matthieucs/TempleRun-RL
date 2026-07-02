@@ -32,7 +32,9 @@ from train_sim import _oracle  # noqa: E402
 
 _spam_ctr = [0]
 _oc_ctr = [0]
-_prompt_mem = {"was_turn": False, "prev_dist": 0.0}
+_prompt_mem = {"cooldown": 0, "prev_dist": 0.0}
+_TURN_AIM = 0.28                     # swipe at first frame in the survival window (device: too-early
+                                     # OR too-late swipe lands off-center -> water; center ~0.44)
 
 
 def _base(st):
@@ -57,17 +59,18 @@ def _recenter(st):
     return C.Action.NOOP
 
 
-def prompt(st):                     # device-correct: keep centered, turn ONCE on the is_turn RISING edge
+def prompt(st):                     # device-correct: centered, swipe at CELL CENTER (cprog>=aim), once
     b = _base(st)
     if b is not None:
         return b
     d = float(st.get("distance", 0.0))
     if d < _prompt_mem["prev_dist"] - 20.0:
-        _prompt_mem["was_turn"] = False
+        _prompt_mem["cooldown"] = 0
     _prompt_mem["prev_dist"] = d
-    rising = bool(st["is_turn"]) and not _prompt_mem["was_turn"]
-    _prompt_mem["was_turn"] = bool(st["is_turn"])
-    if rising:                      # fire once; the held linger frames are NOT a fresh junction
+    if _prompt_mem["cooldown"] > 0:
+        _prompt_mem["cooldown"] -= 1
+    elif st["is_turn"] and float(st.get("cell_progress", 0.0)) >= _TURN_AIM:
+        _prompt_mem["cooldown"] = 5
         return _side(st)
     return _recenter(st)
 
@@ -107,6 +110,16 @@ def double_turn(st):                # device-FATAL: turn on EVERY is_turn frame 
     return _recenter(st)
 
 
+def flash_swipe(st):                # device-FATAL: swipe at the is_turn FLASH (cprog too early)
+    b = _base(st)
+    if b is not None:
+        return b
+    # swipe the INSTANT is_turn appears (cprog < 0.20) -> lands >10 off-center -> water
+    if st["is_turn"] and float(st.get("cell_progress", 0.0)) < 0.20:
+        return _side(st)
+    return _recenter(st)
+
+
 def run(pol, n=80, seed0=13000):
     # narrows excluded: this gate isolates TURN/LATERAL semantics; the gate policies have no
     # narrow-lane logic and narrow deaths would drown the turn signal (narrow.semantics covers those).
@@ -139,7 +152,8 @@ def run_gates(n=80, seed0=13000) -> list[dict]:
     Importable by fidelity_scorecard.py; main() keeps the CLI."""
     rows = [("oracle", _oracle, "survive"), ("prompt(centered)", prompt, "survive"),
             ("PRE-FIRE", prefire, "die"), ("OFF-CENTER turn", off_center, "die"),
-            ("SPAM(straights)", spam, "die"), ("DOUBLE-TURN(linger)", double_turn, "die")]
+            ("SPAM(straights)", spam, "die"), ("DOUBLE-TURN(linger)", double_turn, "die"),
+            ("FLASH-SWIPE(early)", flash_swipe, "die")]
     out = []
     for name, pol, want in rows:
         m, s, nn, ml = run(pol, n=n, seed0=seed0)

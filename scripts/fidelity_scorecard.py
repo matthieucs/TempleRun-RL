@@ -79,14 +79,45 @@ def check_velocity(ref, sim) -> dict:
 
 
 def check_turn_window(ref, sim) -> dict:
+    """is_turn ONSET check. The hook (16d) LATCHES is_turn from the flash across the executable window
+    [0.15,0.60] so the policy can aim cell center -> the sim presents it the same. So the runlen/median
+    are intentionally wide now; what must still match the device is the ONSET (is_turn appears at the
+    flash ~0.15-0.25, not late) so the policy starts reacting on time. p10 of is_turn cprog = onset."""
     rv, sv = ref["turn_window"]["values"], turn_window(sim)
-    r_med, s_med = rv["is_turn_cprog"]["med"], sv["is_turn_cprog"].get("med", float("nan"))
-    r_p90, s_p90 = rv["is_turn_cprog"]["p90"], sv["is_turn_cprog"].get("p90", float("nan"))
-    s_one = _pct(sv["is_turn_runlen"], 1)
-    ok = (abs(s_med - r_med) <= 0.08) and (s_p90 <= r_p90 + 0.10) and (s_one >= 80.0)
-    return {"ref": f"med {r_med:.2f} p90 {r_p90:.2f} 1f {_pct(rv['is_turn_runlen'], 1):.0f}%",
-            "sim": f"med {s_med:.2f} p90 {s_p90:.2f} 1f {s_one:.0f}%",
-            "tol": "med ±0.08, p90 +0.10, 1-frame ≥80%", "pass": bool(ok)}
+    r_p10 = rv["is_turn_cprog"]["p10"]
+    s_p10 = sv["is_turn_cprog"].get("p10", float("nan"))
+    ok = s_p10 == s_p10 and s_p10 <= 0.30           # onset by cprog 0.30 (device flash ~0.09-0.23)
+    return {"ref": f"onset (p10 cprog) {r_p10:.2f} — is_turn appears at the flash",
+            "sim": f"onset {s_p10:.2f} (latched window [0.15,0.60])",
+            "tol": "sim onset ≤0.30", "pass": bool(ok)}
+
+
+def check_turn_landing() -> dict:
+    """The device-MEASURED turn mechanic (probe_turn_exec, 40 turns): a swipe at cell_progress X lands
+    at lateral offset ~(X-0.44)*45 -> swipe ~0.44 = centered; extremes = off-center = water. Validate
+    the sim's landing MODEL (from the env config, applied by _execute_turn) reproduces the device
+    survival window: survive [~0.24, 0.60], die <=0.14 and >=0.61. Checked as the formula (a rollout
+    can't place a swipe at an exact cprog on a 10 Hz grid, which would conflate 'missed' with 'off')."""
+    env = _env(STRAIGHT_CFG)
+    c = env.cfg
+    center = float(c["turn_center_cprog"])
+    scale = float(c["turn_offset_scale"])
+    kill = float(c["turn_land_kill"])
+
+    def survives(x):
+        return abs((x - center) * scale) <= kill
+
+    # device outcomes to reproduce (probe_turn_exec) — UNAMBIGUOUS points only (the 0.60-0.64 edge is
+    # within the 40-sample probe noise; what matters for training is the safe core + clear deaths):
+    dev = [(0.14, False), (0.25, True), (0.35, True), (0.44, True), (0.55, True), (0.74, False)]
+    mism = [f"{x}: sim {'surv' if survives(x) else 'die'} vs dev {'surv' if s else 'die'}"
+            for x, s in dev if survives(x) != s]
+    lo = round(center - kill / scale, 2)
+    hi = round(center + kill / scale, 2)
+    return {"ref": "swipe ~0.44 centered; survive window ~[0.24,0.60], extremes -> water",
+            "sim": f"offset=(cp-{center})*{scale}, kill>{kill} -> survive [{lo},{hi}]"
+                   + ("" if not mism else f" | MISM: {'; '.join(mism)}"),
+            "tol": "matches device probe outcomes", "pass": not mism}
 
 
 def check_turn_gates(n=80) -> dict:
@@ -335,6 +366,7 @@ def main() -> None:
     checks = {
         "velocity": check_velocity(ref, sim),
         "turn.window": check_turn_window(ref, sim),
+        "turn.landing": check_turn_landing(),
         "turn.gates": check_turn_gates(n=n_gate),
         "lateral.step": check_lateral_step(ref),
         "narrow.rates": check_narrow_rates(ref, sim),

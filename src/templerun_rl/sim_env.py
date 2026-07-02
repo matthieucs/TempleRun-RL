@@ -117,13 +117,22 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # straight run-out too. >=2 -> the player turns, gets 1 clean cell, then the next may be an obstacle
     # (visible via the lookahead while on the clean cell).
     "min_clear_after_turn": 2,         # [CALIBRATED] cells after a junction kept obstacle-free
-    # is_turn PRESENTATION window: the junction advertises is_turn (and a DIRECT swipe executes) only
-    # for the first this-fraction of the turn cell. [DEVICE-MEASURED 2026-07-01, human_calib_v2 365
-    # turns]: is_turn is a ~1-FRAME flash at cell START — cprog med 0.23, p90 0.38. Set to 0.40 so the
-    # sim reproduces that flash (was 0.70 -> a 2-frame window up to cprog 0.56 that taught the policy to
-    # aim LATE and MISS the real flash on device). Early swipes are BUFFERED (see _attempt_turn), so a
-    # short window does not require frame-perfect timing — it just forbids lazy late turns.
-    "turn_window_frac": 0.45,          # is_turn TRUE + direct-turn executable for cell_progress in [0, this)
+    # TURN EXECUTION [DEVICE-MEASURED 2026-07-02, scripts/probe_turn_exec.py — one swipe at controlled
+    # cprog, 40 turns]: the turn executes INSTANTLY (facing flips next frame; the game's HandleDelayed-
+    # Turning buffer is NOT used) and the runner LANDS at a lateral offset ~ (swipe_cprog - CENTER) *
+    # SCALE. Swipe at cprog 0.44 -> land centered (lane ~0); swipe at the is_turn flash (0.15-0.23) ->
+    # land 8-12 off -> water; swipe late (>=0.61) -> land 11-29 off -> water. Survivable swipe window
+    # ~[0.28, 0.60]. The runner then RECENTERS via the analog tilt. This is THE turn mechanic (replaces
+    # the old "any cprep in [0,0.45] lands centered", which let the policy swipe at the flash and die).
+    "turn_exec_early": 0.15,           # is_turn PRESENTED + a swipe executes from this cprog (the flash)
+    "turn_exec_late": 0.60,            # ...until this cprog (past it = ran too far, swipe misses)
+    "turn_center_cprog": 0.44,         # swipe here -> land centered (measured offset minimum)
+    "turn_offset_scale": 45.0,         # landed |lane| = |swipe_cprog - center| * this (measured slope)
+    "turn_land_kill": 9.0,             # [MEASURED] land beyond this |offset| -> off the exit path ->
+                                       # water. The runner tolerates offsets up to ~9 (recenters via
+                                       # tilt); probe: offset 8-10 survived, >=11 (swipe <=0.14 or
+                                       # >=0.61) died. Survivable swipe window ~[0.24, 0.64].
+    "turn_window_frac": 0.60,          # [alias] is_turn presentation upper bound = turn_exec_late
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
     # longer reads these; turning at any cprog in the window (or buffered early) is clean.
@@ -864,28 +873,36 @@ class TempleRunSimEnv(gym.Env):
             return
         want_left = a == int(C.Action.TURN_LEFT)
         cell = self._current_cell()
-        # DIRECT turn: the junction is the current nearest cell + its window is still open + the swiped
-        # side is a valid exit. Executes at ANY cprog in the window (early is fine). This is the ONLY
-        # way a turn succeeds — no pre-fire buffer (that was the device-regressing exploit).
-        if bool(cell.get("is_turn")) and self._turn_window_open() and (
+        cp = self._cell_progress()
+        # DIRECT turn: on the junction cell, within the executable window, valid exit side. The turn
+        # executes at ANY cprog in [early, late] but WHERE the swipe lands depends on cprog (see
+        # _execute_turn) — swipe at cell center to land centered.
+        early = float(self.cfg["turn_exec_early"])
+        late = float(self.cfg["turn_exec_late"])
+        if bool(cell.get("is_turn")) and early <= cp <= late and (
                 cell.get("can_turn_left") if want_left else cell.get("can_turn_right")):
-            self._execute_turn(cell, want_left)
+            self._execute_turn(cell, want_left, cp)
             return
-        # ANY other swipe (approach cell, straight, wrong side, past the window) -> hit the wall ->
-        # survivable STUMBLE (2nd too soon -> Fall). This makes pre-firing/spam COSTLY, so the policy
-        # learns to turn only on the is_turn flash. A missed MANDATORY turn is the Fall on cell exit.
+        # ANY other swipe (approach cell, straight, wrong side, before/after the window) -> hit the wall
+        # -> survivable STUMBLE (2nd too soon -> Fall). A missed MANDATORY turn is the Fall on cell exit.
         self._stumble()
 
-    def _execute_turn(self, cell: dict, want_left: bool) -> None:
-        """Round the corner: rotate facing, consume the junction's turnability, start the linger.
-        A turn taken while OFF-CENTER rotates the lateral offset off the exit path -> Fall (device: the
-        runner turned at lane 4.7 -> lane 10..18 -> off the edge). The policy must centre before turning."""
-        if abs(self._lane) > float(self.cfg.get("turn_center_tol", 4.0)):
-            self._kill(1)   # off-center turn -> thrown off the exit path -> Fall
-            return
+    def _execute_turn(self, cell: dict, want_left: bool, swipe_cp: float) -> None:
+        """Round the corner and LAND at a lateral offset set by the swipe cprog (device-measured):
+        offset = (swipe_cp - center) * scale + carry(pre-turn lane). Land past the edge -> off the exit
+        path -> Fall (water). Otherwise land there; the analog tilt recenters. Swipe at ~0.44 = centered."""
+        center = float(self.cfg["turn_center_cprog"])
+        scale = float(self.cfg["turn_offset_scale"])
+        kill = float(self.cfg["turn_land_kill"])
+        # cprog-driven landing offset (signed by turn direction) + a carry of any pre-turn off-center.
+        sign = -1.0 if want_left else 1.0
+        offset = sign * (swipe_cp - center) * scale + self._lane
         self._facing = _LEFT_OF[self._facing] if want_left else _RIGHT_OF[self._facing]
-        # the turn consumes the lateral offset (you round the corner) — reset toward centre on the new path.
-        self._lane = 0.0
+        if abs(offset) > kill:
+            self._kill(1)   # landed off the exit path -> water
+            return
+        self._lane = offset          # lands here; analog tilt recenters over the next steps
+        self._lat_target = 0.0       # level the tilt so it glides back to center
         self._tilt_dir = 0
         cell["is_turn"] = False
         cell["can_turn_left"] = False
@@ -1099,14 +1116,15 @@ class TempleRunSimEnv(gym.Env):
         return float(self._cell_index) + self._cell_progress()
 
     def _turn_window_open(self) -> bool:
-        """Procedural: a junction is turnable only for the first ``turn_window_frac`` of the cell
-        (~2 control-steps, matching the real ~217ms window measured from human turns) -> forces the
-        policy to turn PROMPTLY instead of lazily (the cause of dying-too-late on the phone). Replay
-        keeps the recorded is_turn (it already encodes the real window) so fidelity is untouched."""
+        """is_turn is PRESENTED across the executable window [turn_exec_early, turn_exec_late] (device-
+        measured: the swipe executes from the flash ~0.15 to ~0.60). The policy must aim cell CENTER
+        (~0.44) within it — swiping early (the flash) lands off-center -> water (see _execute_turn).
+        Matches the hook's is_turn latch. Replay keeps the recorded is_turn."""
         if self.track_source == "replay":
             return True
         cell_len = float(self.cfg["cell_length"])
-        return self._dist_into_cell < cell_len * float(self.cfg["turn_window_frac"])
+        cp = self._dist_into_cell / max(1e-6, cell_len)
+        return float(self.cfg["turn_exec_early"]) <= cp <= float(self.cfg["turn_exec_late"])
 
     def _snapshot(self) -> dict:
         """Produce the raw-state dict (constants.STATE_FIELDS order) incl. 1-cell lookahead."""
