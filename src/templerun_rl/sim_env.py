@@ -203,7 +203,11 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # An early takeoff (the 1-cell-lookahead reflex, or a jump 2 cells before the gap) => Fall; taking
     # off near the gap edge (as the oracle does, cprog>=0.62) clears. Level-DOWN + same-level long holes
     # are UNAFFECTED (only cells flagged stepup are checked). Keep below the oracle's 0.62 jump so it's fair.
-    "stepup_min_takeoff_prog": 0.45,   # level-UP: jump must take off after this cprog of the pre-gap cell
+    "stepup_min_takeoff_prog": 0.0,    # [DEAD 2026-07-02] device-refuted (controlled sweep: early
+                                       # takeoffs clear step-ups); kept only so old sidecars don't break
+    "gap_entry_grace": 0.2,            # [MEASURED 2026-07-02] solid lip at a wide-gap cell's entry:
+                                       # grounded entry survives until this cprog (device takeoffs
+                                       # 0.98-1.02 cleared); still grounded past it -> Fall
     # Powerup spawn probabilities are all 0 in the baseline read (sProbabilityBoost/Invincibility/
     # Vacuum/CoinBonus = 0) — why human runs saw 0 boost frames; the sim models no powerups (v1).
     "min_spaces_between_coin_runs": 12, # [READ] sMinSpacesBetweenCoinRuns
@@ -469,6 +473,7 @@ class TempleRunSimEnv(gym.Env):
         self._stumble_kill_t = float(self.cfg["stumble_kill_window"])
         self._stumble_count = 0
         self._stumble_vel = None          # persistent post-stumble velocity (None = on the curve)
+        self._gap_grace_cell = None       # wide-gap cell entered grounded (lip grace pending)
         self._post_turn_linger = 0      # frames is_turn stays True after a turn (sim-to-real trap)
         self._linger_can_l = False
         self._linger_can_r = False
@@ -976,6 +981,16 @@ class TempleRunSimEnv(gym.Env):
             self._dist_into_cell -= cell_len
             self._cross_into_next_cell()
 
+        # wide-gap LIP deadline: entered a wide-gap cell grounded (survivable lip) — still grounded
+        # past gap_entry_grace of the cell -> fell in. A takeoff (or leaving the cell) clears it.
+        if self._gap_grace_cell is not None and not self._is_dead:
+            if self._cell_index != self._gap_grace_cell or self._jump_t > 0.0:
+                self._gap_grace_cell = None
+            elif (self._dist_into_cell / max(1e-6, cell_len)) >= float(cfg["gap_entry_grace"]):
+                cell = self._track[self._cell_index]
+                self._kill(1 if int(cell.get("obstacles", 0)) == OBST_HOLE else 2)
+                self._gap_grace_cell = None
+
     def _cross_into_next_cell(self) -> None:
         """The player leaves the current cell -> resolve junction (exit), step forward, then resolve
         the entered cell's obstacle (ENTRY)."""
@@ -1017,17 +1032,20 @@ class TempleRunSimEnv(gym.Env):
             # wide_gap_min_airtime is ~0 now (the 2-cell SPAN enforces the timing, not an airtime hack).
             need = float(self.cfg["wide_gap_min_airtime"]) if cell.get("wide_gap") else 0.0
             if self._jump_t <= need:
-                self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / LevelChange/Tree
+                # WIDE-GAP LIP [MEASURED 2026-07-02, controlled sweep]: the hole does not start at
+                # the cell boundary — device jumps fired at takeoff cprog 0.98-1.02 (i.e. from the
+                # gap cell's first meters) still cleared. Entering a wide-gap cell grounded is
+                # survivable for gap_entry_grace of the cell; still grounded past it -> Fall
+                # (checked in _advance). Non-wide (1-cell) holes keep the strict on-entry check.
+                if cell.get("wide_gap") and float(self.cfg["gap_entry_grace"]) > 0.0:
+                    self._gap_grace_cell = self._cell_index
+                else:
+                    self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / LevelChange/Tree
                 return
-            # STEP-UP (level-UP) crevasse: airborne is NOT enough — the runner must have TAKEN OFF late
-            # enough (near the gap edge) or the early jump comes down on the RAISED far wall -> Fall.
-            # Gate: takeoff must be past `stepup_min_takeoff_prog` of the pre-gap cell (index G-1); an
-            # early takeoff on the pre-gap cell OR a jump >=1 cell before it falls below the gate. The
-            # oracle jumps at cprog>=0.62 (> the gate) so it clears; the 1-cell-lookahead reflex fails.
-            if cell.get("stepup") and self._jump_takeoff_pos is not None:
-                gate = (self._cell_index - 1) + float(self.cfg["stepup_min_takeoff_prog"])
-                if self._jump_takeoff_pos < gate:
-                    self._kill(2)   # jumped too early -> hit the raised high-ground wall
+            # STEP-UP early-takeoff gate: DEVICE-REFUTED 2026-07-02 (controlled --gap-override sweep,
+            # captures/crevasse_sweep.jsonl: takeoffs 0.26-0.98 of the pre-gap cell all CLEAR incl.
+            # step-ups; human clears 2->3 at 0.16-0.57). Early jumps are fine when airtime spans the
+            # gap — the per-cell airborne check above IS the mechanic. Gate removed (knob [DEAD]).
         elif obst in _MUST_SLIDE:
             if self._slide_t <= 0.0:
                 self._kill(5 if obst == OBST_FLAME_TOWER else 3)  # Burnt / Slide
@@ -1205,6 +1223,7 @@ class TempleRunSimEnv(gym.Env):
         self._strafe_t = self._timer_from(None, s.get("is_strafing"), self.cfg["strafe_duration"],
                                          explicit=hidden.get("strafe_t"))
         self._lat_target = float(hidden.get("lat_target") or 0.0)
+        self._gap_grace_cell = None
         self._stumble_t = self._timer_from(None, s.get("is_stumbling"), self.cfg["stumble_duration"],
                                           explicit=hidden.get("stumble_t"))
 

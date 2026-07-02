@@ -170,7 +170,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'legacy-strafe-15c'; // 15c: + Region2D narrow-band sampling. Flip LATERAL_ACCEL -> 'lateral-accel-15?'
+const HOOK_VERSION = 'lateral-accel-16a'; // 16a = accel tilt + Region2D narrow band + is_turn latch (the deploy stack)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -197,9 +197,7 @@ let latTarget = 0.0;            // commanded lateral target (set by action bytes
 // The game's HandleAccelerometerForce then applies its own sensitivity/glide/recenter — identical
 // dynamics to a human tilting the phone. byte0 = hold LEFT, byte1 = hold RIGHT, byte6/NoOp = LEVEL
 // (game recenters px itself). Still a pure control mapping: the policy decides L/R/level every step.
-const LATERAL_ACCEL = false;    // TEMP false for the Phase-3 narrow sweep (legacy strafes so the old
-                                // ppo_nn_best plays at its 1210 median; the safe-lane MAP is geometry,
-                                // control-independent). FLIP BACK true for tilt-era work + the retrain.
+const LATERAL_ACCEL = true;     // the deploy mode (flip false only for legacy-policy capture sessions)
 const TILT_FORCE = 0.60;        // |accel force| a held tilt commands (probe: tune so reach ~ lane ±7)
 const TILT_LEFT_SIGN = -1.0;    // sign of force X that moves the runner LEFT (verify via probe; flip if wrong)
 let tiltCmd = 0.0;              // commanded accelerometer force X (0 = level phone)
@@ -268,6 +266,17 @@ let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
 // IsPointInsideAnyRegion2D -> the true safe lateral band [lo, hi] in lane units (+ = right of travel).
 let cachedNarrowBandLo = null, cachedNarrowBandHi = null;
 let cachedOnRegion = true;          // player's own point vs the nearest element's regions (probe)
+// IS_TURN LATCH (15d, perception): the streamed is_turn used to be a ~1-frame flash at 10 Hz (the
+// nearest-element handoff hides the rest of the window) while the SIM presents is_turn across its
+// whole 0.45 window — a sim-to-real obs mismatch. Latch the flash: keep is_turn (+ its can_turn
+// sides) true from the first flash until progress 0.45 along the FLASHED cell's rect (the measured
+// executable window: probe_turn_window 2026-07-02 — turns execute 0.14-0.56, reliable core <=0.45),
+// or until the turn is taken / facing changes. Device obs now matches sim semantics; no obs resize.
+const TURN_LATCH_FRAC = 0.45;
+let latchRect = null;               // Rect of the flashed junction cell {rx, rz, rw, rh}
+let latchFacing = 0;                // heading when the flash was latched (facing change = turned)
+let latchCanL = false, latchCanR = false;
+let cachedLatchOpen = false;        // latched window currently open (computed in the Update hook)
 let lastStrafeTick = -1000;         // updateTicks of the last assisted strafe (cooldown)
 let narrowStrafeDir = 0;            // -1 strafed left / +1 right for the current narrow (0 = none/centered)
 let cachedFacing = 0;              // player PathDirection (N1 E2 S3 W4), for facing-aware narrow strafe
@@ -443,6 +452,25 @@ function installHooks() {
               // probe: the game's own on-ground test for the player's current point (drives narrow falls)
               try { cachedOnRegion = !!fn.IsPointInsideAnyRegion2D(pe, [px, 0.0, pz], NULLPTR); }
               catch (_) { cachedOnRegion = true; }
+              // IS_TURN LATCH (15d): capture the flash + hold the window open along the FLASHED
+              // cell's rect until TURN_LATCH_FRAC (works across the nearest-element handoff).
+              if (rawIsTurn && !turnedHere) {
+                latchRect = { rx: rx, rz: rz, rw: rw, rh: rh };
+                latchFacing = facing;
+                latchCanL = neighborExists(pe, LEFT_NEIGHBOR[facing]);
+                latchCanR = neighborExists(pe, RIGHT_NEIGHBOR[facing]);
+              }
+              if (latchRect !== null && (facing !== latchFacing || turnedHere)) latchRect = null;
+              cachedLatchOpen = false;
+              if (latchRect !== null) {
+                let lprog;
+                if (facing === 1) lprog = (pz - latchRect.rz) / latchRect.rh;
+                else if (facing === 2) lprog = (px - latchRect.rx) / latchRect.rw;
+                else if (facing === 3) lprog = 1 - (pz - latchRect.rz) / latchRect.rh;
+                else lprog = 1 - (px - latchRect.rx) / latchRect.rw;
+                if (lprog <= TURN_LATCH_FRAC) cachedLatchOpen = true;
+                else latchRect = null;      // window closed (past the executable core)
+              }
               if (DIAG_TURN) cachedTurnDiag = {
                 lane: Math.round(cachedLane * 10) / 10, prog: Math.round(cachedCellProg * 100) / 100,
                 raw: rawIsTurn, pend: pendingTurn, fac: facing,
@@ -460,10 +488,14 @@ function installHooks() {
             if (rawIsTurn && prevFacing > 0 && facing !== prevFacing) turnedHere = true;
             prevFacing = facing;
             // is_turn / turn DIRECTION (geometry: which exit cell exists, 90deg off heading) — exposed
-            // only until the one turn is taken.
-            cachedIsTurn = rawIsTurn && !turnedHere;
-            cachedCanLeft = cachedIsTurn ? neighborExists(pe, LEFT_NEIGHBOR[facing]) : false;
-            cachedCanRight = cachedIsTurn ? neighborExists(pe, RIGHT_NEIGHBOR[facing]) : false;
+            // only until the one turn is taken. 15d: OR the latched window, so is_turn presents the
+            // full executable window (matching the sim) instead of the 1-frame handoff flash.
+            const rawOpen = rawIsTurn && !turnedHere;
+            cachedIsTurn = rawOpen || cachedLatchOpen;
+            cachedCanLeft = rawOpen ? neighborExists(pe, LEFT_NEIGHBOR[facing])
+                                    : (cachedLatchOpen ? latchCanL : false);
+            cachedCanRight = rawOpen ? neighborExists(pe, RIGHT_NEIGHBOR[facing])
+                                     : (cachedLatchOpen ? latchCanR : false);
             cachedPathType = pe.add(OFF.PE_Type).readS32();
             cachedObst = pe.add(OFF.PE_Obstacles).readS32();
             cachedIsLevelChange = (cachedObst === OBST_LEVEL_CHANGE)

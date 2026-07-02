@@ -218,6 +218,27 @@ def main() -> None:
     cr_eps, cr_used = _load_many(CREVASSE_SRC)
     ref["crevasse"] = {"source": cr_used, "confidence": "partial",
                        "values": crevasse_stats(cr_eps)}
+    csp = CAP / "crevasse_sweep.jsonl"
+    if csp.exists():
+        # CONTROLLED jump-at-cprog device sweep (capture_calib --gap-override): unambiguous
+        # takeoff -> outcome. 2026-07-02: survivals span 0.26-0.98; deaths = late from ON the gap
+        # cell (0.92/1.02 fired from pt36) + 2 mid outliers -> the device window is BROAD, no
+        # early-jump kill (stepup gate refuted).
+        eps: dict = {}
+        for f in _frames(csp):
+            eps.setdefault(f["ep"], []).append(f)
+        curve: dict = {}
+        for e, fr in eps.items():
+            for i, f in enumerate(fr):
+                cl = f.get("narrow_cmd") or ""
+                if not (cl.startswith("gapjump") or cl.startswith("gapmissed")):
+                    continue
+                tgt = cl.split("tgt")[1]
+                actual = round(float(cl.split("@")[1].split("/")[0]), 2) if "@" in cl else None
+                died = any(g.get("is_dead") for g in fr[i:i + 15])
+                curve.setdefault(tgt, []).append({"takeoff": actual, "survived": not died})
+        ref["crevasse"]["controlled_sweep"] = {"source": "crevasse_sweep.jsonl", "curve": curve}
+        ref["crevasse"]["confidence"] = "measured"
 
     if a.lateral:
         lp = Path(a.lateral)

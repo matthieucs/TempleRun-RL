@@ -200,8 +200,12 @@ def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:
 
     def jump_at(x):
         def pol(st):
-            gap_next = st.get("next_wide_gap") or st.get("next_must_jump") or st["must_jump"]
-            if gap_next and float(st.get("cell_progress", 0.0)) >= x:
+            # mirror the device --gap-override driver: x gates the ANTICIPATORY fire (gap still
+            # ahead); once ON a must-jump cell (the lip), jump immediately.
+            if st["must_jump"]:
+                return C.Action.JUMP
+            if ((st.get("next_wide_gap") or st.get("next_must_jump"))
+                    and float(st.get("cell_progress", 0.0)) >= x):
                 return C.Action.JUMP
             return C.Action.NOOP
         return pol
@@ -210,21 +214,29 @@ def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:
     for x in [round(0.1 * k, 1) for k in range(1, 10)]:
         _, frac = _rollout_policy(jump_at(x), cfg, n_eps, seed0, max_steps=1200)
         surv_by_x[x] = round(frac, 2)
-    good = [x for x, f in surv_by_x.items() if f >= 0.75]
-    sim_thr = min(good) if good else None
 
-    # device band: fatal takeoffs below, clearing takeoffs above (mid->high, the death wall)
-    alt = ref["crevasse"]["values"]["altitude"].get("2->3", {})
-    died, surv = alt.get("takeoff_cprog_died", []), alt.get("takeoff_cprog_surv", [])
-    if not died and not surv:
-        return {"skip": "no device takeoff data for 2->3 yet (Phase 4 capture)"}
-    lo = float(np.median(died)) if died else 0.0
-    hi = float(np.median(surv)) if surv else 1.0
-    ok = sim_thr is not None and (lo - 0.10) <= sim_thr <= (max(lo, hi) + 0.10)
-    return {"ref": f"device fatal~{lo:.2f} clearing~{hi:.2f} (confidence "
-                   f"{ref['crevasse'].get('confidence')})",
-            "sim": f"min surviving jump-cprog {sim_thr} (sweep {surv_by_x})",
-            "tol": "threshold in device band ±0.10", "pass": bool(ok)}
+    sweep = ref["crevasse"].get("controlled_sweep")
+    if not sweep:
+        return {"skip": "no controlled --gap-override device sweep yet (Phase 4)"}
+    # device truth (controlled sweep 2026-07-02): survivals span takeoff 0.26-0.98 — the window is
+    # BROAD. The sim must not punish jump timings the device tolerates: at every swept target where
+    # the device majority-survived, the sim's survival must be >=0.6 (10 Hz sampling noise allowed
+    # at the extremes, where a target can be skipped before it fires).
+    dev_ok_x = []
+    for tgt, recs in sweep["curve"].items():
+        outs = [r["survived"] for r in recs if r["takeoff"] is not None]
+        # STRICT majority: target 0.9 measured 1/2 on device (0.98 cleared, 1.02 died — the
+        # boundary is a coin flip); a 50% target is ambiguous, not a "device clears" claim.
+        if outs and sum(outs) / len(outs) > 0.6:
+            dev_ok_x.append(float(tgt))
+    mism = []
+    for x in sorted(dev_ok_x):
+        xr = round(min(max(round(x, 1), 0.1), 0.9), 1)          # nearest sim sweep bucket
+        if surv_by_x.get(xr, 0.0) < 0.6:
+            mism.append(f"x={x}: device clears, sim {surv_by_x.get(xr)}")
+    return {"ref": f"controlled sweep: device clears at targets {sorted(dev_ok_x)}",
+            "sim": f"sweep {surv_by_x}" + ("" if not mism else f" | MISM: {'; '.join(mism)}"),
+            "tol": "sim ≥0.6 survival wherever device majority-clears", "pass": not mism}
 
 
 def check_stumble(ref) -> dict:
