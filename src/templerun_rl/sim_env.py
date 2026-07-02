@@ -128,6 +128,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "turn_exec_late": 0.60,            # ...until this cprog (past it = ran too far, swipe misses)
     "turn_center_cprog": 0.44,         # swipe here -> land centered (measured offset minimum)
     "turn_offset_scale": 45.0,         # landed |lane| = |swipe_cprog - center| * this (measured slope)
+    "turn_lane_carry": 3.0,            # [MEASURED 2026-07-02] pre-turn lane AMPLIFICATION through a turn
+                                       # (device: strafe-into-turn lane 5 -> lands ~18). Punishes leaning
+                                       # into turns -> the policy must center (NoOp) before swiping.
     "turn_land_kill": 9.0,             # [MEASURED] land beyond this |offset| -> off the exit path ->
                                        # water. The runner tolerates offsets up to ~9 (recenters via
                                        # tilt); probe: offset 8-10 survived, >=11 (swipe <=0.14 or
@@ -894,15 +897,21 @@ class TempleRunSimEnv(gym.Env):
         center = float(self.cfg["turn_center_cprog"])
         scale = float(self.cfg["turn_offset_scale"])
         kill = float(self.cfg["turn_land_kill"])
-        # cprog-driven landing offset (signed by turn direction) + a carry of any pre-turn off-center.
+        carry = float(self.cfg["turn_lane_carry"])
         sign = -1.0 if want_left else 1.0
-        offset = sign * (swipe_cp - center) * scale + self._lane
+        # LANDING OFFSET = cprog term + AMPLIFIED pre-turn lane. [DEVICE-MEASURED 2026-07-02, forced
+        # turns-only track]: a policy that STRAFES into the turn (pre-turn lane ~5) lands at ~18 off
+        # (the turn rotates + the held tilt keeps pushing) -> off-path water. So the pre-turn lane is
+        # AMPLIFIED by turn_lane_carry (~3), not just added. Centered (lane 0) -> cprog term only ->
+        # survives. This is the on-device NN death the controlled track exposed (leaning into turns);
+        # it forces the policy to CENTER (NoOp) before swiping. The tilt target is NOT reset here (it
+        # persists through the turn on device), so a still-held strafe keeps the drift going after.
+        offset = sign * (swipe_cp - center) * scale + self._lane * carry
         self._facing = _LEFT_OF[self._facing] if want_left else _RIGHT_OF[self._facing]
         if abs(offset) > kill:
             self._kill(1)   # landed off the exit path -> water
             return
-        self._lane = offset          # lands here; analog tilt recenters over the next steps
-        self._lat_target = 0.0       # level the tilt so it glides back to center
+        self._lane = offset          # lands here; the HELD tilt keeps pushing (lat_target unchanged)
         self._tilt_dir = 0
         cell["is_turn"] = False
         cell["can_turn_left"] = False

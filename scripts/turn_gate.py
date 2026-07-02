@@ -120,6 +120,20 @@ def flash_swipe(st):                # device-FATAL: swipe at the is_turn FLASH (
     return _recenter(st)
 
 
+def lean_turn(st):                  # device-FATAL: STRAFE toward the turn side (lean in), then turn
+    b = _base(st)                   # the exact on-device NN death the forced turns-only track exposed
+    if b is not None:
+        return b
+    if st["is_turn"] and float(st.get("cell_progress", 0.0)) >= _TURN_AIM:
+        return _side(st)
+    # on the approach (or early in the junction), strafe TOWARD the turn side -> off-center + held
+    # tilt -> lands way off -> water. Left turn coming -> strafe left; right -> strafe right.
+    if st["is_turn"] or st.get("next_is_turn"):
+        cl = st["can_turn_left"] or st.get("next_can_turn_left")
+        return C.Action.STRAFE_LEFT if cl else C.Action.STRAFE_RIGHT
+    return _recenter(st)
+
+
 def run(pol, n=80, seed0=13000):
     # narrows excluded: this gate isolates TURN/LATERAL semantics; the gate policies have no
     # narrow-lane logic and narrow deaths would drown the turn signal (narrow.semantics covers those).
@@ -153,7 +167,7 @@ def run_gates(n=80, seed0=13000) -> list[dict]:
     rows = [("oracle", _oracle, "survive"), ("prompt(centered)", prompt, "survive"),
             ("PRE-FIRE", prefire, "die"), ("OFF-CENTER turn", off_center, "die"),
             ("SPAM(straights)", spam, "die"), ("DOUBLE-TURN(linger)", double_turn, "die"),
-            ("FLASH-SWIPE(early)", flash_swipe, "die")]
+            ("FLASH-SWIPE(early)", flash_swipe, "die"), ("LEAN-INTO-TURN", lean_turn, "die")]
     out = []
     for name, pol, want in rows:
         m, s, nn, ml = run(pol, n=n, seed0=seed0)

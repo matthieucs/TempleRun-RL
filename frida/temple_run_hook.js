@@ -337,12 +337,17 @@ function readF32(p, off) {
 // PathElement.s* STATIC flags (sAllowTurns/Holes/Narrows/... @0x7.., sMinSpaceBetweenTurns @0x2C);
 // we set them via the IL2CPP static-field API (il2cpp_field_static_set_value). Re-applied each Update
 // (the game may reset them at level start). NN still decides actions; this only shapes the terrain.
-const TRACK_MODE = 'turns'; // 'off' (normal) | 'turns' (turn-dense, no obstacles) | 'clean' (pure straight)
+const TRACK_MODE = 'off';   // 'off' (normal) | 'turns' (turn-dense, no obstacles) | 'clean' (pure straight)
+// NOTE 2026-07-02: 'turns' works (statics set) but generates CURVE pieces (pt3/4, path bends) that
+// is_turn doesn't flag like T-junctions -> an is_turn-based policy runs off them. Refine to force
+// T-junctions (pt7-10) specifically before using 'turns' as a clean turn-reliability test.
 // per-mode PathElement static overrides. bools -> u8, ints -> i32. Not listed = left as the game set it.
 const TRACK_CONFIGS = {
   turns: { sAllowTurns: 1, sAllowPathHoles: 0, sAllowPathNarrows: 0, sAllowFlameTowers: 0,
-           sAllowTreeStumble: 0, sAllowTreeJump: 0, sAllowTreeSlide: 0, sAllowSidePaths: 0,
-           sMinSpaceBetweenTurns: 3, sMinSpaceBetweenObstacles: 999 },
+           sAllowTreeStumble: 0, sAllowTreeJump: 0, sAllowTreeSlide: 0, sAllowSidePaths: 1,
+           sMinSpaceBetweenTurns: 10, sMinSpaceBetweenObstacles: 999 },
+  // NOTE: sAllowSidePaths MUST be 1 — turns EXIT onto side paths; with it 0 every turn is a
+  // dead-end and even a perfect center-swipe dies (verified 2026-07-02).
   clean: { sAllowTurns: 0, sAllowPathHoles: 0, sAllowPathNarrows: 0, sAllowFlameTowers: 0,
            sAllowTreeStumble: 0, sAllowTreeJump: 0, sAllowTreeSlide: 0, sAllowSidePaths: 0 },
 };
