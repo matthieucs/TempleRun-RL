@@ -41,6 +41,12 @@ const OFF = {
   TutorialID: 0x48, GamePlayer: 0x70, IsGameOver: 0xDE,
   IsTutorialMode: 0x104, NearestElement: 0x88, RecordManager: 0xB0,
   DistanceTraveled: 0x124, // GameController.DistanceTraveled (float) — clean distance, no score multiplier
+  GameInput: 0x78,  // GameController.GameInput (the live TouchInput) — the DELAYED-TURN buffer state
+  // GameInput fields (the HandleDelayedTurning buffer — swipe is queued, executes at the corner,
+  // TimeSinceShouldTurn counts up until it EXPIRES): the real turn-execution mechanic.
+  GI_JustTurned: 0x20, GI_ShouldTurnLeft: 0x21, GI_ShouldTurnRight: 0x22,
+  GI_TimeSinceShouldTurn: 0x24, GI_TimeSinceLastTurn: 0x28,
+  GI_ShouldJump: 0x2C, GI_TimeSinceShouldJump: 0x30,
   // PathElement
   PE_Type: 0x30, PE_Level: 0x34, PE_Obstacles: 0x38,
   // directional neighbors (PathElement*) — the "forward" cell for 1-cell lookahead
@@ -170,7 +176,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-16b'; // 16b = accel tilt + Region2D narrow band, RAW is_turn (latch off)
+const HOOK_VERSION = 'lateral-accel-16c'; // 16c = 16b + GameInput turn-buffer probe fields
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -266,6 +272,12 @@ let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
 // IsPointInsideAnyRegion2D -> the true safe lateral band [lo, hi] in lane units (+ = right of travel).
 let cachedNarrowBandLo = null, cachedNarrowBandHi = null;
 let cachedOnRegion = true;          // player's own point vs the nearest element's regions (probe)
+// TURN-BUFFER PROBE (GameController.GameInput @0x78 = the HandleDelayedTurning state): a swipe sets
+// ShouldTurnLeft/Right + TimeSinceShouldTurn=0; the turn executes when the runner reaches the corner,
+// but the buffer EXPIRES if TimeSinceShouldTurn grows too large -> run past -> water. Streamed so the
+// turn-execution probe can measure the real window/timeout (not model it blind).
+let cachedShouldTurnL = false, cachedShouldTurnR = false, cachedJustTurned = false;
+let cachedTimeSinceShouldTurn = 0.0, cachedTimeSinceLastTurn = 0.0;
 // IS_TURN LATCH (15d, perception): the streamed is_turn used to be a ~1-frame flash at 10 Hz (the
 // nearest-element handoff hides the rest of the window) while the SIM presents is_turn across its
 // whole 0.45 window — a sim-to-real obs mismatch. Latch the flash: keep is_turn (+ its can_turn
@@ -425,6 +437,17 @@ function installHooks() {
       gcInstance = args[0];
       updateTicks++;
       if (!upgradesMaxed && maxAllUpgrades(gcInstance)) upgradesMaxed = true; // one-shot, on main thread
+      // turn-buffer state (GameInput @0x78) — the delayed-turn queue the probe measures
+      try {
+        const gi = gcInstance.add(OFF.GameInput).readPointer();
+        if (!gi.isNull()) {
+          cachedShouldTurnL = readBool(gi, OFF.GI_ShouldTurnLeft);
+          cachedShouldTurnR = readBool(gi, OFF.GI_ShouldTurnRight);
+          cachedJustTurned = readBool(gi, OFF.GI_JustTurned);
+          cachedTimeSinceShouldTurn = readF32(gi, OFF.GI_TimeSinceShouldTurn);
+          cachedTimeSinceLastTurn = readF32(gi, OFF.GI_TimeSinceLastTurn);
+        }
+      } catch (_) {}
       const cp = gcInstance.add(OFF.GamePlayer).readPointer(); // CharacterPlayer*
       if (!cp.isNull()) {
         try { cachedRunVel = fn.GetRunVelocity(cp, NULLPTR); } catch (_) {} // main-thread sample
@@ -878,6 +901,12 @@ function snapshot() {
   s.narrow_band_lo = cachedNarrowBandLo;
   s.narrow_band_hi = cachedNarrowBandHi;
   s.on_region = cachedOnRegion;      // probe: player point vs nearest element's regions
+  // turn-buffer (HandleDelayedTurning) probe fields
+  s.should_turn_left = cachedShouldTurnL;
+  s.should_turn_right = cachedShouldTurnR;
+  s.just_turned = cachedJustTurned;
+  s.time_since_should_turn = cachedTimeSinceShouldTurn;
+  s.time_since_last_turn = cachedTimeSinceLastTurn;
   s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
   s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
   s.over_turn_area = cachedOverTurnArea; // PROBE: game's real turn-window test (IsPointOverTurnArea2D)
