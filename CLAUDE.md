@@ -4,6 +4,46 @@ Goal: turn **Temple Run** (`com.imangi.templerun`, v1.39.0) into a reinforcement
 environment by instrumenting the running game with **Frida** — read game state and inject
 actions through TCP sockets, no screen-scraping, no synthetic input.
 
+## 17. TURN MECHANIC MEASURED + TRACK-FORCING (2026-07-02) — read this for turns
+
+**THE turn mechanic (device-MEASURED, `scripts/probe_turn_exec.py`, 40 controlled swipes):** a turn
+executes INSTANTLY (facing flips next frame; the game's HandleDelayedTurning buffer is NOT used) and
+the runner LANDS at lateral offset ≈ **(swipe_cprog − 0.44) × 45 + pre_turn_lane × ~3**. So: swipe at
+the `is_turn` flash (cprog ~0.2) → land 8–12 off → **water**; swipe at **cell CENTER (~0.44)** from
+**lane 0** → centered → survive. Survivable window ~[0.24, 0.60], |offset| kill ~9. Two ways to die:
+(1) swipe too early/late (off the center cprog), (2) **STRAFE INTO the turn** (leaning) — the pre-turn
+lane is AMPLIFIED ~3.5× (lane 5 → lands ~18) AND the analog tilt PERSISTS through the turn → off-path.
+The policy MUST be centered (NoOp, lat_target 0) AND swipe at cell center.
+
+**Sim model** (`sim_env._execute_turn`): `offset = (cp-turn_center_cprog 0.44)*turn_offset_scale 45 +
+lane*turn_lane_carry 3`; Fall if `|offset|>turn_land_kill 9`; is_turn presented across
+[turn_exec_early 0.15, turn_exec_late 0.60]; tilt target NOT reset (persists). Oracle + turn_gate.prompt
+swipe at cprog≥0.28 from center. `turn_gate.py` gates (all phone-free, must hold): oracle/prompt survive;
+PRE-FIRE / OFF-CENTER / SPAM / DOUBLE-TURN(linger) / FLASH-SWIPE(early) / **LEAN-INTO-TURN** all die.
+Scorecard `turn.landing` = formula vs the device probe. `--strict` GREEN 10/10.
+
+**Hook `lateral-accel-16e`:** accel tilt (§15) + Region2D narrow band (§15) + **is_turn latch to
+cprog 0.60** (so the policy SEES the window to aim center — raw is_turn is a 1-frame flash at 0.2, too
+early) + GameInput turn-buffer probe fields + **TRACK FORCING**. Turn double-turn resistance = train
+with `--turn-linger 3` (linger 0 → double-turns; §16).
+
+**TRACK FORCING (the cheap sim-vs-real comparison the user wanted) — `TRACK_MODE` in the hook:** sets
+the game's `PathElement.s*` STATIC generation flags via the IL2CPP static-field API
+(il2cpp_domain_assembly_open→class_from_name(PathElement)→class_get_field_from_name→
+field_static_set_value; resolve exports via the module instance's findExportByName — Frida 17 removed
+`Module.getExportByName`). Re-applied each Update; streams `track_statics` to verify. Modes: 'off',
+'turns' (turn-dense), 'clean' (straight). **Gotchas:** turns mode needs `sAllowSidePaths=1` (turns exit
+onto side paths; =0 = every turn a dead-end, even a perfect policy dies) AND still generates CURVE
+pieces (pt3/4, path bends) that `is_turn` doesn't flag like T-junctions → an is_turn-based policy runs
+off them. TODO: force T-junctions (pt7-10) specifically for a clean turn-reliability test.
+
+**STATUS:** turn mechanic measured + modeled (scorecard green). ppo_tilt_v3 (linger-3, aim-center) hit
+99.7% turns in-sim but on device STRAFED INTO turns → died (the controlled track exposed it). Fix in
+sim (lean-into-turn punished, `turn_lane_carry`); **ppo_tilt_v4 training** with it + `--strafe-penalty
+0.05`. Device eval pending (injector flaky — force-stop+relaunch, app pid can stick on HyperOS). Model
+registry: `runs/MODELS.md`. Deploy baseline still ppo_faithful_stumble (device 736) until v4 verified.
+
+
 This file is the durable record of how the pipeline was built and the non-obvious gotchas.
 Re-read it before changing the instrumentation.
 
