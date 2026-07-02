@@ -337,7 +337,7 @@ function readF32(p, off) {
 // PathElement.s* STATIC flags (sAllowTurns/Holes/Narrows/... @0x7.., sMinSpaceBetweenTurns @0x2C);
 // we set them via the IL2CPP static-field API (il2cpp_field_static_set_value). Re-applied each Update
 // (the game may reset them at level start). NN still decides actions; this only shapes the terrain.
-const TRACK_MODE = 'narrows'; // 'off' | 'turns' | 'clean' | 'narrows' (narrow-strip-dense, isolate the fall)
+const TRACK_MODE = 'off';   // 'off' | 'turns' | 'clean' | 'narrows' (narrow-strip-dense, isolate the fall)
 // NOTE 2026-07-02: 'turns' works (statics set) but generates CURVE pieces (pt3/4, path bends) that
 // is_turn doesn't flag like T-junctions -> an is_turn-based policy runs off them. Refine to force
 // T-junctions (pt7-10) specifically before using 'turns' as a clean turn-reliability test.

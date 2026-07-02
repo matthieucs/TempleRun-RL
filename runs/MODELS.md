@@ -32,3 +32,5 @@ logs frames; has an obs-adapter for the obs-57 ppo_nn_best). Classify deaths: la
 (|lane|>7 → strafe-off-edge) / `path_type` (33-36 crevasse, 17-30 narrow, 3/7 turn).
 
 See memory `sim-calibration-capture-2026-06-26.md` for the full fidelity story + the gradual-strafe fix.
+
+| **`ppo_valid_v1_best.zip`** (900k, 2026-07-02) | 58 | **first policy on the FULLY-VALIDATED sim** (every mechanic replay_diff / Region2D device-anchored: turn landing sign+timing, turn-on-straight FATAL, side-strip narrows, crevasse/velocity/stumble) | recipe §12 linger 3 + **--narrow-hold-bonus 0.05** (dither fix) | in-sim: **turn-on-straight 0** (v4 killer gone), reaches ~1700m, dies at 1st NARROW (hold not fully learned) | pending device eval (hook 16e) | turns fixed; narrows the new frontier (tune hold-bonus / curriculum) |
