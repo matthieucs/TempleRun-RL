@@ -56,16 +56,22 @@ def _make_env(args, rank: int):
     return _factory
 
 
+# Lane geometry (center-0 tilt model, mirrors src/templerun_rl/obs.py): one strafe ~ LANE_STEP, walls
+# at ~+-LANE_EDGE. The oracle strafes toward a narrow's safe lane (target = ntl * LANE_STEP) and NEVER
+# strafes on a straight — the lane auto-recenters, so gratuitous strafing only risks a wall-stumble.
+_LANE_STEP = 3.7
+
+
 def _oracle(st: dict) -> int:
     # TURN has priority over the lookahead-jump: a junction with an obstacle in the cell AFTER it
     # (is_turn=1 AND next_must_jump=1) must be TURNED, not jumped — jumping misses the turn -> Fall.
     # (The generation keeps the cell right after a junction obstacle-free, so turning is always safe.)
+    # TURN PROMPTLY, ONLY on the is_turn flash (device-remodel 2026-07-01, corrected after a device
+    # eval): is_turn is a ~1-frame flash at cell start — swipe the instant it appears (early WITHIN the
+    # junction cell is correct, no off-center death). Do NOT pre-fire on next_is_turn: there is no safe
+    # early buffer on device — a swipe before the junction hits the wall (stumble) and, repeated, turns
+    # you off the path. Pre-firing was a sim exploit that regressed the device (226 vs 736). Turn once.
     if st["is_turn"]:
-        # Don't turn on the FIRST is_turn frame (cell_progress ~0.1) — that's the off-center early-turn
-        # trap (death_type 9). Wait until ~cell-center, then turn once (matches the real safe window).
-        # Also don't turn MID-STRAFE (turning while strafing throws the runner off-path).
-        if float(st.get("cell_progress", 1.0)) < 0.32 or st.get("is_strafing"):
-            return int(C.Action.NOOP)
         if st["can_turn_left"]:
             return int(C.Action.TURN_LEFT)
         if st["can_turn_right"]:
@@ -84,18 +90,16 @@ def _oracle(st: dict) -> int:
         return int(C.Action.JUMP)
     if st["must_slide"] or st.get("next_must_slide"):
         return int(C.Action.SLIDE)
-    # LANE: be in the upcoming narrow's safe lane; otherwise RE-CENTER. Low priority (after jump/slide).
-    # Don't issue a new strafe MID-GLIDE (is_strafing) — the lane is still moving; re-strafing overshoots
-    # and oscillates off the edge (the on-device failure the gradual-strafe model reproduces).
-    if st.get("is_strafing"):
-        return int(C.Action.NOOP)
+    # LANE (ANALOG TILT, 2026-07-02): a strafe byte = HOLD toward +/-edge (first-order lag), NoOp =
+    # LEVEL = the game recenters. Center needs NO action; an off-center target (narrow safe lane
+    # +/-3.7) is held by bang-bang DITHER (hold past it / release short of it) since the only stable
+    # commanded points are -edge/0/+edge. Deadzone 0.4*step keeps the dither inside the strip band.
     ntl = st.get("narrow_target_lane")
-    target = 0 if ntl is None else int(ntl)
-    lane = float(st.get("lane", -1.3))
-    cur = -1 if lane < -3.15 else (1 if lane > 0.55 else 0)
-    if cur < target:
+    target = int(ntl) * _LANE_STEP if ntl is not None else 0.0
+    lane = float(st.get("lane", 0.0))
+    if lane < target - 0.4 * _LANE_STEP:
         return int(C.Action.STRAFE_RIGHT)
-    if cur > target:
+    if lane > target + 0.4 * _LANE_STEP:
         return int(C.Action.STRAFE_LEFT)
     return int(C.Action.NOOP)
 

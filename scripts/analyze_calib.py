@@ -86,10 +86,9 @@ def recent_takeoff_cp(frames, i0):
     return None
 
 
-def crevasse_report(eps) -> None:
-    """Discover crevasse types by ALTITUDE TRANSITION (path_level change) + same-level gaps. Prints the
-    real device path_types/obstacles so we don't rely on assumed enum values."""
-    print("\n=== CREVASSES — A) altitude transitions (path_level change) ===")
+def crevasse_stats(eps) -> dict:
+    """Machine-readable crevasse measurements (altitude transitions + same-level gaps).
+    Used by both crevasse_report() and extract_device_reference.py."""
     trans = Counter()                                  # (from,to) -> n
     trans_pt = defaultdict(Counter)                    # (from,to) -> path_types around it
     trans_obst = defaultdict(Counter)                  # (from,to) -> obstacle values around it
@@ -124,19 +123,19 @@ def crevasse_report(eps) -> None:
             if cp is not None:
                 cp_by[key]["died" if died_here else "surv"].append(round(float(cp), 2))
 
-    if not trans:
-        print("  (none — runs never reached an altitude change)")
+    altitude = {}
     for key in sorted(trans):
         fr, to = key
         s, d = trans_out[key]
-        print(f"  {lvl(fr)}->{lvl(to)} ({fr}->{to}): n={trans[key]}  survived={s} fell={d}")
-        print(f"      path_types={dict(trans_pt[key].most_common(6))}  obstacles={dict(trans_obst[key])}")
-        if span_by[key]:
-            print(f"      gap cell-span={dict(Counter(span_by[key]))}  "
-                  f"(span>=2 => need wide_gap_extra_cells>=1)")
-        print(f"      jump-takeoff cprog  survived={sorted(cp_by[key]['surv'])} fell={sorted(cp_by[key]['died'])}")
+        altitude[f"{fr}->{to}"] = {
+            "n": trans[key], "survived": s, "fell": d,
+            "path_types": {str(k): v for k, v in trans_pt[key].most_common(6)},
+            "obstacles": {str(k): v for k, v in trans_obst[key].items()},
+            "gap_cell_span": {str(k): v for k, v in Counter(span_by[key]).items()},
+            "takeoff_cprog_surv": sorted(cp_by[key]["surv"]),
+            "takeoff_cprog_died": sorted(cp_by[key]["died"]),
+        }
 
-    print("\n=== CREVASSES — B) same-level gaps (obstacle==7 or HoleLong, NO level change) ===")
     spans, pts = [], Counter()
     out = [0, 0]
     cp_b = {"surv": [], "died": []}
@@ -145,7 +144,7 @@ def crevasse_report(eps) -> None:
         for ev in events(frames, lambda f: int(f.get("obstacle") or 0) == 7
                          or int(f.get("path_type") or -1) in GAP_PT):
             lv = {f.get("path_level") for f in ev}
-            if len(lv) > 1:                            # has a level change -> covered in section A
+            if len(lv) > 1:                            # has a level change -> covered in altitude section
                 continue
             spans.append(cells_in(ev))
             for f in ev:
@@ -156,16 +155,45 @@ def crevasse_report(eps) -> None:
             out[1 if fatal else 0] += 1
             if cp is not None:
                 cp_b["died" if fatal else "surv"].append(round(float(cp), 2))
-    print(f"  events={sum(out)} survived={out[0]} fell={out[1]}  cell-span={dict(Counter(spans))}")
-    print(f"  path_types={dict(pts)}")
-    print(f"  jump-takeoff cprog  survived={sorted(cp_b['surv'])} fell={sorted(cp_b['died'])}")
+    same_level = {
+        "events": sum(out), "survived": out[0], "fell": out[1],
+        "cell_span": {str(k): v for k, v in Counter(spans).items()},
+        "path_types": {str(k): v for k, v in pts.items()},
+        "takeoff_cprog_surv": sorted(cp_b["surv"]),
+        "takeoff_cprog_died": sorted(cp_b["died"]),
+    }
+    return {"altitude": altitude, "same_level": same_level}
 
 
-def narrow_report(eps) -> None:
-    print("\n=== NARROWS (path_type 17-30): subtype x facing -> surviving lane ===")
+def crevasse_report(eps) -> None:
+    """Discover crevasse types by ALTITUDE TRANSITION (path_level change) + same-level gaps. Prints the
+    real device path_types/obstacles so we don't rely on assumed enum values."""
+    st = crevasse_stats(eps)
+    print("\n=== CREVASSES — A) altitude transitions (path_level change) ===")
+    if not st["altitude"]:
+        print("  (none — runs never reached an altitude change)")
+    for key, d in st["altitude"].items():
+        fr, to = (int(x) for x in key.split("->"))
+        print(f"  {lvl(fr)}->{lvl(to)} ({key}): n={d['n']}  survived={d['survived']} fell={d['fell']}")
+        print(f"      path_types={d['path_types']}  obstacles={d['obstacles']}")
+        if d["gap_cell_span"]:
+            print(f"      gap cell-span={d['gap_cell_span']}  (span>=2 => need wide_gap_extra_cells>=1)")
+        print(f"      jump-takeoff cprog  survived={d['takeoff_cprog_surv']} fell={d['takeoff_cprog_died']}")
+
+    b = st["same_level"]
+    print("\n=== CREVASSES — B) same-level gaps (obstacle==7 or HoleLong, NO level change) ===")
+    print(f"  events={b['events']} survived={b['survived']} fell={b['fell']}  cell-span={b['cell_span']}")
+    print(f"  path_types={b['path_types']}")
+    print(f"  jump-takeoff cprog  survived={b['takeoff_cprog_surv']} fell={b['takeoff_cprog_died']}")
+
+
+def narrow_stats(eps) -> dict:
+    """Machine-readable narrow safe-lane table: {"<subtype>,<facing>": {...}} + strip lengths.
+    Used by both narrow_report() and extract_device_reference.py."""
     # table[(subtype, facing)][lane_bucket] = [n_survived, n_died]
     table = defaultdict(lambda: defaultdict(lambda: [0, 0]))
     guess = defaultdict(Counter)          # hook narrow_target_lane guess per (subtype, facing)
+    lane_vals = defaultdict(list)         # (subtype, facing) -> continuous lane values held on SURVIVED strips
     lengths = []
     for ep, frames in eps.items():
         idx = {id(fr): i for i, fr in enumerate(frames)}
@@ -179,6 +207,9 @@ def narrow_report(eps) -> None:
             tail = frames[idx[id(ev[-1])]: idx[id(ev[-1])] + 5]
             fatal = died(frames) and any(f.get("is_dead") for f in tail)
             table[(sub, fac)][held][1 if fatal else 0] += 1
+            if not fatal:
+                lane_vals[(sub, fac)] += [round(float(f["lane"]), 2) for f in ev
+                                          if f.get("lane") is not None]
             # hook's guess: narrow_target_lane is set on the APPROACH frames (next_path_type in 17-30),
             # just BEFORE the on-narrow event — scan back from the event start.
             i0 = idx[id(ev[0])]
@@ -187,25 +218,38 @@ def narrow_report(eps) -> None:
                 if g is not None:
                     guess[(sub, fac)][{-1: "L", 0: "C", 1: "R"}.get(int(g), "?")] += 1
                     break
-    if lengths:
-        print(f"strip length (cells) distribution = {dict(Counter(lengths))}")
-    print(f"{'sub':>4} {'fac':>3} | {'lane: surv/died':<28} | hook_guess | inferred_safe")
+    out = {}
     for key in sorted(table):
         sub, fac = key
         cells = table[key]
-        parts = []
         safe, best = "?", -1
         for b in ("L", "C", "R"):
             sv, dd = cells[b]
-            if sv + dd:
-                parts.append(f"{b}:{sv}/{dd}")
-                if sv > best and dd == 0:
-                    best, safe = sv, b
-        hg = guess[key].most_common(1)[0][0] if guess[key] else "-"
+            if sv + dd and sv > best and dd == 0:
+                best, safe = sv, b
+        lv = sorted(lane_vals[key])
+        out[f"{sub},{fac}"] = {
+            "lanes": {b: cells[b] for b in ("L", "C", "R") if sum(cells[b])},
+            "hook_guess": guess[key].most_common(1)[0][0] if guess[key] else "-",
+            "safe": safe,
+            "surv_lane_band": [lv[0], lv[-1]] if lv else None,
+        }
+    return {"strip_len": {str(k): v for k, v in Counter(lengths).items()}, "map": out}
+
+
+def narrow_report(eps) -> None:
+    st = narrow_stats(eps)
+    print("\n=== NARROWS (path_type 17-30): subtype x facing -> surviving lane ===")
+    if st["strip_len"]:
+        print(f"strip length (cells) distribution = {st['strip_len']}")
+    print(f"{'sub':>4} {'fac':>3} | {'lane: surv/died':<28} | hook_guess | inferred_safe")
+    for key, d in st["map"].items():
+        sub, fac = key.split(",")
+        parts = [f"{b}:{sv}/{dd}" for b, (sv, dd) in d["lanes"].items()]
         # only flag a contradiction when we know BOTH the safe lane and the hook's guess.
-        flag = "  <-- HOOK MAP WRONG" if (safe in ("L", "C", "R") and hg in ("L", "C", "R")
-                                          and safe != hg) else ""
-        print(f"{sub:>4} {fac:>3} | {' '.join(parts):<28} | {hg:^10} | {safe}{flag}")
+        flag = "  <-- HOOK MAP WRONG" if (d["safe"] in ("L", "C", "R") and d["hook_guess"] in ("L", "C", "R")
+                                          and d["safe"] != d["hook_guess"]) else ""
+        print(f"{sub:>4} {fac:>3} | {' '.join(parts):<28} | {d['hook_guess']:^10} | {d['safe']}{flag}")
 
 
 def main() -> None:

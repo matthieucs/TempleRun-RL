@@ -40,6 +40,12 @@ LOG_FIELDS = (
     "is_jumping", "is_sliding", "is_strafing", "is_dead", "is_game_over",
     "is_turn", "next_is_turn", "must_jump", "must_slide",
     "next_must_jump", "next_must_slide", "next_wide_gap", "narrow_target_lane",
+    # --- Phase-0 PROBE fields (hook obs-probe-12a) ---
+    "player_x_offset", "over_turn_area",
+    "dist_to_turn", "dist_to_turn_end", "dist_since_turn",
+    "dist_to_change_temple", "dist_to_change_other", "dist_since_level_change", "dist_remainder",
+    "ground_height", "is_over_ground", "ground_change_higher",
+    "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
 )
 
 NARROW_LO, NARROW_HI = 17, 30
@@ -138,16 +144,22 @@ def main() -> None:
                             else:
                                 narrow_cmd = a.narrow_override
                             narrow_count += 1
-                        # steer toward the commanded lane ONCE on approach, then hold.
-                        if not narrow_strafed and approaching:
-                            act = {"L": SL, "R": SR, "C": NOP}[narrow_cmd]
-                            narrow_strafed = True
+                        # ANALOG TILT (lateral-accel-15a, 2026-07-02): a strafe byte is a HOLD and
+                        # NoOp RECENTERS — so re-send the hold EVERY step while the narrow is active
+                        # (the old strafe-once-then-NoOp drifted back to center mid-strip and would
+                        # silently mismeasure the safe lane). A due jump/slide substitutes ONE tick —
+                        # safe: the hook tilt command is level-triggered (sticky until the next 0/1/6).
+                        hold = {"L": SL, "R": SR, "C": NOP}[narrow_cmd]
+                        if st.get("must_jump") or st.get("next_must_jump") or st.get("next_wide_gap"):
+                            act = 2
+                        elif st.get("must_slide") or st.get("next_must_slide"):
+                            act = 3
                         else:
-                            act = NOP
+                            act = hold
                         cmd_log = narrow_cmd
                     elif narrow_active:
-                        # cleared the narrow -> recenter once (opposite strafe), reset state.
-                        act = {"L": SR, "R": SL, "C": NOP}[narrow_cmd]
+                        # cleared the narrow -> LEVEL the tilt (NoOp recenters natively).
+                        act = NOP
                         narrow_active = False
                         cmd_log = "recenter"
 

@@ -45,6 +45,34 @@ const OFF = {
   PE_Type: 0x30, PE_Level: 0x34, PE_Obstacles: 0x38,
   // directional neighbors (PathElement*) — the "forward" cell for 1-cell lookahead
   PathNorth: 0x50, PathEast: 0x58, PathWest: 0x60, PathSouth: 0x68,
+  // --- Phase-0 PROBE fields (read-only; confirm the game's own metric signals before the obs redesign) ---
+  // CharacterPlayer (cp):
+  PlayerXOffset: 0x190,   // float — game's OWN lateral offset from path center (the real lane; replaces px-cx)
+  IsOverGround: 0x131,    // bool  — solid ground under feet vs hole/gap (distinct from IsOnGround@0x130)
+  GroundHeight: 0x134,    // float — current ground world-Y (altitude)
+  IsGroundHeightChangeHigher: 0x132, // bool — next ground step is UP (the mid->high crevasse)
+  StumbleKillTimer: 0x11C, // float — countdown to death after a stumble ("2nd stumble within window kills")
+  DidStumble: 0x124,      // bool
+  DeathType: 0xE0,        // int   — CharacterPlayer.DeathTypes (1 Fall,2 Tree,3 Slide,4 Ledge,5 Burnt,8/9 Scenery)
+  TimeSinceStrafeStart: 0x128, // float — strafe phase (with StrafeDuration -> fraction through a lane change)
+  StrafeDuration: 0x12C,  // float
+  MaxRunVelocity: 0xEC,   // float — current speed cap (normalize velocity)
+  // GameController (gc): metric distance signals the policy never got
+  DistanceToTurnSection: 0x134,      // float — metres to the next turn stretch (turn-timing countdown)
+  DistanceToTurnSectionEnd: 0x138,   // float
+  DistanceTraveledSinceLastTurnSection: 0x13C, // float
+  DistanceToChangeAtTemple: 0x128,   // float — metres to next altitude change (temple)
+  DistanceToChangeAtOther: 0x12C,    // float — metres to next altitude change (other)
+  DistanceTraveledSinceLastLevelChange: 0x130, // float — metres since last altitude change
+  DistanceRemainder: 0x120,          // float — sub-tile fractional distance into the current tile
+  StumbleCount: 0x168,               // int   — stumbles this run
+  // --- COINS (PathElement): coins are collected by TILTING to their lane -> a tilt means COINS or a
+  // narrow, so we need coin placement to disambiguate + to model coin-collecting in the sim. ---
+  PE_HasCoins: 0x3D,                 // bool  — this cell has a coin run
+  PE_CoinLocStart: 0x44,             // int   — CoinRunLocation at cell entry (0 None,1 Center,2 Left,3 Right)
+  PE_CoinLocEnd: 0x48,               // int   — CoinRunLocation at cell exit (start!=end => diagonal run)
+  PE_CoinInAir: 0x4C,                // bool  — the coin run is in the air (needs a jump)
+  PE_CoinRunCount: 0x88,             // int   — coins in this cell's run
 };
 
 // PathDirection (N1 E2 S3 W4) -> neighbor offset in that heading.
@@ -89,6 +117,11 @@ const RVA = {
   // which a turn actually lands on the corner. point = player horizontal pos (x,z), radius = tolerance.
   GetPosition2D: 0x12E0E9C,       // Vector2 MovingObject.GetPosition2D()  -> (x, z)
   IsPointOverTurnArea2D: 0x12E818C, // bool PathElement.IsPointOverTurnArea(Vector2 point, float radius)
+  // LATERAL-ACCEL: the game's own analog tilt read. TouchInput (the live GameInput on device)
+  // overrides float GetAccelerometerForceX(); HandleAccelerometerForce() consumes it every frame and
+  // drives PlayerXOffset with the game's OWN glide/recenter dynamics. Replacing this = commanding the
+  // tilt the way a human hand does (px writes lost the write-war with the char-update; see 15a note).
+  GetAccelerometerForceX_Touch: 0x12AD500, // float TouchInput.GetAccelerometerForceX() override
 };
 
 // Player lateral offset within the cell (strafe lane). CharacterPlayer.PlayerXOffset @ 0x190.
@@ -132,7 +165,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'nn-only-obs-11a'; // bump on each hook edit to verify the right build is injected
+const HOOK_VERSION = 'lateral-accel-15a'; // bump on each hook edit to verify the right build is injected
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -142,6 +175,27 @@ let cachedTurnDiag = null;          // lane offset + cell progress, for calibrat
 // the cell CENTER (progress ~0.45) lands it centered every time (postLat <=2). So we don't execute the
 // turn byte immediately: we LATCH it and fire when the player reaches the cell center.
 const TURN_BUFFER = false;      // NN decides turns (no hook buffering). lane/cell_progress obs stay on.
+// FINER LATERAL CONTROL (2026-07-01, user-approved 3-level tilt): the native StrafeLeft/Right SET a
+// persistent PlayerXOffset (±7) that the policy can NEVER un-set to 0 -> stuck off-center -> fatal turns.
+// Instead the hook OWNS the lateral: the policy commands a TARGET (byte0 -> -reach hold, byte1 -> +reach
+// hold, byte6/NoOp -> 0 = LEVEL/recenter) and we GLIDE PlayerXOffset toward it each Update frame. This is
+// a CONTROL mapping (policy decides L/C/R), not a hook rule. Verified: writing PlayerXOffset moves the
+// runner + NoOp glides it back to center. See [[lateral-control-recenter-mechanic]].
+// 15a: LATERAL_TILT (direct px writes) FAILED the device probe (strafe_probe_tilt2, 2026-07-02): the
+// char-update owns PlayerXOffset OUTSIDE GameController.Update, so our onLeave writes never land (px
+// pinned ~0 during a 10-frame hold) and the two writers fight (px flicker -4.0<->-4.6). Dead flag.
+const LATERAL_TILT = false;     // [DEAD 15a] px write-war lost — use LATERAL_ACCEL instead
+const LAT_REACH = 7.0;          // |target| one held tilt reaches (clamped to the ±7 edge)
+const LAT_GLIDE = 0.30;         // PlayerXOffset units moved toward the target per Update frame (~60 Hz)
+let latTarget = 0.0;            // commanded lateral target (set by action bytes 0/1/6)
+// LATERAL-ACCEL (15a): replace TouchInput.GetAccelerometerForceX() to return a COMMANDED tilt force.
+// The game's HandleAccelerometerForce then applies its own sensitivity/glide/recenter — identical
+// dynamics to a human tilting the phone. byte0 = hold LEFT, byte1 = hold RIGHT, byte6/NoOp = LEVEL
+// (game recenters px itself). Still a pure control mapping: the policy decides L/R/level every step.
+const LATERAL_ACCEL = true;
+const TILT_FORCE = 0.60;        // |accel force| a held tilt commands (probe: tune so reach ~ lane ±7)
+const TILT_LEFT_SIGN = -1.0;    // sign of force X that moves the runner LEFT (verify via probe; flip if wrong)
+let tiltCmd = 0.0;              // commanded accelerometer force X (0 = level phone)
 const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress crosses this (cell-center)
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
 let pendingTurn = 0;                // 0 none, 4 TurnLeft, 5 TurnRight (buffered, fires at cell center)
@@ -150,6 +204,13 @@ let pendingSawTurnCell = false;     // became true once we were on the turn cell
 let cachedLane = 0.0;               // signed lateral offset from path center (+ = right of travel)
 let cachedCellProg = 0.0;           // longitudinal position within the nearest cell along travel, 0..1
 let cachedRawIsTurn = false;        // nearest cell is a turn piece (IsTurn()), pre-latch
+// PROBE: the game's REAL turn-window test (IsPointOverTurnArea2D). It's a NATIVE call so it must run on
+// the main thread (Update) and be cached for the broadcast thread. radius = player tolerance; tune from
+// the probe (does over_turn_area align with the turnable window / cell_progress?).
+let cachedOverTurnArea = false;
+const TURN_AREA_RADIUS = 2.0;
+// next-cell coin lookahead (the forward neighbor's coin run), cached in the Update hook.
+let cachedNextHasCoins = false, cachedNextCoinStart = 0, cachedNextCoinEnd = 0;
 // CREVASSE JUMP-ASSIST: the zone/altitude transition (ObstacleType.LevelChange=7) is a ~2-cell GAP.
 // The policy reacts to the 1-cell lookahead and jumps too EARLY -> comes down IN the gap -> falls
 // (or doesn't jump at all). The right response is deterministic: jump just as you reach the gap so the
@@ -273,6 +334,14 @@ function resolve() {
   fn.GetPosition2D = new NativeFunction(base.add(RVA.GetPosition2D), ['float', 'float'], ['pointer', 'pointer']); // (MovingObject*, mi) -> Vector2
   fn.IsPointOverTurnArea2D = new NativeFunction(base.add(RVA.IsPointOverTurnArea2D),
     'bool', ['pointer', ['float', 'float'], 'float', 'pointer']);  // (PathElement*, Vector2 point, float radius, mi) -> bool
+  if (LATERAL_ACCEL) {
+    // Command the game's own tilt input: TouchInput.GetAccelerometerForceX() -> tiltCmd. Full replace
+    // (no original call): a flat phone reads ~0 anyway, and tiltCmd IS the commanded phone angle.
+    // Float return rides s0, so attach+retval.replace can't do this — NativeCallback replacement can.
+    Interceptor.replace(base.add(RVA.GetAccelerometerForceX_Touch),
+      new NativeCallback(function () { return tiltCmd; }, 'float', ['pointer', 'pointer']));
+    log('lateral-accel: TouchInput.GetAccelerometerForceX replaced (tiltCmd-driven)');
+  }
   return true;
 }
 
@@ -353,6 +422,10 @@ function installHooks() {
               else if (facing === 2) { cachedLane = -(pz - cz); cachedCellProg = (px - rx) / rw; }
               else if (facing === 3) { cachedLane = -(px - cx); cachedCellProg = 1 - (pz - rz) / rh; }
               else if (facing === 4) { cachedLane = pz - cz; cachedCellProg = 1 - (px - rx) / rw; }
+              // PROBE: the game's REAL "is the player physically over this cell's turn area" test
+              // (native call -> main thread only). Compare against is_turn/cell_progress in the capture.
+              try { cachedOverTurnArea = !!fn.IsPointOverTurnArea2D(pe, [px, pz], TURN_AREA_RADIUS, NULLPTR); }
+              catch (_) { cachedOverTurnArea = false; }
               if (DIAG_TURN) cachedTurnDiag = {
                 lane: Math.round(cachedLane * 10) / 10, prog: Math.round(cachedCellProg * 100) / 100,
                 raw: rawIsTurn, pend: pendingTurn, fac: facing,
@@ -400,10 +473,14 @@ function installHooks() {
               cachedNextPathType = nxt.add(OFF.PE_Type).readS32();
               cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE)
                 || WIDE_GAP_TYPES.indexOf(cachedNextPathType) !== -1;
+              cachedNextHasCoins = readBool(nxt, OFF.PE_HasCoins);
+              cachedNextCoinStart = readI32(nxt, OFF.PE_CoinLocStart);
+              cachedNextCoinEnd = readI32(nxt, OFF.PE_CoinLocEnd);
             } else {
               cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
               cachedNextMustJump = cachedNextMustSlide = false;
               cachedNextIsLevelChange = false;
+              cachedNextHasCoins = false; cachedNextCoinStart = 0; cachedNextCoinEnd = 0;
               cachedNextPathType = -1;
             }
             // Fire one well-timed jump for an upcoming crevasse (after lane/prog are known this frame).
@@ -429,6 +506,23 @@ function installHooks() {
         try { dispatchAction(a, gcInstance, cp); dbg('dispatch_ok', a); }
         catch (e) { dbg('dispatch_err', a, String(e)); }
       }
+    },
+    onLeave(retval) {
+      // FINER LATERAL: apply the tilt glide AFTER the game's own character update (which runs during
+      // Update and would overwrite an onEnter write, so an onEnter write did nothing). Glide PlayerXOffset
+      // toward latTarget; latTarget=0 (NoOp) glides back to px 0 = lane 0 = CENTER.
+      if (!LATERAL_TILT || gcInstance === null || gcInstance.isNull()) return;
+      try {
+        const cp = gcInstance.add(OFF.GamePlayer).readPointer();
+        if (cp.isNull()) return;
+        const pxo = cp.add(OFF_PlayerXOffset);
+        let cur = pxo.readFloat();
+        const d = latTarget - cur;
+        if (Math.abs(d) <= LAT_GLIDE) cur = latTarget;
+        else cur += (d > 0 ? LAT_GLIDE : -LAT_GLIDE);
+        if (cur > LAT_REACH) cur = LAT_REACH; else if (cur < -LAT_REACH) cur = -LAT_REACH;
+        pxo.writeFloat(cur);
+      } catch (_) {}
     }
   });
 
@@ -533,8 +627,19 @@ function maybeReactObstacle(cp) {
 
 function dispatchAction(a, gc, cp) {
   switch (a) {
-    case 0: if (!cp.isNull()) fn.StrafeLeft(cp, NULLPTR); break;
-    case 1: if (!cp.isNull()) fn.StrafeRight(cp, NULLPTR); break;
+    // Lateral: 3-level tilt (LATERAL_TILT) — set the target PlayerXOffset (px); the Update onLeave glides
+    // px there. Measured: lane = -px, so LEFT (lane<0) needs px>0. byte0=LEFT (px +reach), byte1=RIGHT
+    // (px -reach). NoOp (byte6) sets px target 0 = LEVEL = recenter to lane 0.
+    case 0:
+      if (LATERAL_ACCEL) tiltCmd = TILT_LEFT_SIGN * TILT_FORCE;
+      else if (LATERAL_TILT) latTarget = +LAT_REACH;
+      else if (!cp.isNull()) fn.StrafeLeft(cp, NULLPTR);
+      break;
+    case 1:
+      if (LATERAL_ACCEL) tiltCmd = -TILT_LEFT_SIGN * TILT_FORCE;
+      else if (LATERAL_TILT) latTarget = -LAT_REACH;
+      else if (!cp.isNull()) fn.StrafeRight(cp, NULLPTR);
+      break;
     case 2: // Jump — suppressed near a crevasse (the assist owns that jump's timing), else normal.
       if (!cp.isNull()) {
         if (CREVASSE_ASSIST && (cachedNextIsLevelChange || cachedIsLevelChange)) { dbg('jump_suppress_crevasse'); }
@@ -557,11 +662,15 @@ function dispatchAction(a, gc, cp) {
         }
       }
       break;
-    case 6: /* NoOp */ break;
+    case 6:
+      if (LATERAL_ACCEL) tiltCmd = 0.0;         /* NoOp -> LEVEL the phone = game recenters px */
+      else if (LATERAL_TILT) latTarget = 0.0;
+      break;
     case 7: // RestartGame() per spec (resets game LOGIC only; the run stays in game-over limbo)
       if (!gc.isNull()) { fn.RestartGame(gc, NULLPTR); dbg('restartgame'); }
       break;
     case 8: // RunAgainClicked() — the "Rejouer" flow that STARTS a fresh run from the GAME-OVER screen.
+      tiltCmd = 0.0; latTarget = 0.0;   // never carry a held tilt into a new run
       if (!cp.isNull()) {
         const egui = cp.add(OFF.GameOverInterface).readPointer();
         if (!egui.isNull()) { fn.RunAgainClicked(egui, NULLPTR); dbg('runagain'); }
@@ -569,6 +678,7 @@ function dispatchAction(a, gc, cp) {
       }
       break;
     case 9: // OnPlayClicked() — press "JOUER" to start a run from the MAIN MENU.
+      tiltCmd = 0.0; latTarget = 0.0;   // never carry a held tilt into a new run
       // Gated to "currently at the menu": MainMenu.Update must have run within the last few ticks,
       // else mmInstance is stale (a run is in progress) and calling it could crash.
       if (mmInstance !== null && !mmInstance.isNull() && (updateTicks - mmSeenAtTick) <= 5) {
@@ -594,12 +704,31 @@ function snapshot() {
     next_is_turn: false, next_can_turn_left: false, next_can_turn_right: false,
     next_must_jump: false, next_must_slide: false, next_wide_gap: false, next_path_type: -1,
     lane: 0.0, cell_progress: 0.0, narrow_target_lane: null,
+    // --- Phase-0 PROBE fields (read-only; confirm semantics vs the failure modes) ---
+    player_x_offset: 0.0, is_over_ground: false, ground_height: 0.0, ground_change_higher: false,
+    stumble_kill_timer: 0.0, did_stumble: false, death_type: 0,
+    time_since_strafe: 0.0, strafe_duration: 0.0, max_velocity: 0.0, vel_x: 0.0, vel_z: 0.0,
+    dist_to_turn: 0.0, dist_to_turn_end: 0.0, dist_since_turn: 0.0,
+    dist_to_change_temple: 0.0, dist_to_change_other: 0.0, dist_since_level_change: 0.0,
+    dist_remainder: 0.0, stumble_count: 0, over_turn_area: false,
+    // coins (disambiguate a tilt = coins vs narrow; model coin placement in the sim)
+    has_coins: false, coin_loc_start: 0, coin_loc_end: 0, coin_in_air: false, coin_count: 0,
+    next_has_coins: false, next_coin_loc_start: 0, next_coin_loc_end: 0,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
 
   s.is_game_over = readBool(gcInstance, OFF.IsGameOver);
   // DistanceTraveled is the real run distance (no challenge multiplier) -> the reward signal.
   s.distance = readF32(gcInstance, OFF.DistanceTraveled);
+  // --- PROBE: GameController metric distance signals (pure reads) ---
+  s.dist_to_turn = readF32(gcInstance, OFF.DistanceToTurnSection);          // metres to next turn stretch
+  s.dist_to_turn_end = readF32(gcInstance, OFF.DistanceToTurnSectionEnd);
+  s.dist_since_turn = readF32(gcInstance, OFF.DistanceTraveledSinceLastTurnSection);
+  s.dist_to_change_temple = readF32(gcInstance, OFF.DistanceToChangeAtTemple); // metres to next altitude change
+  s.dist_to_change_other = readF32(gcInstance, OFF.DistanceToChangeAtOther);
+  s.dist_since_level_change = readF32(gcInstance, OFF.DistanceTraveledSinceLastLevelChange);
+  s.dist_remainder = readF32(gcInstance, OFF.DistanceRemainder);            // sub-tile fractional distance
+  s.stumble_count = readI32(gcInstance, OFF.StumbleCount);
 
   const cp = gcInstance.add(OFF.GamePlayer).readPointer();
   if (!cp.isNull()) {
@@ -617,6 +746,19 @@ function snapshot() {
     s.is_strafing = readBool(cp, OFF.IsStrafing);
     s.facing = readI32(cp, OFF.Facing);
     s.velocity = cachedRunVel; // CharacterPlayer.GetRunVelocity() sampled on the main thread
+    // --- PROBE: CharacterPlayer fields (pure reads) ---
+    s.player_x_offset = readF32(cp, OFF.PlayerXOffset);   // the game's own lateral offset (candidate real lane)
+    s.is_over_ground = readBool(cp, OFF.IsOverGround);
+    s.ground_height = readF32(cp, OFF.GroundHeight);
+    s.ground_change_higher = readBool(cp, OFF.IsGroundHeightChangeHigher);
+    s.stumble_kill_timer = readF32(cp, OFF.StumbleKillTimer);
+    s.did_stumble = readBool(cp, OFF.DidStumble);
+    s.death_type = readI32(cp, OFF.DeathType);            // CharacterPlayer.DeathTypes (set on death)
+    s.time_since_strafe = readF32(cp, OFF.TimeSinceStrafeStart);
+    s.strafe_duration = readF32(cp, OFF.StrafeDuration);
+    s.max_velocity = readF32(cp, OFF.MaxRunVelocity);
+    s.vel_x = readF32(cp, OFF.Velocity);                 // MovingObject.Velocity.x @0x34
+    s.vel_z = readF32(cp, OFF.Velocity + 8);             // MovingObject.Velocity.z @0x3C (lateral drift)
   }
 
   const pe = gcInstance.add(OFF.NearestElement).readPointer();
@@ -627,7 +769,16 @@ function snapshot() {
     s.must_jump = MUST_JUMP_TYPES.indexOf(obs) !== -1;
     s.must_slide = MUST_SLIDE_TYPES.indexOf(obs) !== -1;
     s.obstacle = obs;   // raw ObstacleType enum (diagnose crevasse / tree-root)
+    // COINS on the nearest cell (CoinRunLocation: 0 None, 1 Center, 2 Left, 3 Right)
+    s.has_coins = readBool(pe, OFF.PE_HasCoins);
+    s.coin_loc_start = readI32(pe, OFF.PE_CoinLocStart);
+    s.coin_loc_end = readI32(pe, OFF.PE_CoinLocEnd);
+    s.coin_in_air = readBool(pe, OFF.PE_CoinInAir);
+    s.coin_count = readI32(pe, OFF.PE_CoinRunCount);
   }
+  s.next_has_coins = cachedNextHasCoins;
+  s.next_coin_loc_start = cachedNextCoinStart;
+  s.next_coin_loc_end = cachedNextCoinEnd;
   // turn availability (computed on the main thread in the Update hook via the game's queries)
   s.can_turn_left = cachedCanLeft;
   s.can_turn_right = cachedCanRight;
@@ -646,6 +797,7 @@ function snapshot() {
     ? narrowStrafeDirFor(cachedNextPathType, cachedFacing) : null;
   s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
   s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
+  s.over_turn_area = cachedOverTurnArea; // PROBE: game's real turn-window test (IsPointOverTurnArea2D)
   s._hv = HOOK_VERSION;
   s._dbg = cachedDbg;
   if (DIAG_TURN) s._turn = cachedTurnDiag;
