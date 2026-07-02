@@ -306,6 +306,10 @@ def main() -> None:
                         "action; once drifted, NoOp is free) -> the policy strafes randomly on straights + "
                         "arrives at turns off-center, where turn_lane_carry (~3x) amplifies it into a >kill "
                         "landing = the dominant device death once turns are handled. try ~0.03.")
+    p.add_argument("--init-from", default=None,
+                   help="warm-start: load weights from this .zip (same obs/action/net-arch) before "
+                        "training. Use to continue from a good base (e.g. runs/ppo_valid_v1_best.zip) "
+                        "with a new reward. Faster convergence than from-scratch.")
     p.add_argument("--action-history-len", type=int, default=0,
                    help="append the one-hot of the last K actions to the obs (policy memory -> curbs "
                         "multiple-turns-at-a-junction). obs grows by K*7. try 3-6. needs a retrain.")
@@ -358,6 +362,11 @@ def main() -> None:
         policy_kwargs=dict(net_arch=net_arch),
         tensorboard_log="runs/tb_sim", verbose=0,
     )
+    if args.init_from:
+        # WARM-START: load prior weights into the fresh model (same obs/action/arch), then keep training
+        # with the new reward/env. Faster than from-scratch when the base policy is already good (v1).
+        model.set_parameters(args.init_from)
+        print(f"warm-started weights from {args.init_from}", flush=True)
     ckpt = CheckpointCallback(save_freq=max(1, 100_000 // args.num_envs),
                               save_path="runs", name_prefix=Path(args.out).name)
     callbacks = [ckpt, EvalCallback(every=100_000, action_history_len=args.action_history_len,

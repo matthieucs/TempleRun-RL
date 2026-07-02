@@ -65,11 +65,29 @@ def shaping_reward(
         # constant-dither device failure. Only exempt the strafe (jump/slide still cost).
         if not (action in strafes and on_narrow):
             r -= action_cost
-    # HOLD bonus: reward being ON the strip so strafe-and-hold beats dithering (the policy sees the
-    # reward for holding the lane instead of toggling to save action_cost). A fall still nets negative
-    # -- the separate death_penalty (~1) dwarfs this small (~0.05) per-frame bonus.
+    # STRIP-HOLD bonus, GRADED by closeness to the target strip lane (device-measured: strips sit at
+    # |lane| ~4.5, never center). The OLD binary "on a narrow CELL -> +bonus regardless of lane" gave NO
+    # gradient toward the strip -> the policy learned to sit at center (NoOp) and just eat the rare narrow
+    # death (device valid_v1: on a narrow the policy NEVER strafed, lane stayed 0 -> off the side strip ->
+    # Fall). Scale the bonus by how close the runner is to the strip: max ON the strip, ~0 at center. This
+    # is a GRADIENT that pulls the policy off-center ONTO the strip (the inverse of off_center_penalty,
+    # which is for straights). Active from when narrow_target_lane is set (approach), so it learns to reach
+    # the strip BEFORE the narrow. On the final narrow cell (target_lane goes None) fall back to a flat hold.
     if narrow_hold_bonus and on_narrow:
-        r += narrow_hold_bonus
+        ntl = prev.get("narrow_target_lane") if prev is not None else None
+        if ntl is not None:
+            # Reward reaching the correct SIDE, saturating once on the strip. The survivable band is
+            # [+2,+7] (center 4.5 +- tol 2.5), and the EASIEST hold is full tilt at the +-7 edge (a stable
+            # commanded point — no dither). An earlier tent-shaped reward PEAKED at 4.5 and under-rewarded
+            # the +-7 hold, so the policy (which can't cheaply sit at exactly 4.5) got ~0 reward and never
+            # learned to strafe at all (device+sim: |lane|-on-narrow ~0, drifts to center, Fall). Reward
+            # `lane*sign` (progress onto the correct side), FULL once |lane|>=3 — covers both the oracle's
+            # ~2.84 dither AND the +-7 full-tilt hold. A real GRADIENT off center toward the strip.
+            sign = 1.0 if ntl > 0 else -1.0
+            closeness = max(0.0, min(1.0, (lane * sign) / 3.0))   # 0 at center/wrong side, 1 for |lane|>=3 correct side
+            r += narrow_hold_bonus * closeness
+        else:
+            r += narrow_hold_bonus                          # on-strip already; flat hold
     # OFF-CENTER (RECENTER incentive): being off-center on a STRAIGHT is nearly free otherwise (action_cost
     # only pays the strafe ACTION; once drifted, NoOp is free) -> the policy strafes randomly on straights,
     # arrives at the next turn off-center, and turn_lane_carry (~3x) amplifies it into a >kill landing ->

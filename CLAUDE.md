@@ -781,3 +781,54 @@ latency push 0.54->0.76? does the 16f is_turn LATCH to cprog 0.60 pull the aim t
 model that latency in the sim so the policy learns to PRE-AIM toward exec-at-0.44, validate via
 replay_diff on the turn frames, retrain ONCE from the v1 recipe (NOT off_center, NOT v2's knobs). Keep v1
 deployed until beaten.
+
+## 19. NARROWS CRACKED via a NARROW-ONLY CURRICULUM + the two-phase warm-start (2026-07-02)
+
+**The narrow death was NOT reward/network/warm-start — it was a HARD-EXPLORATION wall.** v1 (and every
+retrain) NEVER strafed onto narrow strips (device+sim |lane|-on-narrow ~0, drifts to center, Fall). A
+narrow kills INSTANTLY on entry if not already on the +-4.5 strip (`|lane-strip|>tol 2.5 -> Fall`), so
+the policy must strafe onto the strip DURING the 1-cell approach (a precise ~2-frame action, correct
+direction, before any survival feedback). PPO's random exploration almost never produces that sequence,
+and there's no room for trial-and-error ON the narrow (first wrong frame = death). Eliminated 3
+hypotheses with experiments: NOT warm-start prior (from-scratch v6 also |lane| ~0), NOT reward magnitude
+(0.05->0.18 barely moved it), NOT reward shape alone. The `_oracle` (hardcoded reference policy, never
+runs on device) strafes narrows fine (0/40, |lane| 2.84) -> the sim IS survivable; RL just can't DISCOVER
+the skill on a mixed track (it dies on TURNS at ~1500m before ever practicing narrows).
+
+**THE FIX (user's idea): train on a NARROW-ONLY track until the skill is learned, then warm-start.**
+- **Narrow-only sim config** (`--sim-config`, `--no-domain-rand` so DR doesn't re-add turns): `turn_prob
+  0, turn_prob_late 0, obstacle_prob 0.9, narrow_prob 1.0, narrows_after_distance 0,
+  zone_change_every_cells 1e9`. **GOTCHA: narrows are a SUBTYPE of obstacle placement** (the narrow
+  branch is nested inside `if place:` gated by `obstacle_prob`) -> need `obstacle_prob>0` AND
+  `narrow_prob=1.0` (every placed obstacle becomes a narrow, none become jumps/holes), AND
+  `narrows_after_distance=0` (an early-dying policy never reaches a late onset). Verified: track is
+  narrows-only (0 turns, 0 jumps, 483 approach-warning frames / 3000).
+- **`runs/ppo_narrowonly` (from scratch, narrow-only): SOLVED narrows in 700k steps** — |lane|-on-narrow
+  **3.81** (beats the oracle 2.84), **0/40 narrow deaths**, median 1823 (sim cap). Proof the NN CAN do
+  narrows; the mixed track was the only blocker.
+- **Phase 2 `runs/ppo_valid_v7` (warm-start full task from ppo_narrowonly_700000):** `--init-from`
+  (new flag: `model.set_parameters(zip)` before training) + narrows kept DENSE-early
+  (`narrows_after_distance 200, narrow_prob 0.70`) so the narrow skill is RETAINED (not catastrophically
+  forgotten) while turns/obstacles/crevasse are relearned. DR on. Full recipe + `--aim-center-weight 1.0`.
+
+**RESULT `ppo_valid_v7_best` (=3M): the FIRST policy with ALL THREE mechanics at once (in-sim, 40 eps):**
+narrow deaths **0** (|lane|-on-narrow **3.86**, was 0.42 on v1), turn deaths **5** (off-center-turn 20%,
+was 31% on v1), crevasse **0**, **31/40 reached the ~1823 sim cap**, median **1777**. NO forgetting.
+
+**REWARD CHANGES that support it (`reward.py`, all reward-only -> scorecard --strict stayed GREEN):**
+- **Graded+reshaped narrow strip reward** (`narrow_hold_bonus`): reward `lane*sign(ntl)` (progress onto
+  the correct side), FULL once |lane|>=3 -> covers the oracle's ~2.84 dither AND the EASY +-7 full-tilt
+  hold (a stable commanded point). The earlier BINARY reward (on a narrow cell, any lane) gave NO
+  gradient; a tent PEAKED at 4.5 under-rewarded the +-7 hold. This graded version is the pull off center.
+- **Turn AIM-CENTER** (`--aim-center-weight 1.0`): scale the turn reaction_bonus by closeness of the
+  swipe cprog to 0.44 (0 by 0.60) -> pulls the swipe off the late edge. Works (offctr 31%->20%, warm-
+  started even). NOTE: on device a swipe still executes ~1 frame late (the §18 lag), so this REDUCES but
+  may not zero turn-landing deaths; the full fix is modeling that lag (§18 / task #21).
+
+**NEXT SESSION (device eval, first thing):** re-inject hook 16f, `capture_calib.py runs/ppo_valid_v7_best
+--episodes 8 --turn-cooldown 0`, classify deaths (turn/narrow/crevasse). Compare vs v1 median 1173.
+Expect narrow deaths gone; watch turn-landing (the §18 lag) + whether all-3-mechanics holds on device.
+If narrows regress on device (sim-only skill), the lever is more dense-narrow phase-2 steps. Deploy model
+UNTIL v7 is device-verified: **`runs/ppo_valid_v1_best.zip`** (device median 1173). Candidate:
+**`runs/ppo_valid_v7_best.zip`** (in-sim all-3-green). LESSON: rare critical skills need ISOLATION
+training (narrow-only), not just reward tuning on the full task.
