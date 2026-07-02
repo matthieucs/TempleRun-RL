@@ -63,6 +63,10 @@ def main() -> None:
     p.add_argument("capture")
     p.add_argument("--skip-lateral", action="store_true",
                    help="ignore strafe transitions (old-hook captures use different lateral semantics)")
+    p.add_argument("--death-window", type=int, default=3,
+                   help="device death counts as agreement if it lands within +/-N frames of the sim's "
+                        "(the sim kills instantly on a bad turn; the device rotates off + dies ~5 frames "
+                        "later -> same OUTCOME, different timing). 0 = frame-exact.")
     p.add_argument("--show", type=int, default=20, help="max example divergences to print")
     a = p.parse_args()
 
@@ -76,11 +80,12 @@ def main() -> None:
                    config=dict(domain_rand=False)).unwrapped
     cell_len = float(env.cfg["cell_length"])
 
-    # per (family, action): [n, is_dead agree, lane_err_sum, vel_err_sum]
+    # per (family, action): agreement + errors
     buckets = defaultdict(lambda: {"n": 0, "dead_agree": 0, "lane_err": 0.0, "vel_err": 0.0,
-                                   "flag_agree": 0})
-    death_mismatches = []          # device died, sim survived (or vice versa) — the fidelity bugs
+                                   "flag_agree": 0, "landn": 0, "land_err": 0.0})
+    death_mismatches = []          # sim/device life-death disagree beyond the window — the fidelity bugs
     n_pairs = 0
+    w = int(a.death_window)
 
     for ep, fr in eps.items():
         for i in range(len(fr) - 1):
@@ -105,18 +110,20 @@ def main() -> None:
             n_pairs += 1
             b = buckets[(fam, ANM[int(act)])]
             b["n"] += 1
-            real_dead = bool(nxt.get("is_dead"))
             sim_dead = bool(sim.get("is_dead"))
-            if real_dead == sim_dead:
+            # device death within +/-window frames of THIS transition = same outcome (timing tolerated)
+            real_dead_soon = any(bool(fr[j].get("is_dead"))
+                                 for j in range(i + 1, min(len(fr), i + 1 + w + 1)))
+            if sim_dead == real_dead_soon:
                 b["dead_agree"] += 1
-            elif real_dead and not sim_dead:
+            elif sim_dead and not real_dead_soon:
                 death_mismatches.append((ep, fr[i].get("step"), fam, ANM[int(act)],
-                                         "device DIED / sim survived", round(cur.get("lane") or 0, 1),
-                                         round(cp or 0, 2), cur.get("path_type"), nxt.get("death_type")))
+                                         "sim DIED / device lived", round(cur.get("lane") or 0, 1),
+                                         round(cp or 0, 2), cur.get("path_type"), None))
             else:
                 death_mismatches.append((ep, fr[i].get("step"), fam, ANM[int(act)],
-                                         "sim DIED / device survived", round(cur.get("lane") or 0, 1),
-                                         round(cp or 0, 2), cur.get("path_type"), None))
+                                         "device DIED / sim lived", round(cur.get("lane") or 0, 1),
+                                         round(cp or 0, 2), cur.get("path_type"), nxt.get("death_type")))
             # transient-flag agreement (is_jumping/is_sliding/is_stumbling) + lane/velocity error
             fa = sum(1 for k in ("is_jumping", "is_sliding", "is_stumbling")
                      if bool(sim.get(k)) == bool(nxt.get(k)))
@@ -125,17 +132,27 @@ def main() -> None:
                 b["lane_err"] += abs(float(sim.get("lane", 0)) - float(nxt.get("lane")))
             if nxt.get("velocity"):
                 b["vel_err"] += abs(float(sim.get("velocity", 0)) - float(nxt.get("velocity")))
+            # TURN LANDING: for a turn that BOTH sides survive, compare where the runner LANDS a couple
+            # frames later (the turn takes ~2 frames on device). This is the direct turn-model target.
+            if int(act) in (4, 5) and not sim_dead and not real_dead_soon:
+                j = min(len(fr) - 1, i + 2)
+                dev_land = fr[j].get("lane")
+                if dev_land is not None:
+                    b["landn"] += 1
+                    b["land_err"] += abs(float(sim.get("lane", 0)) - float(dev_land))
 
-    print(f"one-step transition diff: {a.capture}  ({n_pairs} real (state,action) transitions)\n")
-    print(f"{'family':>12} {'act':>4} | {'n':>4} | dead-agree | flag-agree | lane_err | vel_err")
+    print(f"one-step transition diff: {a.capture}  ({n_pairs} real (state,action) transitions, "
+          f"death window +/-{w})\n")
+    print(f"{'family':>12} {'act':>4} | {'n':>4} | dead-agree | flag-agree | lane_err | vel_err | turn_land_err")
     tot_n = tot_agree = 0
     for key in sorted(buckets, key=lambda k: (-buckets[k]["n"])):
         b = buckets[key]
         n = b["n"]
         tot_n += n
         tot_agree += b["dead_agree"]
+        land = f"{b['land_err']/b['landn']:.1f} (n{b['landn']})" if b["landn"] else "-"
         print(f"{key[0]:>12} {key[1]:>4} | {n:>4} | {100*b['dead_agree']/n:8.0f}%  | "
-              f"{100*b['flag_agree']/n:8.0f}%  | {b['lane_err']/n:7.1f}  | {b['vel_err']/n:6.1f}")
+              f"{100*b['flag_agree']/n:8.0f}%  | {b['lane_err']/n:7.1f}  | {b['vel_err']/n:6.1f} | {land}")
     print(f"\noverall is_dead agreement: {100*tot_agree/max(1,tot_n):.1f}%  "
           f"({tot_n - tot_agree} mismatches of {tot_n})")
     if death_mismatches:
