@@ -72,6 +72,13 @@ def shaping_reward(
         elif (action == int(C.Action.SLIDE)
                 and not prev.get("must_slide") and not prev.get("next_must_slide")):
             r -= idle_action_penalty
+        # IDLE TURN: a turn with NO junction context (not on/approaching a turn cell) is a spurious
+        # turn -> on device it rotates off the path (FATAL, measured 2026-07-02). The only prior turn
+        # penalty was turn_spam (turn-AFTER-turn); a LONE spurious turn was nearly free (action_cost).
+        # Dock it so shaping curbs it before the policy has to learn from the Fall.
+        elif (action in (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))
+                and not prev.get("is_turn") and not prev.get("next_is_turn")):
+            r -= idle_action_penalty
     # Redundant jump/slide: the obstacle is the CURRENT cell (must_jump) but NOT ahead
     # (next_must_jump=0) -> the player has already entered/cleared it; jumping again is the wasteful
     # "double-jump". Dock it. (A death-preventing jump fires on the lookahead next_must_jump, which is
