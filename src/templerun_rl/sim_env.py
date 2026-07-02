@@ -370,6 +370,8 @@ class TempleRunSimEnv(gym.Env):
         redundant_action_penalty: float = C.DEFAULT_REDUNDANT_ACTION_PENALTY,
         strafe_penalty: float = 0.0,
         narrow_hold_bonus: float = 0.0,
+        aim_center_weight: float = 0.0,
+        velocity_drop_penalty: float = 0.0,
         action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
         frame_stack: int = C.DEFAULT_FRAME_STACK,
         **_ignored: Any,
@@ -413,6 +415,8 @@ class TempleRunSimEnv(gym.Env):
         self.redundant_action_penalty = float(redundant_action_penalty)
         self.strafe_penalty = float(strafe_penalty)
         self.narrow_hold_bonus = float(narrow_hold_bonus)
+        self.aim_center_weight = float(aim_center_weight)
+        self.velocity_drop_penalty = float(velocity_drop_penalty)
 
         # Velocity curve (distance -> velocity) for fast interpolation in _advance.
         vc = self.cfg.get("velocity_curve") or []
@@ -800,6 +804,10 @@ class TempleRunSimEnv(gym.Env):
             turn_spam_penalty=self.turn_spam_penalty, idle_action_penalty=self.idle_action_penalty,
             redundant_action_penalty=self.redundant_action_penalty, strafe_penalty=self.strafe_penalty,
             narrow_hold_bonus=self.narrow_hold_bonus,
+            aim_center_weight=self.aim_center_weight,
+            velocity_drop_penalty=self.velocity_drop_penalty,
+            prev_velocity=float(self._prev_state.get("velocity", 0.0)),
+            velocity=float(state.get("velocity", 0.0)),
         )
         terminated = bool(state["is_dead"] or state["is_game_over"])
         if terminated:

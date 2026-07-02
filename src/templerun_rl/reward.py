@@ -31,6 +31,10 @@ def shaping_reward(
     redundant_action_penalty: float = 0.0,
     strafe_penalty: float = 0.0,
     narrow_hold_bonus: float = 0.0,
+    aim_center_weight: float = 0.0,
+    velocity_drop_penalty: float = 0.0,
+    prev_velocity: float = 0.0,
+    velocity: float = 0.0,
 ) -> float:
     """Dense shaping term (0 unless a knob is set). Mirror of ``env._shaping_reward``.
 
@@ -40,9 +44,14 @@ def shaping_reward(
     """
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
             and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty
-            and not narrow_hold_bonus):
+            and not narrow_hold_bonus and not velocity_drop_penalty):
         return 0.0
     r = 0.0
+    # VELOCITY-DROP penalty: dock a real velocity LOSS (a stumble / clipping a step-up wall slows the
+    # runner). Discourages the too-early crevasse jump that clips the raised wall + gets slowed (user-
+    # reported). Ignores the normal accel; only fires on a drop beyond a small deadband.
+    if velocity_drop_penalty and prev_velocity - velocity > 3.0:
+        r -= velocity_drop_penalty * (prev_velocity - velocity)
     # on/approaching a narrow the runner MUST hold a strafe to stay in the safe band (NoOp drifts to
     # center = off the strip = Fall). So holding the lane there is REQUIRED, not spam.
     strafes = (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT))
@@ -69,10 +78,18 @@ def shaping_reward(
         elif (prev.get("must_slide") or prev.get("next_must_slide")) and action == int(C.Action.SLIDE):
             r += reaction_bonus
         elif prev.get("is_turn"):
-            if action == int(C.Action.TURN_LEFT) and prev.get("can_turn_left"):
-                r += reaction_bonus
-            elif action == int(C.Action.TURN_RIGHT) and prev.get("can_turn_right"):
-                r += reaction_bonus
+            # AIM-CENTER: scale the turn reward by how CENTERED the swipe is (max at cprog ~0.44, the
+            # device-measured landing minimum; falls to ~0 at the window edges). The plain bonus rewarded
+            # turning ANYWHERE in the window, giving no gradient toward 0.44 -> the policy landed 0.43-0.53
+            # mostly but drifted to 0.34/0.71 on some junctions (the residual ~5% turn-death tail on
+            # device). This pulls every swipe toward the center. aim_center_weight 0 -> flat bonus (old).
+            cp = float(prev.get("cell_progress") or 0.44)
+            center = 0.44
+            aim = max(0.0, 1.0 - aim_center_weight * abs(cp - center) / 0.16)  # 1 at center, ~0 at +/-0.16
+            side_ok = ((action == int(C.Action.TURN_LEFT) and prev.get("can_turn_left"))
+                       or (action == int(C.Action.TURN_RIGHT) and prev.get("can_turn_right")))
+            if side_ok:
+                r += reaction_bonus * aim
     # Turn-spam: a turn immediately after another turn is the junction exploit -> dock it.
     if turn_spam_penalty and last_action is not None:
         turns = (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))

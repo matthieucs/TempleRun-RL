@@ -46,6 +46,8 @@ def _make_env(args, rank: int):
             redundant_action_penalty=args.redundant_action_penalty,
             strafe_penalty=args.strafe_penalty,
             narrow_hold_bonus=args.narrow_hold_bonus,
+            aim_center_weight=args.aim_center_weight,
+            velocity_drop_penalty=args.velocity_drop_penalty,
             action_history_len=args.action_history_len,
             frame_stack=args.frame_stack,
             config={"domain_rand": bool(args.domain_rand),
@@ -289,6 +291,14 @@ def main() -> None:
                         "beat the constant-dither: holding the safe lane needs a held strafe (NoOp drifts "
                         "off), but action_cost otherwise pays the policy to NoOp. Narrow strafes are also "
                         "exempted from action_cost. try ~0.05.")
+    p.add_argument("--aim-center-weight", type=float, default=0.0,
+                   help="scale the turn reaction_bonus by how CENTERED the swipe is (max at cprog~0.44, "
+                        "~0 at the window edges). 0 = flat bonus (turn anywhere). Sharpens the swipe aim "
+                        "toward 0.44 -> shrinks the residual off-center turn-death tail on device. try 1.0")
+    p.add_argument("--velocity-drop-penalty", type=float, default=0.0,
+                   help="penalty per unit of velocity LOST in a step (stumble / clipping a step-up wall "
+                        "slows the runner). Discourages the too-early crevasse jump that clips + slows. "
+                        "try ~0.02.")
     p.add_argument("--action-history-len", type=int, default=0,
                    help="append the one-hot of the last K actions to the obs (policy memory -> curbs "
                         "multiple-turns-at-a-junction). obs grows by K*7. try 3-6. needs a retrain.")
