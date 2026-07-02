@@ -337,7 +337,7 @@ function readF32(p, off) {
 // PathElement.s* STATIC flags (sAllowTurns/Holes/Narrows/... @0x7.., sMinSpaceBetweenTurns @0x2C);
 // we set them via the IL2CPP static-field API (il2cpp_field_static_set_value). Re-applied each Update
 // (the game may reset them at level start). NN still decides actions; this only shapes the terrain.
-const TRACK_MODE = 'off';   // 'off' (normal) | 'turns' (turn-dense, no obstacles) | 'clean' (pure straight)
+const TRACK_MODE = 'narrows'; // 'off' | 'turns' | 'clean' | 'narrows' (narrow-strip-dense, isolate the fall)
 // NOTE 2026-07-02: 'turns' works (statics set) but generates CURVE pieces (pt3/4, path bends) that
 // is_turn doesn't flag like T-junctions -> an is_turn-based policy runs off them. Refine to force
 // T-junctions (pt7-10) specifically before using 'turns' as a clean turn-reliability test.
@@ -350,6 +350,11 @@ const TRACK_CONFIGS = {
   // dead-end and even a perfect center-swipe dies (verified 2026-07-02).
   clean: { sAllowTurns: 0, sAllowPathHoles: 0, sAllowPathNarrows: 0, sAllowFlameTowers: 0,
            sAllowTreeStumble: 0, sAllowTreeJump: 0, sAllowTreeSlide: 0, sAllowSidePaths: 0 },
+  // narrows-only: force NarrowLong strips, no turns/holes/trees -> isolate the narrow-fall mechanic
+  // for the replay_diff loop. sMinSpaceBetweenObstacles low so narrows come often.
+  narrows: { sAllowTurns: 0, sAllowPathHoles: 0, sAllowPathNarrows: 1, sAllowFlameTowers: 0,
+             sAllowTreeStumble: 0, sAllowTreeJump: 0, sAllowTreeSlide: 0, sAllowSidePaths: 0,
+             sMinSpaceBetweenObstacles: 4 },
 };
 const TRACK_INT_FIELDS = { sMinSpaceBetweenTurns: 1, sMinSpaceBetweenObstacles: 1, sMaxBackToBackObstacles: 1 };
 let il2 = null;             // resolved IL2CPP API (lazy)
