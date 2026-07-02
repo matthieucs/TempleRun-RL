@@ -48,6 +48,7 @@ def _make_env(args, rank: int):
             narrow_hold_bonus=args.narrow_hold_bonus,
             aim_center_weight=args.aim_center_weight,
             velocity_drop_penalty=args.velocity_drop_penalty,
+            off_center_penalty=args.off_center_penalty,
             action_history_len=args.action_history_len,
             frame_stack=args.frame_stack,
             config={"domain_rand": bool(args.domain_rand),
@@ -299,6 +300,12 @@ def main() -> None:
                    help="penalty per unit of velocity LOST in a step (stumble / clipping a step-up wall "
                         "slows the runner). Discourages the too-early crevasse jump that clips + slows. "
                         "try ~0.02.")
+    p.add_argument("--off-center-penalty", type=float, default=0.0,
+                   help="RECENTER incentive: dock |lane| beyond a ~1.5 deadband when NOT on a narrow. "
+                        "Being off-center on a straight is otherwise free (action_cost pays only the strafe "
+                        "action; once drifted, NoOp is free) -> the policy strafes randomly on straights + "
+                        "arrives at turns off-center, where turn_lane_carry (~3x) amplifies it into a >kill "
+                        "landing = the dominant device death once turns are handled. try ~0.03.")
     p.add_argument("--action-history-len", type=int, default=0,
                    help="append the one-hot of the last K actions to the obs (policy memory -> curbs "
                         "multiple-turns-at-a-junction). obs grows by K*7. try 3-6. needs a retrain.")

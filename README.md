@@ -1,3 +1,5 @@
+![Banner](assets/banner.png)
+
 # TempleRun-RL 🏃
 
 Train reinforcement-learning agents to play **Temple Run** on a **physical Android phone**, with
@@ -9,10 +11,10 @@ reads 19 game-state fields straight from memory and accepts action commands, bot
 ```
   Android phone (arm64, no root)                Host (this repo)
  ┌───────────────────────────────┐            ┌──────────────────────────────┐
- │ Temple Run + Frida gadget     │  tcp:9999  │ StateClient ─► TempleRunEnv   │
- │  • reads CharacterPlayer/...  │ ─────────► │  (gymnasium.Env)  ─► SB3 PPO  │
- │  • calls Jump/Slide/Turn/...  │ ◄───────── │ ActionClient ◄─ env.step()    │
- │  (state @9999, actions @9998) │  tcp:9998  │                               │
+ │ Temple Run + Frida gadget     │  tcp:9999  │ StateClient ─► TempleRunEnv  │
+ │  • reads CharacterPlayer/...  │ ─────────► │  (gymnasium.Env)  ─► SB3 PPO │
+ │  • calls Jump/Slide/Turn/...  │ ◄───────── │ ActionClient ◄─ env.step()   │
+ │  (state @9999, actions @9998) │  tcp:9998  │                              │
  └───────────────────────────────┘            └──────────────────────────────┘
         (adb forward maps the phone's 9999/9998/27042 to 127.0.0.1)
 ```

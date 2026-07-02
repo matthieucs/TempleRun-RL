@@ -33,8 +33,10 @@ def shaping_reward(
     narrow_hold_bonus: float = 0.0,
     aim_center_weight: float = 0.0,
     velocity_drop_penalty: float = 0.0,
+    off_center_penalty: float = 0.0,
     prev_velocity: float = 0.0,
     velocity: float = 0.0,
+    lane: float = 0.0,
 ) -> float:
     """Dense shaping term (0 unless a knob is set). Mirror of ``env._shaping_reward``.
 
@@ -44,7 +46,7 @@ def shaping_reward(
     """
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
             and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty
-            and not narrow_hold_bonus and not velocity_drop_penalty):
+            and not narrow_hold_bonus and not velocity_drop_penalty and not off_center_penalty):
         return 0.0
     r = 0.0
     # VELOCITY-DROP penalty: dock a real velocity LOSS (a stumble / clipping a step-up wall slows the
@@ -68,6 +70,16 @@ def shaping_reward(
     # -- the separate death_penalty (~1) dwarfs this small (~0.05) per-frame bonus.
     if narrow_hold_bonus and on_narrow:
         r += narrow_hold_bonus
+    # OFF-CENTER (RECENTER incentive): being off-center on a STRAIGHT is nearly free otherwise (action_cost
+    # only pays the strafe ACTION; once drifted, NoOp is free) -> the policy strafes randomly on straights,
+    # arrives at the next turn off-center, and turn_lane_carry (~3x) amplifies it into a >kill landing ->
+    # the dominant device death once turns are handled (lane driven to +-9..-23, 2026-07-02 valid_v1_16f).
+    # Dock |lane| beyond a small deadband when NOT on/approaching a narrow (narrows REQUIRE holding the
+    # side strip) so the policy actively holds center on straights -> hits turns centered -> lands safe.
+    if off_center_penalty and not on_narrow:
+        off = abs(lane) - 1.5
+        if off > 0.0:
+            r -= off_center_penalty * off
     if reaction_bonus and prev is not None:
         # Reward the reaction on the obstacle whether it's the CURRENT cell (must_jump) or AHEAD
         # (next_must_jump) — the anticipatory jump (next_*) is the one that actually clears the entry

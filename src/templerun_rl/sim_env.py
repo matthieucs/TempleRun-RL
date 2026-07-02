@@ -372,6 +372,7 @@ class TempleRunSimEnv(gym.Env):
         narrow_hold_bonus: float = 0.0,
         aim_center_weight: float = 0.0,
         velocity_drop_penalty: float = 0.0,
+        off_center_penalty: float = 0.0,
         action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
         frame_stack: int = C.DEFAULT_FRAME_STACK,
         **_ignored: Any,
@@ -417,6 +418,7 @@ class TempleRunSimEnv(gym.Env):
         self.narrow_hold_bonus = float(narrow_hold_bonus)
         self.aim_center_weight = float(aim_center_weight)
         self.velocity_drop_penalty = float(velocity_drop_penalty)
+        self.off_center_penalty = float(off_center_penalty)
 
         # Velocity curve (distance -> velocity) for fast interpolation in _advance.
         vc = self.cfg.get("velocity_curve") or []
@@ -806,8 +808,10 @@ class TempleRunSimEnv(gym.Env):
             narrow_hold_bonus=self.narrow_hold_bonus,
             aim_center_weight=self.aim_center_weight,
             velocity_drop_penalty=self.velocity_drop_penalty,
+            off_center_penalty=self.off_center_penalty,
             prev_velocity=float(self._prev_state.get("velocity", 0.0)),
             velocity=float(state.get("velocity", 0.0)),
+            lane=float(self._prev_state.get("lane", 0.0)),
         )
         terminated = bool(state["is_dead"] or state["is_game_over"])
         if terminated:

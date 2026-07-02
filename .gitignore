@@ -12,6 +12,7 @@ frida-server*
 *.keystore
 tr-debug.keystore
 *.png
+!assets/banner.png
 
 # --- RL run outputs ---
 runs/
@@ -39,6 +40,7 @@ venv/
 # recorded phone traces (data; can be large)
 traces/
 logs/
+captures/
 
 # --- sim-calibration session (2026-06-26): throwaway logs + device capture dumps ---
 *.log

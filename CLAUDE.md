@@ -684,3 +684,53 @@ re-glide). Sim `sim_env.py` remodeled to exactly this (`_lat_target` + `lat_tau`
 model DEAD; NoOp recenters). Oracle: center = NoOp; narrow lane ±3.7 = bang-bang dither (only stable
 commanded points are −7/0/+7). Old policies' strafe outputs now mean HOLDS — expect degraded old-model
 captures.
+
+## 17. VALIDATED-SIM policies + the TURN-DIRECTION perception fix (2026-07-02)
+
+**The validation loop that finally worked - `scripts/replay_diff.py` (policy-FREE).** Every prior sim
+change was checked by train->device-eval (the expensive loop the user flagged). replay_diff does a
+**one-step transition diff**: for each real `(state, action)` in a device capture, `env.set_state(cur)`,
+override `_dist_into_cell = cell_progress*cell_len`, `env.step(action)`, and compare the sim's next
+frame to the device's next frame - per mechanic, in seconds, no policy overhead. This localizes fidelity
+gaps directly. RULE (still): validate/read the real mechanic THEN change the sim; scorecard/replay_diff
+green before any retrain (section 15).
+
+**Mechanics device-anchored + fixed this way (all in `sim_env.py` `_execute_turn`/`_attempt_turn` +
+`reward.py`):**
+- **Turn LANDING (device-measured, `probe_turn_exec`):** a swipe executes instantly; the runner lands at
+  lateral offset ~ `(swipe_cprog - 0.44)*45` (aim CELL-CENTER 0.44). `turn_offset_scale 45`,
+  `turn_center_cprog 0.44`, `turn_lane_carry 3` (pre-turn tilt carries in), kill if `|offset| >
+  turn_land_kill 9`. **SIGN: TurnLeft -> +offset, TurnRight -> -offset** (was backwards, cost a session).
+  `_turn_landed` flag skips the recenter on the landing frame (turn_land_err 4.6 -> 1.4).
+- **Turn-on-a-STRAIGHT is FATAL** (device 8/8), not a survivable stumble - `_attempt_turn` `_kill(1)`
+  when not near a junction; mistimed AT a junction = `_stumble()`.
+- **Narrows = SIDE strips only** (never center): generate `narrow_lane in {-1,+1}`, ptype {-1:19,+1:22};
+  Region2D bands center +-4.5 half-width 2.5. Dither fix (user: "should strafe and HOLD"): `reward.py`
+  EXEMPTS narrow strafes from `action_cost` + `--narrow-hold-bonus 0.05` rewards being on the strip.
+
+**TURN-DIRECTION perception fix - hook `lateral-accel-16f` (the real win this session).** `can_turn_left/
+right` were unreliable: the old `neighborExists` check degraded across the cell -> the policy had to GUESS
+turn direction. Root: the game's native `PathElement.CanTurnLeft/Right(PathDirection origin)` takes the
+**INCOMING direction = OPPOSITE of facing**, not facing. Fix: `OPP_DIR = {1:3,2:4,3:1,4:2}`, call
+`fn.CanTurnLeft(pe, OPP_DIR[facing], NULL)` and CACHE it at the is_turn FLASH (latchCanL/R), hold through
+the latch. **Device-verified: can_turn now 100% at junctions (6/6) - was ~0% mid-junction.** Pure
+perception (can_turn already in the obs); helps every policy with no retrain.
+
+**DEVICE EVAL under 16f (8 eps each, `--turn-cooldown 0`):**
+- `ppo_valid_v1_best` (900k, recipe section 12 linger 3 + `--narrow-hold-bonus 0.05`): **median 1173,
+  best 1956** (16e was 1144/1752). Deaths: **5/8 LATERAL-OFF-EDGE** (lane -9..-23, past +-7 edge),
+  1 crevasse, 2 narrow.
+- `ppo_valid_v2_best` (3M, + `--aim-center-weight` + `--velocity-drop-penalty` + `ent 0.035`):
+  **REGRESSED - median 469, best 1365**, 6/8 lateral-off-edge (lane +-11..+-16). The aim-center/velocity
+  reward tuning + lower ent made over-strafe WORSE. **KEEP v1; do NOT deploy v2.**
+
+**NEW FRONTIER (turns are no longer the top killer - 16f fixed the direction guess): LATERAL
+OVER-STRAFE.** Both v1/v2 now die mostly by driving `lane` to +-9..+-23 - far past the device +-7 edge
+and the obs clip +-8 (so the policy is OOD out there) - the policy holds a strafe and never recenters.
+This is the recurring "strafe-off-edge" device failure (MODELS.md faithful* rows) resurfacing as the
+dominant death once turns are handled. NEXT: make the sim lateral over-strafe COSTLY/fatal at the edge
+(a `|lane|>edge` Fall + a real recenter incentive), re-validate via replay_diff on the v1_16f
+lateral-death frames, then ONE retrain from the v1 recipe (NOT v2's). Deploy model:
+**`runs/ppo_valid_v1_best.zip`** (median 1173, best 1956). Hook: `lateral-accel-16f`. Device serial
+**3f80a3a**; injector must run as a PERSISTENT background task (it exits -> in-phone agent unloads ->
+stream dies; re-launches race each other, so run exactly ONE).

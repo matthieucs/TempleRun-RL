@@ -86,6 +86,7 @@ const OFF = {
 const FWD_NEIGHBOR = { 1: 0x50, 2: 0x58, 3: 0x68, 4: 0x60 };
 const LEFT_NEIGHBOR = { 1: 0x60, 2: 0x50, 3: 0x58, 4: 0x68 };  // N->W E->N S->E W->S
 const RIGHT_NEIGHBOR = { 1: 0x58, 2: 0x68, 3: 0x60, 4: 0x50 }; // N->E E->S S->W W->N
+const OPP_DIR = { 1: 3, 2: 4, 3: 1, 4: 2 };  // opposite PathDirection (incoming dir = opposite of facing)
 
 // Turn availability from GEOMETRY (which exit cell exists), not the position-dependent
 // CanTurnLeft/Right query (which flickers 0/1 at the junction and is useless for lookahead).
@@ -176,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-16e'; // 16e = 16d + track forcing (PathElement statics via IL2CPP API)
+const HOOK_VERSION = 'lateral-accel-16f'; // 16f = 16e + reliable turn-direction (native CanTurn, opposite origin)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -600,8 +601,13 @@ function installHooks() {
               if (TURN_LATCH && rawIsTurn && !turnedHere) {
                 latchRect = { rx: rx, rz: rz, rw: rw, rh: rh };
                 latchFacing = facing;
-                latchCanL = neighborExists(pe, LEFT_NEIGHBOR[facing]);
-                latchCanR = neighborExists(pe, RIGHT_NEIGHBOR[facing]);
+                // TURN DIRECTION = the game's OWN CanTurnLeft/Right with origin = INCOMING dir (opposite
+                // of facing) — the reliable signal (neighborExists degrades as the runner crosses the
+                // cell, leaving can_turn=N mid-junction so the policy had to GUESS the direction).
+                // Captured HERE at the flash (pe is still the turn cell; during the latch pe = next cell).
+                const oppF = OPP_DIR[facing] || facing;
+                latchCanL = !!fn.CanTurnLeft(pe, oppF, NULLPTR);
+                latchCanR = !!fn.CanTurnRight(pe, oppF, NULLPTR);
               }
               if (latchRect !== null && (!TURN_LATCH || facing !== latchFacing || turnedHere)) latchRect = null;
               cachedLatchOpen = false;
@@ -635,9 +641,12 @@ function installHooks() {
             // full executable window (matching the sim) instead of the 1-frame handoff flash.
             const rawOpen = rawIsTurn && !turnedHere;
             cachedIsTurn = rawOpen || cachedLatchOpen;
-            cachedCanLeft = rawOpen ? neighborExists(pe, LEFT_NEIGHBOR[facing])
+            // native CanTurn(opposite-origin) — the stable, correct turn-direction signal. On the flash
+            // cell (rawOpen) query it live; during the latch use the flash-captured latchCanL/R.
+            const oppFacing = OPP_DIR[facing] || facing;
+            cachedCanLeft = rawOpen ? !!fn.CanTurnLeft(pe, oppFacing, NULLPTR)
                                     : (cachedLatchOpen ? latchCanL : false);
-            cachedCanRight = rawOpen ? neighborExists(pe, RIGHT_NEIGHBOR[facing])
+            cachedCanRight = rawOpen ? !!fn.CanTurnRight(pe, oppFacing, NULLPTR)
                                      : (cachedLatchOpen ? latchCanR : false);
             cachedPathType = pe.add(OFF.PE_Type).readS32();
             cachedObst = pe.add(OFF.PE_Obstacles).readS32();
@@ -646,11 +655,13 @@ function installHooks() {
             cachedMustJump = !cachedIsLevelChange && MUST_JUMP_TYPES.indexOf(cachedObst) !== -1;
             cachedMustSlide = MUST_SLIDE_TYPES.indexOf(cachedObst) !== -1;
             // DEBUG: absolute neighbor existence + the query, to verify direction logic at junctions.
+            const OPP = { 1: 3, 2: 4, 3: 1, 4: 2 }[facing] || facing;   // incoming dir = opposite of facing
             cachedDbg = {
               fac: facing,
               N: neighborExists(pe, 0x50), E: neighborExists(pe, 0x58),
               W: neighborExists(pe, 0x60), S: neighborExists(pe, 0x68),
               qL: !!fn.CanTurnLeft(pe, facing, NULLPTR), qR: !!fn.CanTurnRight(pe, facing, NULLPTR),
+              qLo: !!fn.CanTurnLeft(pe, OPP, NULLPTR), qRo: !!fn.CanTurnRight(pe, OPP, NULLPTR),
             };
             // 1-cell lookahead: the forward neighbor in the player's heading.
             const noff = FWD_NEIGHBOR[facing];
