@@ -45,6 +45,7 @@ def _make_env(args, rank: int):
             idle_action_penalty=args.idle_action_penalty,
             redundant_action_penalty=args.redundant_action_penalty,
             strafe_penalty=args.strafe_penalty,
+            narrow_hold_bonus=args.narrow_hold_bonus,
             action_history_len=args.action_history_len,
             frame_stack=args.frame_stack,
             config={"domain_rand": bool(args.domain_rand),
@@ -283,6 +284,11 @@ def main() -> None:
                    help="HARD dock on any non-narrow strafe (narrow_target_lane is None). On device an "
                         "off-track strafe drives the continuous lane OOD (sim lane is 3 discrete values) "
                         "-> the policy walks off the edge. ~0.30 suppresses non-narrow strafing.")
+    p.add_argument("--narrow-hold-bonus", type=float, default=0.0,
+                   help="per-frame reward for being ON a narrow strip (alive). Makes strafe-and-HOLD "
+                        "beat the constant-dither: holding the safe lane needs a held strafe (NoOp drifts "
+                        "off), but action_cost otherwise pays the policy to NoOp. Narrow strafes are also "
+                        "exempted from action_cost. try ~0.05.")
     p.add_argument("--action-history-len", type=int, default=0,
                    help="append the one-hot of the last K actions to the obs (policy memory -> curbs "
                         "multiple-turns-at-a-junction). obs grows by K*7. try 3-6. needs a retrain.")

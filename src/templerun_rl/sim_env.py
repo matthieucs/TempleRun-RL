@@ -369,6 +369,7 @@ class TempleRunSimEnv(gym.Env):
         idle_action_penalty: float = C.DEFAULT_IDLE_ACTION_PENALTY,
         redundant_action_penalty: float = C.DEFAULT_REDUNDANT_ACTION_PENALTY,
         strafe_penalty: float = 0.0,
+        narrow_hold_bonus: float = 0.0,
         action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
         frame_stack: int = C.DEFAULT_FRAME_STACK,
         **_ignored: Any,
@@ -411,6 +412,7 @@ class TempleRunSimEnv(gym.Env):
         self.idle_action_penalty = float(idle_action_penalty)
         self.redundant_action_penalty = float(redundant_action_penalty)
         self.strafe_penalty = float(strafe_penalty)
+        self.narrow_hold_bonus = float(narrow_hold_bonus)
 
         # Velocity curve (distance -> velocity) for fast interpolation in _advance.
         vc = self.cfg.get("velocity_curve") or []
@@ -661,11 +663,14 @@ class TempleRunSimEnv(gym.Env):
                 self._b2b_obstacles += 1
                 if (self._distance_real >= float(cfg["narrows_after_distance"])
                         and self._rng.random() < float(cfg["narrow_prob"])):
-                    # NARROW: a multi-cell one-lane strip with a RANDOM safe lane; runner falls off
+                    # NARROW: a multi-cell one-lane SIDE strip with a RANDOM safe lane; runner falls off
                     # elsewhere. The policy must read narrow_target_lane (not the subtype) and HOLD it
-                    # across the strip. ptype ~ a real narrow value. Gated to past narrows_after_distance.
-                    narrow_lane = int(self._rng.integers(-1, 2))   # -1 / 0 / +1
-                    ptype = {-1: 19, 0: 17, 1: 22}[narrow_lane]
+                    # across the strip. [DEVICE-MEASURED 2026-07-02, Region2D bands narrow_calib2]: EVERY
+                    # device narrow band is a SIDE strip (center +/-4-5), NEVER center — so the sim only
+                    # generates side lanes (-1/+1). (Was -1/0/+1; the 0/center-safe narrow does not exist
+                    # on device -> the policy learned a center-safe narrow that always fell.)
+                    narrow_lane = int(self._rng.choice([-1, 1]))    # -1 (left strip) / +1 (right strip)
+                    ptype = {-1: 19, 1: 22}[narrow_lane]
                     # device-measured strip length -> queue the continuation cells (same safe lane).
                     lw = cfg["narrow_len_weights"]
                     lens = list(lw.keys())
@@ -794,6 +799,7 @@ class TempleRunSimEnv(gym.Env):
             action_cost=self.action_cost, reaction_bonus=self.reaction_bonus,
             turn_spam_penalty=self.turn_spam_penalty, idle_action_penalty=self.idle_action_penalty,
             redundant_action_penalty=self.redundant_action_penalty, strafe_penalty=self.strafe_penalty,
+            narrow_hold_bonus=self.narrow_hold_bonus,
         )
         terminated = bool(state["is_dead"] or state["is_game_over"])
         if terminated:
@@ -1061,8 +1067,9 @@ class TempleRunSimEnv(gym.Env):
 
     def _resolve_obstacle_on_enter(self, cell: dict) -> None:
         # NARROW strip: must be inside the safe band on every strip-cell entry, else fall off.
-        # Band center = narrow_lane * narrow_lane_center (+/-4.5 measured from the game's Region2D
-        # polygons), half-width narrow_lane_tol (2.5). NarrowSmall (nl=0) center-safe simplification.
+        # Band center = narrow_lane * narrow_lane_center (+/-4.5) +/- narrow_lane_tol (2.5) -- device-
+        # measured from the game's Region2D polygons (narrow_calib2 2026-07-02: pt20/21 [-7,-2], pt22-27
+        # [3,7]). narrow_lane is ALWAYS a SIDE (-1/+1) now -- the device has NO center-safe narrow.
         nl = cell.get("narrow_lane")
         if nl is not None:
             target = int(nl) * float(self.cfg["narrow_lane_center"])

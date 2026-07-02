@@ -30,6 +30,7 @@ def shaping_reward(
     idle_action_penalty: float = 0.0,
     redundant_action_penalty: float = 0.0,
     strafe_penalty: float = 0.0,
+    narrow_hold_bonus: float = 0.0,
 ) -> float:
     """Dense shaping term (0 unless a knob is set). Mirror of ``env._shaping_reward``.
 
@@ -38,11 +39,26 @@ def shaping_reward(
     previous step (for the turn-spam memory the policy lacks).
     """
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
-            and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty):
+            and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty
+            and not narrow_hold_bonus):
         return 0.0
     r = 0.0
+    # on/approaching a narrow the runner MUST hold a strafe to stay in the safe band (NoOp drifts to
+    # center = off the strip = Fall). So holding the lane there is REQUIRED, not spam.
+    strafes = (int(C.Action.STRAFE_LEFT), int(C.Action.STRAFE_RIGHT))
+    on_narrow = prev is not None and (
+        (isinstance(prev.get("path_type"), int) and 17 <= prev.get("path_type") <= 30)
+        or prev.get("narrow_target_lane") is not None)
     if action_cost and action != int(C.Action.NOOP):
-        r -= action_cost
+        # a hold-strafe on a narrow is FREE — else action_cost pays the policy to NoOp (drift off) -> the
+        # constant-dither device failure. Only exempt the strafe (jump/slide still cost).
+        if not (action in strafes and on_narrow):
+            r -= action_cost
+    # HOLD bonus: reward being ON the strip so strafe-and-hold beats dithering (the policy sees the
+    # reward for holding the lane instead of toggling to save action_cost). A fall still nets negative
+    # -- the separate death_penalty (~1) dwarfs this small (~0.05) per-frame bonus.
+    if narrow_hold_bonus and on_narrow:
+        r += narrow_hold_bonus
     if reaction_bonus and prev is not None:
         # Reward the reaction on the obstacle whether it's the CURRENT cell (must_jump) or AHEAD
         # (next_must_jump) — the anticipatory jump (next_*) is the one that actually clears the entry

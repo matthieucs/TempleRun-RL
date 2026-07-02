@@ -29,7 +29,8 @@ LOG = ("distance", "path_type", "next_path_type", "path_level", "obstacle", "is_
        "next_must_slide", "next_wide_gap", "narrow_target_lane", "lane", "cell_progress", "facing",
        "velocity", "is_jumping", "is_sliding", "is_strafing", "is_stumbling", "is_on_ground",
        "is_dead", "is_game_over", "ground_height", "ground_change_higher", "stumble_kill_timer",
-       "stumble_count", "did_stumble", "death_type", "_hv")
+       "stumble_count", "did_stumble", "death_type",
+       "narrow_band_lo", "narrow_band_hi", "on_region", "_hv")
 
 
 def reset(ac, sc, seq, timeout=8.0):
