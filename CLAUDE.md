@@ -828,7 +828,12 @@ was 31% on v1), crevasse **0**, **31/40 reached the ~1823 sim cap**, median **17
 **NEXT SESSION (device eval, first thing):** re-inject hook 16f, `capture_calib.py runs/ppo_valid_v7_best
 --episodes 8 --turn-cooldown 0`, classify deaths (turn/narrow/crevasse). Compare vs v1 median 1173.
 Expect narrow deaths gone; watch turn-landing (the §18 lag) + whether all-3-mechanics holds on device.
-If narrows regress on device (sim-only skill), the lever is more dense-narrow phase-2 steps. Deploy model
-UNTIL v7 is device-verified: **`runs/ppo_valid_v1_best.zip`** (device median 1173). Candidate:
-**`runs/ppo_valid_v7_best.zip`** (in-sim all-3-green). LESSON: rare critical skills need ISOLATION
-training (narrow-only), not just reward tuning on the full task.
+If narrows regress on device (sim-only skill), the lever is more dense-narrow phase-2 steps.
+
+**DEPLOYED (user decision 2026-07-02): `runs/ppo_best.zip` = `ppo_valid_v7_best` (v7 @3M).** The canonical
+deploy slot now holds v7 (all-3-mechanics GREEN in-sim: 0 narrow / 5 turn / 0 crevasse, |lane| 3.86,
+median 1777). **NOT yet device-verified** — deployed on the sim result; device eval is the first task next
+session (`capture_calib.py runs/ppo_best.zip --episodes 8 --turn-cooldown 0` on hook 16f, classify vs the
+v1 baseline device median 1173). Prior deploy `ppo_valid_v1_best` (device 1173) kept as the rollback.
+LESSON: rare critical skills need ISOLATION training (narrow-only), not just reward tuning on the full
+task.
