@@ -1,5 +1,23 @@
 # Overnight autonomous run — toward 10,000 m
 
+## ☀️ MORNING TL;DR
+- **WIN: deploy floor raised — v14 promoted to `runs/ppo_best.zip`, device median 1652 / best 2908**
+  (was v1's 1173, **+40%**). This is real, committed, device-verified.
+- **Did NOT reach 10k.** Ran 5 retrains (v15-v18) — ALL regressed vs v14, every one via **turn overshoot**
+  (device turns landing at lane 15-22). Reverted every change; sim + deploy are clean and scorecard GREEN.
+- **Why (definitive):** the device's *reliable* turn-swipe window is cp 0.35-0.50 (0% death), but it's too
+  narrow to hit consistently at 10 Hz; leaving the sim window loose (cp≤0.60) lets retrains aim at the
+  *marginal* cp 0.5-0.55 zone where device variance lands them at 15-22. **v14 threads this needle by a
+  good draw; retraining can't reproduce it.** Every clean fix was tried and refuted (details below):
+  tighten window (unhittable @10Hz), 20 Hz (already worse: 180 vs 607), action_delay (over-corrects),
+  turn-carry fidelity (removes a load-bearing regularizer), high-speed curriculum / off_center_penalty.
+- **v14 is the ceiling for the current sim+obs+10Hz.** Beating it → 10k needs a research-level change
+  (phase-locked/recurrent turn policy, or measuring & modeling the turn-landing VARIANCE), NOT more
+  retrains. Options teed up under "To actually beat v14" below. **Your call in the morning.**
+- Also SOLVED earlier today: crevasses (v14 2-cell model, device-verified). Repo clean, all committed.
+
+---
+
 Started 2026-07-03 (night). Autonomous per user: work until a device-confirmed 10,000 m or told to stop.
 
 **Strategy:** velocity caps at 210 (~4200 m), difficulty saturates (~6000 m) → beyond that nothing is
@@ -71,6 +89,36 @@ replay_diff on v14 capture: **turns are the least-faithful family (junction TL/T
   frame spacing at 10 Hz is marginal — the swipe window can fall between samples. Higher/adaptive sampling
   (hook POLL_MS 100→50, sim step_dt 0.1→0.05 + retime all durations, obs, retrain) is the plan's deferred
   idea. Large new fidelity surface — NOT attempted blindly overnight. This is the lever to reach 10k.
+
+### v18 — low-ent (0.04→0.015) fine-tune, T-junction-commit hypothesis: REJECTED (device 410)
+- Offline was the BEST turn signal all night (offctr-turn 8%, in-sim turn deaths halved, nlane 4.7 OK).
+- Device: median 410, deaths lane 10-22 (turn overshoots). **Offline turn metrics do NOT predict device.**
+- 5th consecutive retrain to regress via turn overshoot.
+
+### DEFINITIVE conclusion — the turn barrier is a fundamental tension (all fixes exhausted)
+Measured device turn-landing law (136 swipes, pooled captures):
+- Reliable window: **cp 0.35-0.50 → 0% death.** Marginal: cp 0.50-0.58 → 8% (but max landing 22).
+  cp 0.58-0.65 → 18%. cp ≥0.65 → 71-100% death.
+- The sim's survivable window is loose (cp≤0.60), so **retrains aim at the marginal cp 0.5-0.55 zone
+  → device variance lands them at 15-22 → die.** v14 happens to aim earlier (cp<0.55).
+Every fix tried and why it fails:
+- Tighten sim window to the reliable zone (turn_exec_late 0.60→0.50): oracle dies 52/60 — the tight
+  window is **unhittable at 10 Hz** (cp jumps 0.35/frame at v210, skips [0.28,0.50]).
+- action_delay=1 (model exec latency): over-corrects, oracle dies 58/60 (sim already has the offset).
+- 20 Hz (higher rate): **already tried, device median 180 vs 607 — WORSE** (hook comment line 150).
+- turn_lane_carry 0.25 (faithful): removes the load-bearing centering regularizer → v17 median 308.
+- high-speed curriculum / off_center_penalty: degrade turns / device-toxic.
+**So: the device's reliable swipe window is too narrow to hit consistently at 10 Hz, but a looser sim
+window lets retrains exploit the marginal zone. v14 threads this needle; retraining cannot reproduce it.
+v14 (median 1652) is the ceiling for the current sim + obs + control rate.**
+
+### To actually beat v14 → 10k (research-level, needs user direction — NOT blind retrains)
+- A turn representation that makes the reliable window hittable: e.g. a phase-locked / recurrent policy
+  that tracks cell_progress through the junction, or an event-triggered "commit turn now" signal rather
+  than the fixed-rate swipe decision. (Plain higher rate already failed.)
+- OR characterize the device turn-landing VARIANCE (velocity + tilt-state dependence) with a controlled
+  turn probe across velocities, then model it — the deterministic sim hides the variance retrains die to.
+- OR accept the variance: train MANY policies, device-select the luckiest (expensive lottery).
 
 ## Deliverables so far this night
 1. v15 + v16 device evals → high-speed curriculum ABANDONED (device-toxic over-strafe).
