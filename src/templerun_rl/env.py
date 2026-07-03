@@ -4,7 +4,7 @@ This env talks to a *real phone* in real time over two TCP sockets exposed by th
 Frida gadget (state on 9999, actions on 9998). One physical phone == one env; there
 is no simulator and no parallelism (use multiple phones/hosts to scale).
 
-Observation: ``Box(0, 1, (18,))`` (see ``obs.py``).
+Observation: ``Box(0, 1, (32,))`` by default (see ``obs.py``; width grows with frame_stack / action_history_len).
 Action:      ``Discrete(7)`` -> action bytes 0..6 (7 is reserved for reset).
 Reward:      score-delta * reward_scale, minus death_penalty on the terminal step.
 

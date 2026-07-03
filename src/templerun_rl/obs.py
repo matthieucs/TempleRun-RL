@@ -1,6 +1,6 @@
 """Observation encoding: raw game-state dict -> normalized float32 vector.
 
-The policy sees an OBS_LEN-element ``Box(0, 1)`` vector (see OBS_FIELDS; 31 as of 2026-07-03). We deliberately exclude the raw
+The policy sees an OBS_LEN-element ``Box(0, 1)`` vector (see OBS_FIELDS; 32 as of 2026-07-03). We deliberately exclude the raw
 ``score`` (unbounded / accumulating -> would break MlpPolicy normalization); it feeds
 the reward instead and is always available in ``info["raw_state"]``.
 """
