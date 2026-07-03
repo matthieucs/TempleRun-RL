@@ -952,3 +952,29 @@ sustained frames? un-clip `_lane`), (b) `turn_lane_carry` recalibration (sim ove
 lane reads are unreliable → clamp), (c) approach-buffer + 1-frame latency (model the user's Q2 so the
 policy pre-swipes on approach → centered). Then retrain v10 (warm-start-surgery from v9_best for obs 31).
 Deploy floor stays v1 (1173); ppo_best still v7. Injector was alive on 3f80a3a this session (may drop).
+
+## 22. v10 = predicted_landing obs + approach-buffer — TURNS FIXED ON DEVICE (2026-07-03)
+
+**Built:** `turn_approach_buffer` flag (HandleDelayedTurning — approach-swipe latched → fires centered;
+validated 20→1823, spam/wrong die, scorecard GREEN flag-off) + `predicted_landing` obs (OBS_LEN 30→**31**,
+`cell_progress + DCPROG_PER_VEL·velocity`, DCPROG_PER_VEL=0.1/60, host-side no hook change) + aim-center
+reward re-keyed to the LANDING + `_peek_next()` bugfix (was `_next_cell()` = a GENERATOR advancing RNG).
+Commit cbfdb09. v10 = warm-start-surgery from v9 (zero-col insert @ obs idx 30,
+`scratchpad/warmstart_surgery.py`) + v9 recipe + `--turn-approach-buffer`. Best turn ckpt = **2.8M**.
+
+**OFFLINE (buffer ON): ≈ v9, approach-swipes = 0** — the warm-started junction-swiper NEVER adopted the
+buffer (no reward incentive; buffer AVAILABLE, unused). The sim has NO device latency → it CANNOT show the
+predicted_landing benefit; only the device can.
+
+**DEVICE (hook 16f, 8 eps, `captures/v10_16f.jsonl`): median 615, best 2608. THE PREDICTED_LANDING INPUT
+WORKS — TURNS FIXED.** Turn landings |lane| **median 4.0 / max 8.1** (v9 was 10–17 = fatal); swipe cprog
+0.42 (centered); turns landing off (|lane|>8) **1/6**; **turn deaths ~0**. Dominant death SHIFTED
+turns→**CREVASSE (5/8 at pt 33/35/36 ~600m)**. The ~1000m turn wall that blocked 40+ policies is DOWN on
+device via a pure PERCEPTION input (predicted_landing) — NO hook action rule. Median flat only because a
+CREVASSE regression (v8-style §20 negative-transfer under-jump — NOT shown offline @2.8M → a sim↔device
+crevasse fidelity gap) is newly EXPOSED now that runs survive turns and reach the crevasses.
+
+**DEPLOY:** v1 still the median floor (1173); v10 best-run 2608 but median 615 (crevasse-limited). Keep v1
+until the crevasse fix lands. **NEXT: crevasse takeoff fidelity** (measure device takeoff cprog vs sim at
+the mid/high transitions, §11/§20; the TURN frontier is CLOSED). Unused buffer + off-edge/carry replay_diff
+fixes remain optional. Registry: v10 = `runs/ppo_v10_best.zip` (=2.8M). See [[turn-latency-sampling-ideas]].
