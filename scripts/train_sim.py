@@ -108,10 +108,11 @@ def _oracle(st: dict) -> int:
     # measured sweep optimum at crevasse speed (lower wastes airtime early; >0.65 skips the window at
     # the ~0.38-cprog/step top-speed stepping). See sim_env wide_gap_extra_cells / sim-calibration memory.
     if st.get("next_wide_gap"):
-        # a step-UP crevasse (next_ground_change_higher) is a 1-cell RAISED ledge -> LATE takeoff (>=0.85;
-        # device probe 2026-07-03: 0.78 dies, 0.94 clears). A 2-cell LONG HOLE / step-down -> EARLIER
-        # takeoff (>=0.62) so the airtime SPANS both cells. Different mechanics -> the obs distinguishes.
-        thresh = 0.85 if st.get("next_ground_change_higher") else 0.62
+        # ZONE crevasse (next_ground_change_higher): jump EARLY — the velocity-dependent APEX model needs
+        # the jump to reach the raised ledge near apex; at speed you must launch earlier (human v210:
+        # ~2 cells early). Jump the instant the crevasse is in view. A 2-cell LONG HOLE -> a bit later
+        # (>=0.5) so the airtime spans both cells. Different mechanics -> the obs distinguishes.
+        thresh = 0.1 if st.get("next_ground_change_higher") else 0.5
         return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= thresh else int(C.Action.NOOP)
     # Anticipate: jump/slide on the LOOKAHEAD (obstacle is the NEXT cell) so the action is active
     # when entering the obstacle cell (the sim resolves obstacles on entry).

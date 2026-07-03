@@ -1026,3 +1026,25 @@ next_path_type ∈ [33-36]` (SingleLevelStepDownCap = zone crevasse; path_type I
 (was `nxt.stepup` = step-up-only, undeployable). Scorecard `--strict` GREEN. **v12 = warm-start v11
 (obs 32 unchanged, no surgery) + corrected obs.** NEXT: device eval v12 on hook 16i (device flaky this
 session — crash-loops/degraded; recover per §14). Deploy floor v1 (1173); v10 best-run 2608.
+
+## 25. CREVASSE FIDELITY FIXED — velocity-dependent APEX model (2026-07-03, human v210 data)
+
+**User's own 14,956m run (`human_calib_v2.jsonl`) = the v210 probe.** Velocity IS capped at 210 (max
+across the whole run; speed plateaus at ~4000m — the "feels faster" is perceptual). **The crevasse
+takeoff is VELOCITY-DEPENDENT** (human: takeoff ~2 cells BEFORE the gap @v210, on-gap @v150 — the LEAD
+scales with speed). Airtime is fixed (~0.8s) so at high speed the jump SPANS more cells → must launch
+EARLIER to land on the raised ledge. **The old sim modeled a FIXED late-takeoff gate → wrong at speed →
+the policy died.** (replay_diff had already localized it to the SIM, not the reward — reaction_bonus 0.1
+unchanged across versions.)
+
+**FIX (`sim_env._resolve_obstacle_on_enter`): APEX model.** A `stepup` crevasse survives only if the jump
+HEIGHT (parabola, 1 at apex) at the raised ledge >= `stepup_min_height` 0.45, where the span =
+`jump_duration*velocity/cell_len` cells. Auto velocity-dependent: EARLY jump clears (near apex), LATE dies
+(descending → clips the wall). Verified: LOW speed survive window [0.1,0.5], HIGH speed [0.1,0.3] (must
+jump earlier). **crevasse.speed high-speed progress +206m → +2246m** (the top-speed wall is GONE).
+Oracle/prompt jump EARLY (thresh 0.1 on crevasse) not late; crevasse.curve/speed checks flipped
+(early-clears). Scorecard `--strict` GREEN. `stepup_min_takeoff_prog` DEAD (replaced).
+
+**v13 = warm-start v11 + velocity-dependent crevasse + corrected obs, training.** Device: hook 16i emits
+next_ground_change_higher via next_path_type 33-36 (deployable; future PE_Level unreadable). NEXT: eval
+v13. User idea for after: per-obstacle isolation env swept across velocities (cracked narrows §19).

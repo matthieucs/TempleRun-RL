@@ -226,9 +226,11 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # An early takeoff (the 1-cell-lookahead reflex, or a jump 2 cells before the gap) => Fall; taking
     # off near the gap edge (as the oracle does, cprog>=0.62) clears. Level-DOWN + same-level long holes
     # are UNAFFECTED (only cells flagged stepup are checked). Keep below the oracle's 0.62 jump so it's fair.
-    "stepup_min_takeoff_prog": 0.85,   # [RE-INSTATED 2026-07-03, device probe crevasse_stepup_probe] a
-                                       # 1-cell level-UP crevasse needs takeoff cprog >= this on the
-                                       # pre-gap cell (probe: 0.78 DIES, 0.94 CLEARS). step-down unaffected.
+    "stepup_min_height": 0.45,         # [VELOCITY-DEP APEX model 2026-07-03, human_calib_v2 v210 probe] a
+                                       # step-UP crevasse survives only if the jump HEIGHT (parabola, 1 at
+                                       # apex) at the raised ledge >= this — auto velocity-dependent (span
+                                       # = jump_dur*vel/cell_len). 0.45 -> survive ~[0.13,0.87] of the span.
+    "stepup_min_takeoff_prog": 0.85,   # [DEAD — replaced by stepup_min_height apex model] kept for compat
     "gap_entry_grace": 0.2,            # [MEASURED 2026-07-02] solid lip at a wide-gap cell's entry:
                                        # grounded entry survives until this cprog (device takeoffs
                                        # 0.98-1.02 cleared); still grounded past it -> Fall
@@ -1161,34 +1163,37 @@ class TempleRunSimEnv(gym.Env):
                 self._kill(1)   # outside the narrow's safe band -> fell off the strip
                 return
         obst = int(cell.get("obstacles", 0))
+        if obst in _MUST_JUMP and cell.get("stepup"):
+            # STEP-UP = VELOCITY-DEPENDENT APEX model [device-MEASURED, human_calib_v2 v210 probe
+            # 2026-07-03]: the raised far ledge must be reached NEAR the jump APEX (still high). The jump
+            # height is a parabola over the span the airtime covers = jump_duration*velocity/cell_len
+            # cells; at HIGH speed the span is BIGGER, so the runner must take off EARLIER to be at apex
+            # at the ledge (human: ~2 cells early @v210, on-gap @v150 — the takeoff LEAD scales with
+            # velocity). Reach the ledge too EARLY (just launched, low) OR too LATE (descending, low) ->
+            # clip the raised wall -> Fall. Replaces the fixed-cprog gate (wrong at speed: it demanded a
+            # LATE takeoff; the human jumps EARLIER the faster they go). No lip-grace (a raised ledge, not
+            # a hole edge). step-down / holes are UNAFFECTED (handled below).
+            if self._jump_t <= 0.0 or self._jump_takeoff_pos is None:
+                self._kill(2)       # not airborne at the step-up ledge -> fell in the gap
+                return
+            span = float(self.cfg["jump_duration"]) * self._velocity / float(self.cfg["cell_length"])
+            d = self._long_pos() - self._jump_takeoff_pos   # cells travelled since takeoff
+            frac = d / max(1e-6, span)                      # 0=takeoff, 0.5=apex, 1=landing
+            height = 1.0 - (2.0 * frac - 1.0) ** 2          # parabola: 0 at ends, 1 at apex
+            if height < float(self.cfg["stepup_min_height"]):
+                self._kill(2)   # not high enough at the raised ledge -> clip it -> Fall
+            return
         if obst in _MUST_JUMP:
-            # Must be AIRBORNE crossing into the cell. For a 2-cell wide gap BOTH cells carry this check,
-            # so a single jump (airtime spans ~2 cells at crevasse speed) clears it only if timed at the
-            # gap edge; an early jump runs out of air by the 2nd cell -> Fall (the device wide-gap death).
-            # wide_gap_min_airtime is ~0 now (the 2-cell SPAN enforces the timing, not an airtime hack).
+            # Non-step-up wide gap (long hole / step-DOWN) or 1-cell hole: must be AIRBORNE crossing in.
+            # wide gaps get a lip-grace (the hole starts a bit into the cell; device jumps at cprog
+            # 0.98-1.02 still cleared). 1-cell holes keep the strict on-entry check.
             need = float(self.cfg["wide_gap_min_airtime"]) if cell.get("wide_gap") else 0.0
             if self._jump_t <= need:
-                # WIDE-GAP LIP [MEASURED 2026-07-02, controlled sweep]: the hole does not start at
-                # the cell boundary — device jumps fired at takeoff cprog 0.98-1.02 (i.e. from the
-                # gap cell's first meters) still cleared. Entering a wide-gap cell grounded is
-                # survivable for gap_entry_grace of the cell; still grounded past it -> Fall
-                # (checked in _advance). Non-wide (1-cell) holes keep the strict on-entry check.
                 if cell.get("wide_gap") and float(self.cfg["gap_entry_grace"]) > 0.0:
                     self._gap_grace_cell = self._cell_index
                 else:
                     self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / LevelChange/Tree
                 return
-            # STEP-UP LATE-TAKEOFF gate [RE-INSTATED 2026-07-03, device probe crevasse_stepup_probe]: a
-            # 1-cell level-UP crevasse (raised far ledge) needs a LATE takeoff so the runner is still
-            # RISING when it reaches the ledge — takeoff cprog >=0.94 CLEARS, 0.78 DIES; step-down/flat
-            # clears from ANY takeoff (0.09-1.0, 0/10). An early takeoff is already DESCENDING at the
-            # ledge -> clips it -> Fall. This is why v10 died 5/6 at device step-ups (~600m) after turns
-            # were fixed. Only cells flagged `stepup` are gated; step-down / holes UNAFFECTED.
-            if cell.get("stepup") and self._jump_takeoff_pos is not None:
-                takeoff_cprog = self._jump_takeoff_pos - (self._cell_index - 1)
-                if takeoff_cprog < float(self.cfg["stepup_min_takeoff_prog"]):
-                    self._kill(2)   # took off too early -> descending at the raised ledge -> Fall
-                    return
         elif obst in _MUST_SLIDE:
             # die if NOT sliding OR AIRBORNE (jumped into the low bar — device-fatal, 2026-07-03).
             if self._slide_t <= 0.0 or self._jump_t > 0.0:
