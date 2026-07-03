@@ -837,3 +837,57 @@ session (`capture_calib.py runs/ppo_best.zip --episodes 8 --turn-cooldown 0` on 
 v1 baseline device median 1173). Prior deploy `ppo_valid_v1_best` (device 1173) kept as the rollback.
 LESSON: rare critical skills need ISOLATION training (narrow-only), not just reward tuning on the full
 task.
+
+## 20. SPEED CURRICULUM (v8) — turns UP, crevasse/slide REGRESSED; two fidelity gaps fixed (2026-07-03)
+
+**User idea (fixes training-data diversity): randomize sim START SPEED.** The policy always resampled the
+slow early track → overfit it, rarely reaching new fast situations before dying. Fix = `curriculum_max_
+start_dist` (was BUILT, never enabled): a fraction of episodes jump-start at a random distance in [0,cmax],
+velocity set from the curve there, usual accel continues. Turns get harder at speed FAITHFULLY (cprog
+advances ~0.35/tick @vel210 vs 0.17 @vel100 — the `velocity*dt/cell_len` coupling) → trains the fast
+sections. Added `--curriculum-max-start-dist` flag (train_sim); `--sim-config` still the escape hatch.
+
+**v8 = warm-start v7 + `--curriculum-max-start-dist 8000` (recipe §12 + narrow-hold 0.18 + aim-center 1.0).**
+Best checkpoint **1.1M** (later COLLAPSED — 1.4M+ regressed; KEEP BEST not _final). Offline (curriculum
+config, bucketed by START velocity, `scratchpad/eval_v8.py`): high-speed turn survival **33%→58%** (v7→v8),
+narrows retained (|lane| 4.2), off-center-turn 27→24%. **The curriculum WORKED for turns.**
+
+**DEVICE (hook 16f, 8 eps): REGRESSED — median 830 (< v1 1173).** Clean 4/4 death split (capture
+`captures/speed_v8_16f.jsonl`, `scratchpad/eval_v8.py` classify):
+1. **CREVASSE falls (4/8, death_type 4, @v165-180 mid-speed):** the policy UNDER-JUMPS on approach (NoOp'd
+   71% of next_must_jump frames — the user's "hardly jumping") then jumps too late on the gap cell
+   (is_jumping never engages), or too EARLY (ep0: airtime ends mid-gap). The curriculum's high-speed weight
+   PULLED the single jump-timing policy toward the fast regime → degraded the MID-speed crevasses the
+   device reaches FIRST. NEGATIVE TRANSFER — the sim high-speed crevasse is self-consistent (new
+   `crevasse.speed` check: win_lo≡win_hi≡[0.1..0.8]), so NOT a broken sim window, pure interference.
+2. **SLIDE-then-JUMP death (4/8, death_type 3) — NEW bug (user-caught):** slides correctly UNDER the
+   obstacle, then fires a spurious JUMP mid-slide → pops UP into the low bar → death (3 explicit
+   JUMP-while-sliding events confirmed). New because (a) the high-speed policy is more erratic (stray
+   jumps), (b) **the SIM never modeled jump-into-slide = death** → the policy was never punished. A sim
+   FIDELITY GAP.
+
+**COMPUTE IS NOT THE FIX (user asked "train longer?"): the BEST checkpoint was 1.1M; 1.4M+ got WORSE.**
+More steps on this curriculum = more collapse. Failures are DETERMINISTIC mis-timings + a spurious action
+the sim can't teach against — not undertraining. Fix = DESIGN + fidelity, validated offline.
+
+**TWO FIXES BUILT (scorecard GREEN 12/12, +2 new permanent guard checks):**
+- **Jump-into-slide = death** (`sim_env` `_resolve_obstacle_on_enter` slide branch + per-tick `_advance`:
+  airborne `_jump_t>0` on a `_MUST_SLIDE` cell → `_kill`). Reward `slide_jump_penalty` docks a JUMP when
+  must_slide/next_must_slide/is_sliding (`--slide-jump-penalty`, try 0.15). New scorecard `slide.jump`
+  (slider survives 0.92 / jumper dies 0.00; both clear jumps identically → isolates the slide death).
+- **Curriculum TAMING** (`curriculum_deep_start_frac` 0.35 — was a hardcoded 0.5; `curriculum_dist_power`
+  1.5 → sample d=cmax·u^power, biases start-distance toward the mid-speed ramp so high-speed doesn't drown
+  the mid-speed crevasses). New scorecard `crevasse.speed` (high-speed crevasse window must be non-empty
+  AND overlap low-speed — the across-speed check the old slow-only `crevasse.curve` lacked; would have
+  caught this regression before device).
+
+**"the sim is closed" was an OVERCLAIM (user rightly pushed):** scorecard-GREEN = the ~10 mechanics WITH a
+device reference agree; it is structurally BLIND to any mechanic/interaction never checked (jump-into-slide
+was one — an unknown-unknown). Open gaps: turn cmd→exec LATENCY (§18, unmodeled, the #1 turn killer);
+SUSPECTED-unknown (asked user, pending) = mid-run speed SPIKES/boosts (would break velocity=f(distance)),
+smooth path CURVES (non-junction bends the policy can't swipe), hazards right AFTER a turn, 2-action
+obstacle combos. Deploy floor stays v1 (device 1173); `ppo_best` still v7. v8 shelved (`ppo_speed_v8_best`
+= 1.1M).
+
+**NEXT: v9 = warm-start v7 + `--slide-jump-penalty 0.15` + TAMED curriculum (`--curriculum-max-start-dist
+5000`, frac 0.35, power 1.5 defaults).** Device-eval vs v1 (1173) + classify crevasse/slide deaths.

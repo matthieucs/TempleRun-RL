@@ -222,24 +222,29 @@ def check_narrow_map(ref) -> dict:
             "tol": "side sign match", "pass": not mism}
 
 
+def _jump_at(x):
+    """Jump-at-cprog crevasse driver: mirror the device --gap-override — x gates the ANTICIPATORY
+    fire (gap still ahead); once ON a must-jump cell (the lip), jump immediately."""
+    def pol(st):
+        if st["must_jump"]:
+            return C.Action.JUMP
+        if ((st.get("next_wide_gap") or st.get("next_must_jump"))
+                and float(st.get("cell_progress", 0.0)) >= x):
+            return C.Action.JUMP
+        return C.Action.NOOP
+    return pol
+
+
+_CREVASSE_CFG = dict(domain_rand=False, curriculum_max_start_dist=0.0,
+                     turn_prob=0.0, turn_prob_late=0.0, obstacle_prob=0.0,
+                     narrows_after_distance=1e9, zone_change_every_cells=8)
+
+
 def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:
     """Jump-at-cprog sweep on a crevasse-dense track -> min cprog that survives; must sit in the
     device takeoff band (fatal-below / clearing-above)."""
-    cfg = dict(domain_rand=False, curriculum_max_start_dist=0.0,
-               turn_prob=0.0, turn_prob_late=0.0, obstacle_prob=0.0,
-               narrows_after_distance=1e9, zone_change_every_cells=8)
-
-    def jump_at(x):
-        def pol(st):
-            # mirror the device --gap-override driver: x gates the ANTICIPATORY fire (gap still
-            # ahead); once ON a must-jump cell (the lip), jump immediately.
-            if st["must_jump"]:
-                return C.Action.JUMP
-            if ((st.get("next_wide_gap") or st.get("next_must_jump"))
-                    and float(st.get("cell_progress", 0.0)) >= x):
-                return C.Action.JUMP
-            return C.Action.NOOP
-        return pol
+    cfg = dict(_CREVASSE_CFG)
+    jump_at = _jump_at
 
     surv_by_x = {}
     for x in [round(0.1 * k, 1) for k in range(1, 10)]:
@@ -268,6 +273,59 @@ def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:
     return {"ref": f"controlled sweep: device clears at targets {sorted(dev_ok_x)}",
             "sim": f"sweep {surv_by_x}" + ("" if not mism else f" | MISM: {'; '.join(mism)}"),
             "tol": "sim ≥0.6 survival wherever device majority-clears", "pass": not mism}
+
+
+def check_crevasse_speed(n_eps=8, seed0=32000) -> dict:
+    """ACROSS-SPEED crevasse consistency (phone-free self-check, added 2026-07-03 after ppo_speed_v8
+    regressed). The prior crevasse.curve ran ONLY at slow speed (start ~vel100) — blind to the fast
+    sections the high-speed curriculum trains. v8 died 4/8 at crevasses @v165-180: the high-speed
+    takeoff window was mistimed/empty, so the policy learned 'jumping is low-value' and under-jumped
+    the MID-speed crevasses too. Requirement: the HIGH-speed crevasse must (a) have a survivable
+    takeoff window at all, and (b) OVERLAP the low-speed window — so ONE learnable timing clears both
+    speeds. An empty or disjoint high-speed window = the sim will corrupt crevasse training."""
+    def sweep(start_dist):
+        cfg = dict(_CREVASSE_CFG, start_distance=float(start_dist))
+        return {round(0.1 * k, 1): round(_rollout_policy(_jump_at(round(0.1 * k, 1)), cfg,
+                n_eps, seed0, max_steps=1200)[1], 2) for k in range(1, 10)}
+    lo = sweep(5.3)        # ~vel 100 (run start)
+    hi = sweep(5000.0)     # ~vel 210 (saturated top speed — the fast sections)
+    win_lo = {x for x, f in lo.items() if f >= 0.6}
+    win_hi = {x for x, f in hi.items() if f >= 0.6}
+    overlap = sorted(win_lo & win_hi)
+    ok = bool(win_hi) and bool(overlap)
+    return {"ref": "high-speed crevasse must be clearable with a takeoff timing overlapping low-speed",
+            "sim": f"win_lo={sorted(win_lo)} win_hi={sorted(win_hi)} overlap={overlap}",
+            "tol": "high-speed window non-empty AND overlaps low-speed", "pass": ok}
+
+
+def check_slide_jump(n_eps=12, seed0=33000) -> dict:
+    """JUMP-INTO-SLIDE death (modeled 2026-07-03 after ppo_speed_v8: 4/8 deaths were slide-then-jump).
+    A slide-obstacle (TreeSlide/FlameTower) is a LOW bar you pass UNDER — a SLIDER survives, a JUMPER
+    pops up into it and DIES. Guards the fidelity fix so it can't silently regress."""
+    cfg = dict(domain_rand=False, turn_prob=0.0, turn_prob_late=0.0, narrows_after_distance=1e9,
+               zone_change_every_cells=10**6, obstacle_prob=0.5, slides_after_distance=0.0,
+               obstacle_type_weights={5: 0.5, 6: 0.5})
+
+    # Both policies clear JUMP-obstacles identically (long holes still spawn); they differ ONLY on
+    # slide cells — slider slides (survives), jumper jumps into the low bar (dies). Isolates the death.
+    def _jumps(st):
+        return st.get("next_must_jump") or st.get("must_jump") or st.get("next_wide_gap")
+
+    def slider(st):
+        if st.get("next_must_slide") or st.get("must_slide"):
+            return C.Action.SLIDE
+        return C.Action.JUMP if _jumps(st) else C.Action.NOOP
+
+    def jumper(st):
+        if st.get("next_must_slide") or st.get("must_slide"):
+            return C.Action.JUMP
+        return C.Action.JUMP if _jumps(st) else C.Action.NOOP
+
+    s_surv = _rollout_policy(slider, cfg, n_eps, seed0, max_steps=800)[1]
+    j_surv = _rollout_policy(jumper, cfg, n_eps, seed0, max_steps=800)[1]
+    return {"ref": "slider survives slide-obstacles / jumper dies (jumps into the low bar)",
+            "sim": f"slider surv={s_surv:.2f} jumper surv={j_surv:.2f}",
+            "tol": "slider ≥0.70 / jumper ≤0.15", "pass": s_surv >= 0.70 and j_surv <= 0.15}
 
 
 def check_stumble(ref) -> dict:
@@ -369,6 +427,8 @@ def main() -> None:
         "narrow.semantics": check_narrow_semantics(n=n_nar),
         "narrow.map": check_narrow_map(ref),
         "crevasse.curve": check_crevasse_curve(ref, n_eps=4 if a.fast else 8),
+        "crevasse.speed": check_crevasse_speed(n_eps=4 if a.fast else 8),
+        "slide.jump": check_slide_jump(n_eps=6 if a.fast else 12),
         "stumble.window": check_stumble(ref),
     }
 

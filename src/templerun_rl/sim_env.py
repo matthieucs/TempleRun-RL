@@ -254,7 +254,14 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # window gets HARDER late (cprog steps faster per frame). To train the fast sections without first
     # surviving 4k, start a fraction of episodes at a random high distance (velocity set from the curve
     # there + the difficulty ramp already keyed to distance). 0 = always start slow.
-    "curriculum_max_start_dist": 0.0,  # if >0, sample episode start distance uniform [0, this]
+    "curriculum_max_start_dist": 0.0,  # if >0, sample episode start distance in [0, this]
+    # TAMING (2026-07-03): the raw 50%-uniform curriculum over-weighted MAX speed (velocity saturates
+    # ~4000m, so uniform[0,8000] puts ~half the deep-starts at flat top speed) and CORRUPTED the
+    # mid-speed crevasse jump-timing the device actually reaches first (ppo_speed_v8 regressed 1173->830,
+    # 4/8 crevasse falls at v165-180). Two knobs: FRACTION of episodes that jump-start, and a distance
+    # POWER that biases the sample toward the low/mid-speed ramp (power>1 -> d = cmax*u**power skews to 0).
+    "curriculum_deep_start_frac": 0.35,  # P(an episode jump-starts) — was a hardcoded 0.5
+    "curriculum_dist_power": 1.5,        # >1 biases start-distance toward 0 (keep mid-speed well-sampled)
     # --- D. Action timings (seconds; durations of the transient flags) -------
     # [DEVICE-MEASURED 2026-06-26] is_jumping run-length median 8 frames @10Hz = 0.80s (tight: p90=0.8);
     # is_sliding median 7 = 0.70s. The old 0.6 made the runner airborne ~2x too little vs real (14% vs
@@ -373,6 +380,7 @@ class TempleRunSimEnv(gym.Env):
         aim_center_weight: float = 0.0,
         velocity_drop_penalty: float = 0.0,
         off_center_penalty: float = 0.0,
+        slide_jump_penalty: float = 0.0,
         action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
         frame_stack: int = C.DEFAULT_FRAME_STACK,
         **_ignored: Any,
@@ -419,6 +427,7 @@ class TempleRunSimEnv(gym.Env):
         self.aim_center_weight = float(aim_center_weight)
         self.velocity_drop_penalty = float(velocity_drop_penalty)
         self.off_center_penalty = float(off_center_penalty)
+        self.slide_jump_penalty = float(slide_jump_penalty)
 
         # Velocity curve (distance -> velocity) for fast interpolation in _advance.
         vc = self.cfg.get("velocity_curve") or []
@@ -468,8 +477,11 @@ class TempleRunSimEnv(gym.Env):
         self._distance_real = float(self.cfg["start_distance"])  # real-scale DistanceTraveled (reward signal)
         # high-speed curriculum: jump-start a fraction of episodes deep into the run (fast + dense).
         _cmax = float(self.cfg.get("curriculum_max_start_dist", 0.0))
-        if _cmax > 0.0 and self.track_source != "replay" and self._rng.random() < 0.5:
-            self._distance_real = float(self.cfg["start_distance"]) + float(self._rng.uniform(0.0, _cmax))
+        _frac = float(self.cfg.get("curriculum_deep_start_frac", 0.5))
+        if _cmax > 0.0 and self.track_source != "replay" and self._rng.random() < _frac:
+            _pw = max(0.1, float(self.cfg.get("curriculum_dist_power", 1.0)))
+            _u = self._rng.random() ** _pw     # power>1 skews toward 0 -> more mid-speed, less flat-top
+            self._distance_real = float(self.cfg["start_distance"]) + _u * _cmax
             _vc = getattr(self, "_vel_curve_d", None)
             if _vc is not None:
                 self._velocity = float(np.interp(self._distance_real, _vc, self._vel_curve_v))
@@ -809,6 +821,7 @@ class TempleRunSimEnv(gym.Env):
             aim_center_weight=self.aim_center_weight,
             velocity_drop_penalty=self.velocity_drop_penalty,
             off_center_penalty=self.off_center_penalty,
+            slide_jump_penalty=self.slide_jump_penalty,
             prev_velocity=float(self._prev_state.get("velocity", 0.0)),
             velocity=float(state.get("velocity", 0.0)),
             lane=float(self._prev_state.get("lane", 0.0)),
@@ -1044,6 +1057,17 @@ class TempleRunSimEnv(gym.Env):
             self._dist_into_cell -= cell_len
             self._cross_into_next_cell()
 
+        # JUMP-INTO-SLIDE-OBSTACLE death [DEVICE-MEASURED 2026-07-03, ppo_speed_v8 eval, 4/8 deaths]: a
+        # slide-obstacle (TreeSlide / FlameTower) is a LOW bar the runner passes UNDER — being AIRBORNE
+        # in that cell (jumped INTO it on entry, or fired a JUMP *mid-slide*) collides -> death. The old
+        # model only checked "not sliding" ON ENTRY, so a jump issued DURING the slide cell was
+        # survivable in-sim but FATAL on device (the "slid then jumped and died" the user reported).
+        # Check every tick while airborne on a must-slide cell.
+        if not self._is_dead and self._jump_t > 0.0:
+            _oc = int(self._current_cell().get("obstacles", 0))
+            if _oc in _MUST_SLIDE:
+                self._kill(5 if _oc == OBST_FLAME_TOWER else 3)
+
         # wide-gap LIP deadline: entered a wide-gap cell grounded (survivable lip) — still grounded
         # past gap_entry_grace of the cell -> fell in. A takeoff (or leaving the cell) clears it.
         if self._gap_grace_cell is not None and not self._is_dead:
@@ -1111,7 +1135,8 @@ class TempleRunSimEnv(gym.Env):
             # step-ups; human clears 2->3 at 0.16-0.57). Early jumps are fine when airtime spans the
             # gap — the per-cell airborne check above IS the mechanic. Gate removed (knob [DEAD]).
         elif obst in _MUST_SLIDE:
-            if self._slide_t <= 0.0:
+            # die if NOT sliding OR AIRBORNE (jumped into the low bar — device-fatal, 2026-07-03).
+            if self._slide_t <= 0.0 or self._jump_t > 0.0:
                 self._kill(5 if obst == OBST_FLAME_TOWER else 3)  # Burnt / Slide
         # OBST_NARROW / OBST_NONE: no death here (narrow handled above; LevelChange is in _MUST_JUMP).
 

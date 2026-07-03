@@ -49,10 +49,12 @@ def _make_env(args, rank: int):
             aim_center_weight=args.aim_center_weight,
             velocity_drop_penalty=args.velocity_drop_penalty,
             off_center_penalty=args.off_center_penalty,
+            slide_jump_penalty=args.slide_jump_penalty,
             action_history_len=args.action_history_len,
             frame_stack=args.frame_stack,
             config={"domain_rand": bool(args.domain_rand),
                     "turn_linger_frames": int(args.turn_linger),
+                    "curriculum_max_start_dist": float(args.curriculum_max_start_dist),
                     **(json.loads(args.sim_config) if args.sim_config else {})},
             seed=args.seed + rank,
         )
@@ -306,6 +308,19 @@ def main() -> None:
                         "action; once drifted, NoOp is free) -> the policy strafes randomly on straights + "
                         "arrives at turns off-center, where turn_lane_carry (~3x) amplifies it into a >kill "
                         "landing = the dominant device death once turns are handled. try ~0.03.")
+    p.add_argument("--slide-jump-penalty", type=float, default=0.0,
+                   help="dock a JUMP issued when a slide-obstacle (TreeSlide/FlameTower) is here/ahead "
+                        "or a slide is in progress. Jumping into a low slide-bar is FATAL on device "
+                        "(measured 2026-07-03, ppo_speed_v8: 4/8 deaths were slide-then-jump). Mirrors "
+                        "the sim jump-into-slide death model. try ~0.15.")
+    p.add_argument("--curriculum-max-start-dist", type=float, default=0.0,
+                   help="HIGH-SPEED / START-STATE curriculum: if >0, ~50%% of episodes jump-start at a "
+                        "random distance in [0, this] (velocity set from the curve there -> usual accel "
+                        "continues). Breaks start-state bias (policy always resamples the slow early "
+                        "track, overfits it) + trains the FAST sections (turns get harder at speed: cprog "
+                        "advances ~0.35/tick @vel210 vs 0.17 @vel100) without first surviving 4k. Velocity "
+                        "saturates ~4000m so 6000-10000 gives full velocity + late-track density. "
+                        "0 = always start slow. Overridden by --sim-config's key if both set.")
     p.add_argument("--init-from", default=None,
                    help="warm-start: load weights from this .zip (same obs/action/net-arch) before "
                         "training. Use to continue from a good base (e.g. runs/ppo_valid_v1_best.zip) "

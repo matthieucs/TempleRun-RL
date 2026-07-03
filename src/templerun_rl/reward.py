@@ -34,6 +34,7 @@ def shaping_reward(
     aim_center_weight: float = 0.0,
     velocity_drop_penalty: float = 0.0,
     off_center_penalty: float = 0.0,
+    slide_jump_penalty: float = 0.0,
     prev_velocity: float = 0.0,
     velocity: float = 0.0,
     lane: float = 0.0,
@@ -46,9 +47,17 @@ def shaping_reward(
     """
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
             and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty
-            and not narrow_hold_bonus and not velocity_drop_penalty and not off_center_penalty):
+            and not narrow_hold_bonus and not velocity_drop_penalty and not off_center_penalty
+            and not slide_jump_penalty):
         return 0.0
     r = 0.0
+    # JUMP into a slide-obstacle is FATAL on device [MEASURED 2026-07-03, ppo_speed_v8: 4/8 deaths] —
+    # a TreeSlide/FlameTower is a LOW bar you pass UNDER; jumping lifts you into it. Dock a JUMP issued
+    # when a slide-obstacle is HERE / AHEAD or a slide is already in progress, so the policy stops
+    # popping up mid-slide (the "slid then jumped and died" bug). Mirrors the sim death model.
+    if slide_jump_penalty and action == int(C.Action.JUMP) and prev is not None:
+        if prev.get("must_slide") or prev.get("next_must_slide") or prev.get("is_sliding"):
+            r -= slide_jump_penalty
     # VELOCITY-DROP penalty: dock a real velocity LOSS (a stumble / clipping a step-up wall slows the
     # runner). Discourages the too-early crevasse jump that clips the raised wall + gets slowed (user-
     # reported). Ignores the normal accel; only fires on a drop beyond a small deadband.
