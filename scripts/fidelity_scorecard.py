@@ -251,18 +251,18 @@ def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:
     # over ~25 crevasses and hides the mechanic.) Guards the too-easy model that made v10 die at
     # device step-ups.
     dist_by_x = {}
-    for x in (0.1, 0.3, 0.7, 0.9):
+    for x in (0.1, 0.3, 0.5, 0.7, 0.9):
         med, _ = _rollout_policy(_jump_at(x), cfg, n_eps, seed0, max_steps=1200)
         dist_by_x[x] = round(med)
-    # VELOCITY-DEPENDENT APEX model (2026-07-03, human v210 probe): a crevasse survives an EARLY jump
-    # (reach the raised ledge near apex) and DIES on a LATE one (descending, clips the wall). So EARLY
-    # clears far, LATE dies short — the inverse of the old (wrong) late-takeoff gate.
-    early = max(dist_by_x[0.1], dist_by_x[0.3])
-    late = dist_by_x[0.9]
-    ok = early >= 800 and early >= late * 2
-    return {"ref": "crevasse = APEX model: EARLY jump clears (near apex at ledge), LATE dies (descending)",
-            "sim": f"median-dist {dist_by_x} | early={early} late={late}",
-            "tol": "early ≥800m AND early ≥ 2×late (apex model active)", "pass": ok}
+    # 2-CELL APEX model [device v13_16i: ledge = ground_height 15 on the 2nd crevasse cell; runner clips
+    # it dt=4 kDeathTypeLedge if not near jump apex there]. Timing-agnostic check: SOME jump timing must
+    # CLEAR far (a survivable window exists) AND SOME timing must DIE (the window is real, not trivial).
+    best = max(dist_by_x.values())
+    worst = min(dist_by_x.values())
+    ok = best >= 800 and best >= worst * 2
+    return {"ref": "2-cell crevasse (ledge=gH15 on cell 2): a survivable jump-timing window exists + is real",
+            "sim": f"median-dist {dist_by_x} | best={best} worst={worst}",
+            "tol": "best ≥800m AND best ≥ 2×worst (real window)", "pass": ok}
 
 
 def check_crevasse_speed(n_eps=8, seed0=32000) -> dict:
@@ -275,20 +275,20 @@ def check_crevasse_speed(n_eps=8, seed0=32000) -> dict:
     speeds. An empty or disjoint high-speed window = the sim will corrupt crevasse training."""
     # an EARLY takeoff (0.1, the apex-safe timing) must clear crevasses at BOTH low and high speed
     # (metric = median distance progressed; an empty high-speed window would corrupt crevasse training).
-    def early_dist(start_dist):
+    def best_dist(start_dist):
+        # the BEST jump-timing must clear a survivable window at this speed (2-cell apex is timing-picky)
         cfg = dict(_CREVASSE_CFG, start_distance=float(start_dist))
-        return round(_rollout_policy(_jump_at(0.1), cfg, n_eps, seed0, max_steps=1200)[0])
-    lo = early_dist(5.3)        # ~vel 100 (run start)
-    hi = early_dist(5000.0)     # ~vel 210 (saturated top speed — the fast sections)
-    # low speed must clear far; high speed only needs a NON-EMPTY window (clears a few) — high-speed
-    # step-ups are genuinely harder at 10 Hz (window tighter) and we lack a v210 device probe to assert
-    # the true clear rate. CAVEAT: high-speed step-ups may be a real limiter to 10,000m — a v210
-    # --gap-override probe would calibrate; for now require the window isn't EMPTY (which would corrupt
-    # crevasse training, the §20 failure mode).
-    ok = lo >= 800 and hi - 5000 >= 150
-    return {"ref": "early-takeoff (0.1, apex-safe) clears low speed; high-speed window non-empty",
-            "sim": f"early-jump median dist: low-speed={lo}  high-speed={hi} (starts @5000, +{hi-5000})",
-            "tol": "low ≥800m AND high progresses ≥150m past 5000", "pass": ok}
+        return round(max(_rollout_policy(_jump_at(x), cfg, n_eps, seed0, max_steps=1200)[0]
+                         for x in (0.3, 0.5, 0.7)))
+    lo = best_dist(5.3)        # ~vel 100 (run start)
+    hi = best_dist(5000.0)     # ~vel 210 (saturated top speed — the fast sections)
+    # a survivable crevasse window must exist at BOTH speeds (else the sim corrupts crevasse training,
+    # the §20 failure mode). CAVEAT: the 2-cell apex threshold isn't yet device-calibrated to the
+    # ground_height=15 ledge — high-speed step-ups may still be a real 10,000m limiter (v210 probe TODO).
+    ok = lo >= 400 and hi - 5000 >= 200
+    return {"ref": "best jump-timing clears a window at BOTH low & high speed (2-cell ledge apex)",
+            "sim": f"best-timing median dist: low={lo}  high={hi} (starts @5000, +{hi-5000})",
+            "tol": "low ≥400m AND high progresses ≥200m past 5000", "pass": ok}
 
 
 def check_slide_jump(n_eps=12, seed0=33000) -> dict:

@@ -539,6 +539,7 @@ class TempleRunSimEnv(gym.Env):
         self._b2b_obstacles = 0
         # wide-gap (2-cell long hole / zone change) continuation
         self._pending_gap = 0
+        self._pending_gap_stepup = False   # the pending crevasse's 2nd cell is a raised ledge (step-UP)
         self._pending_gap_obst = 0
         self._pending_gap_type = 1
         self._pending_gap_level = 2
@@ -610,6 +611,10 @@ class TempleRunSimEnv(gym.Env):
             e = _element(type=self._pending_gap_type, level=self._pending_gap_level,
                          obstacles=self._pending_gap_obst, is_turn=False)
             e["wide_gap"] = True
+            # the LAST continuation cell of a zone crevasse is the RAISED LEDGE (apex check fires here)
+            if self._pending_gap == 0 and getattr(self, "_pending_gap_stepup", False):
+                e["stepup"] = True
+                self._pending_gap_stepup = False
             return e
         # NARROW-strip continuation: the 2nd+ cell of a multi-cell narrow (same safe lane). Each cell
         # re-applies the off-lane Fall on entry, so the policy must HOLD the safe lane across the strip.
@@ -673,21 +678,20 @@ class TempleRunSimEnv(gym.Env):
                 # 22/23. Bias the mid-step DOWN so the stationary time matches (down 0.65 / up 0.35).
                 self._zone_level += -1 if self._rng.random() < 0.65 else 1
             level = int(self._zone_level)   # the crevasse cell already sits in the NEW zone (matches live capture)
-            # DEVICE-MEASURED gap width: a transition touching HIGH (mid<->high) is a 2-cell gap; low<->mid
-            # ZONE crevasse = a SINGLE cell [device probe crevasse_stepup_probe 2026-07-03]: BOTH step-up
-            # and step-down clear from a LATE takeoff (0.94-1.04), which a 2-cell airtime span CANNOT ->
-            # it is NOT a 2-cell gap. step-UP adds the late-takeoff GATE (_resolve_obstacle_on_enter);
-            # step-down clears from ANY takeoff. (The old 2-cell model conflicted with the gate -> the
-            # gate was wrongly "refuted" §15; that sweep saw step-downs, which clear broadly.)
-            self._pending_gap = 0
+            # ZONE crevasse [DEVICE-MEASURED 2026-07-03, v13_16i death frames]: a 2-CELL structure —
+            # cell 1 = the GAP, cell 2 = the RAISED LEDGE (ground_height jumps to 15 there; the runner
+            # dies dt=4 kDeathTypeLedge AT the 2nd cell while airborne but not high enough). So the APEX
+            # check must fire on the 2nd cell (the ledge), and the runner must reach it near the jump
+            # apex. Model it as a 2-cell gap: cell1 = plain gap (airborne needed), cell2 = the ledge
+            # (apex check, flagged `stepup`).
+            self._pending_gap = 1          # -> 1 continuation cell = the raised ledge
             self._pending_gap_obst = OBST_LEVEL_CHANGE
             self._pending_gap_type = 35    # ~ real SingleLevelStepDownCap path_type (obs match)
             self._pending_gap_level = int(self._zone_level)
+            self._pending_gap_stepup = bool(self._zone_level > prev_zone)  # ledge cell = step-UP
             ptype = 35
             wide = True
-            # STEP-UP flag: the altitude INCREASED -> the far ground is raised into a wall; the entry
-            # cell demands a LATE takeoff (see _resolve_obstacle_on_enter). Level-down keeps stepup=False.
-            stepup = bool(self._zone_level > prev_zone)
+            stepup = False                 # cell 1 is the GAP (airborne), not the ledge; ledge is cell 2
 
         # A turn cell carries no obstacle (the player must turn here); the cell right after a junction
         # is also kept clear (min_clear_after_turn) — a must-jump obstacle there is unclearable (you

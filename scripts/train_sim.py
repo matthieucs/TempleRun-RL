@@ -112,7 +112,7 @@ def _oracle(st: dict) -> int:
         # the jump to reach the raised ledge near apex; at speed you must launch earlier (human v210:
         # ~2 cells early). Jump the instant the crevasse is in view. A 2-cell LONG HOLE -> a bit later
         # (>=0.5) so the airtime spans both cells. Different mechanics -> the obs distinguishes.
-        thresh = 0.1 if st.get("next_ground_change_higher") else 0.5
+        thresh = 0.5 if st.get("next_ground_change_higher") else 0.5
         return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= thresh else int(C.Action.NOOP)
     # Anticipate: jump/slide on the LOOKAHEAD (obstacle is the NEXT cell) so the action is active
     # when entering the obstacle cell (the sim resolves obstacles on entry).
