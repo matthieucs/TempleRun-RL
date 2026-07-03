@@ -1308,10 +1308,12 @@ class TempleRunSimEnv(gym.Env):
             "next_must_jump": nobst in _MUST_JUMP,
             "next_must_slide": nobst in _MUST_SLIDE,
             "next_wide_gap": bool(nxt.get("wide_gap")),   # a wide gap ahead (long hole OR zone crevasse)
-            # STEP-UP ahead: the next cell is a level-UP crevasse (raised ledge) -> needs a LATE takeoff
-            # (vs a 2-cell long hole which needs an earlier takeoff to span). The policy distinguishes
-            # the two jump timings via this. Device streams ground_change_higher; mirror as a lookahead.
-            "next_ground_change_higher": bool(nxt.get("stepup")),
+            # ZONE-CREVASSE ahead: the next cell is an altitude transition (LevelChange) -> jump LATE (a
+            # step-UP needs it, a step-down tolerates it); a 2-cell LONG HOLE (OBST_HOLE) needs an EARLIER
+            # takeoff to span it. The policy distinguishes the two jump timings via this. DEPLOYABLE: the
+            # device hook emits it from next_path_type ∈ 33-36 (the future PE_Level is unreadable=0, but
+            # the SingleLevelStepDownCap path_type is reliable). Was `stepup` (step-up only, undeployable).
+            "next_ground_change_higher": int(nxt.get("obstacles", 0)) == OBST_LEVEL_CHANGE,
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).

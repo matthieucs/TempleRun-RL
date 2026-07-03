@@ -177,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-16f'; // 16f = 16e + reliable turn-direction (native CanTurn, opposite origin)
+const HOOK_VERSION = 'lateral-accel-16i'; // 16i = next_ground_change_higher via LevelChange obstacle (deployable; future PE_Level unreadable)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -268,6 +268,8 @@ function narrowStrafeDirFor(subtype, facing) {   // -1 strafe left, +1 strafe ri
 const STRAFE_COOLDOWN_TICKS = 14;   // ~0.25 s strafe settle @ 60 Hz Update — don't restrafe mid-strafe
 let cachedPathType = -1;            // nearest cell PE_Type
 let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
+let cachedNextGroundHigher = false; // forward cell is a ZONE CREVASSE (next_path_type 33-36) -> jump LATE
+                                    // (§23). Uses path_type, NOT PE_Level (future cells' Level reads 0).
 // REGION-SAMPLED narrow band (perception, replaces the guessed NARROW_SIDE map): when the forward
 // cell is a narrow (17-30), test lane offsets -7..+7 against ITS Region2D polygons via the game's
 // IsPointInsideAnyRegion2D -> the true safe lateral band [lo, hi] in lane units (+ = right of travel).
@@ -676,6 +678,15 @@ function installHooks() {
               cachedNextPathType = nxt.add(OFF.PE_Type).readS32();
               cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE)
                 || WIDE_GAP_TYPES.indexOf(cachedNextPathType) !== -1;
+              // STEP-UP lookahead: the altitude Level RISES within the next 2 cells -> a raised ledge
+              // ahead (needs a LATE takeoff). obs `next_ground_change_higher` (§23). Device crevasse is
+              // a 2-CELL step (measured 2026-07-03: approach L2 -> crev1 L2 -> crev2 L3), so the rise is
+              // 2 cells ahead on the approach -> look at BOTH nxt and nxt-nxt (else it never fires early).
+              // ZONE-CREVASSE flag (deployable, via path_type — reliable, unlike future PE_Level=0): the
+              // next wide gap is a SingleLevelStepDownCap (pt 33-36 = altitude transition) -> jump LATE
+              // (a step-UP needs it, a step-down tolerates it). A LONG HOLE (pt 12/13/15/16) needs an
+              // EARLIER takeoff to span 2 cells. Fed into the policy's `next_ground_change_higher` slot.
+              cachedNextGroundHigher = (cachedNextPathType >= 33 && cachedNextPathType <= 36);
               cachedNextHasCoins = readBool(nxt, OFF.PE_HasCoins);
               cachedNextCoinStart = readI32(nxt, OFF.PE_CoinLocStart);
               cachedNextCoinEnd = readI32(nxt, OFF.PE_CoinLocEnd);
@@ -705,6 +716,7 @@ function installHooks() {
               cachedNextIsTurn = cachedNextCanLeft = cachedNextCanRight = false;
               cachedNextMustJump = cachedNextMustSlide = false;
               cachedNextIsLevelChange = false;
+              cachedNextGroundHigher = false;
               cachedNextHasCoins = false; cachedNextCoinStart = 0; cachedNextCoinEnd = 0;
               cachedNextPathType = -1;
               cachedNarrowBandLo = cachedNarrowBandHi = null;
@@ -1015,6 +1027,7 @@ function snapshot() {
   s.next_must_jump = cachedNextMustJump;
   s.next_must_slide = cachedNextMustSlide;
   s.next_wide_gap = cachedNextIsLevelChange;  // forward cell is a 2-cell gap (long hole / level change)
+  s.next_ground_change_higher = cachedNextGroundHigher;  // forward cell is a ZONE CREVASSE (jump LATE)
   s.next_path_type = cachedNextPathType;      // forward cell PE_Type (for narrow detection / mapping)
   // narrow_target_lane: PERCEPTION for the NN — which lane (-1 L/0 C/+1 R, runner-relative) the upcoming
   // narrow's strip is in (best-guess map via narrowStrafeDirFor; verify/refine from on-device deaths),

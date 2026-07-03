@@ -1007,3 +1007,22 @@ fixes remain optional. Registry: v10 = `runs/ppo_v10_best.zip` (=2.8M). See [[tu
 Training now (`runs/ppo_v11`). NEXT: checkpoint-select (offline `eval_v8.py` + crevasse survival), device
 eval — VERIFY the device provides `next_ground_change_higher` first. Deploy floor v1 (1173); best-so-far
 v10 (best 2608, turns fixed, crevasse-limited median 615).
+
+## 24. CREVASSE gap = SIM (not reward), replay_diff-confirmed; deployable step-up signal FIXED (2026-07-03)
+
+**User asked (frustrated, crevasses failing): reward or sim?** `replay_diff captures/v10_16f.jsonl`:
+**levelchange NOP device-DIED / sim-LIVED** (dead-agree only 76%) — the SIM is too forgiving of a
+mistimed crevasse jump. Reward is NOT the cause: `reaction_bonus` 0.1 unchanged across all versions; it
+rewards JUMPING, never TIMING (the sim must enforce timing). So: **it's the SIM.**
+
+**v11's step-up obs was DEAD on device (0 frames)** — root-caused live: the game leaves future cells'
+`PathElement.PE_Level` UNPOPULATED (reads 0), so `next_ground_change_higher = forward.Level > cur.Level`
+never fired (even 2-cell lookahead). The device crevasse is a **2-cell step** (approach L2 → pt36 L2 →
+pt35 L3; the rise is on the 2nd cell). **DEPLOYABLE FIX (hook 16i):** `next_ground_change_higher =
+next_path_type ∈ [33-36]` (SingleLevelStepDownCap = zone crevasse; path_type IS reliable) vs long holes
+[12,13,15,16]. Jump LATE on zone crevasses (step-up needs it, step-down tolerates), EARLIER on long holes.
+
+**SIM made CONSISTENT + v12 training:** sim `next_ground_change_higher = (nxt.obstacle == LEVEL_CHANGE)`
+(was `nxt.stepup` = step-up-only, undeployable). Scorecard `--strict` GREEN. **v12 = warm-start v11
+(obs 32 unchanged, no surgery) + corrected obs.** NEXT: device eval v12 on hook 16i (device flaky this
+session — crash-loops/degraded; recover per §14). Deploy floor v1 (1173); v10 best-run 2608.
