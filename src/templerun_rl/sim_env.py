@@ -128,9 +128,15 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "turn_exec_late": 0.60,            # ...until this cprog (past it = ran too far, swipe misses)
     "turn_center_cprog": 0.44,         # swipe here -> land centered (measured offset minimum)
     "turn_offset_scale": 45.0,         # landed |lane| = |swipe_cprog - center| * this (measured slope)
-    "turn_lane_carry": 3.0,            # [MEASURED 2026-07-02] pre-turn lane AMPLIFICATION through a turn
-                                       # (device: strafe-into-turn lane 5 -> lands ~18). Punishes leaning
-                                       # into turns -> the policy must center (NoOp) before swiping.
+    "turn_lane_carry": 0.25,           # [RE-MEASURED 2026-07-03, v14 capture carry-sweep] pre-turn lane
+                                       # barely carries through a turn (the frame rotates 90 deg). Device
+                                       # corr(approach|lane|, landing|lane|)=0.17; lane +11 @cp 0.51 LANDS
+                                       # 6.1 and LIVES. Sweep vs device junction dead-agree: carry 3.0=46%,
+                                       # 1.0=94%, 0.5=97%, 0.25=99%, 0.0=99% (land_err 4.6->1.7). The old
+                                       # 3.0 (lean-into-turn "lands ~18") was a CP-confound: those cases
+                                       # also swiped LATE (cp>=0.6). The real turn death is SWIPE TIMING
+                                       # (cp), not approach lane. Post-turn HELD-tilt drift still punishes
+                                       # a truly leaning policy (lat_target persists), independent of carry.
     "turn_land_kill": 9.0,             # [MEASURED] land beyond this |offset| -> off the exit path ->
                                        # water. The runner tolerates offsets up to ~9 (recenters via
                                        # tilt); probe: offset 8-10 survived, >=11 (swipe <=0.14 or
