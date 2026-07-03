@@ -55,6 +55,7 @@ def _make_env(args, rank: int):
             config={"domain_rand": bool(args.domain_rand),
                     "turn_linger_frames": int(args.turn_linger),
                     "curriculum_max_start_dist": float(args.curriculum_max_start_dist),
+                    "turn_approach_buffer": bool(args.turn_approach_buffer),
                     **(json.loads(args.sim_config) if args.sim_config else {})},
             seed=args.seed + rank,
         )
@@ -313,6 +314,14 @@ def main() -> None:
                         "or a slide is in progress. Jumping into a low slide-bar is FATAL on device "
                         "(measured 2026-07-03, ppo_speed_v8: 4/8 deaths were slide-then-jump). Mirrors "
                         "the sim jump-into-slide death model. try ~0.15.")
+    p.add_argument("--turn-approach-buffer", dest="turn_approach_buffer", action="store_true",
+                   default=False,
+                   help="model the game's HandleDelayedTurning: a swipe on the APPROACH cell (next cell "
+                        "is the junction, correct side) is HELD and fires CENTERED on entering the "
+                        "junction (device-measured 2026-07-03). Lets the policy PRE-SWIPE -> centered "
+                        "landing at any speed (vs a late junction-cell swipe that lands off-center via "
+                        "the 1-frame lag). Spam/wrong-dir/far swipes still die (not the §14 exploit). "
+                        "Pairs with the predicted_landing obs (OBS_LEN 31).")
     p.add_argument("--curriculum-max-start-dist", type=float, default=0.0,
                    help="HIGH-SPEED / START-STATE curriculum: if >0, ~50%% of episodes jump-start at a "
                         "random distance in [0, this] (velocity set from the curve there -> usual accel "

@@ -891,3 +891,64 @@ obstacle combos. Deploy floor stays v1 (device 1173); `ppo_best` still v7. v8 sh
 
 **NEXT: v9 = warm-start v7 + `--slide-jump-penalty 0.15` + TAMED curriculum (`--curriculum-max-start-dist
 5000`, frac 0.35, power 1.5 defaults).** Device-eval vs v1 (1173) + classify crevasse/slide deaths.
+
+**GAP-QUESTION ANSWERS (user, 2026-07-03) — 2 suspected gaps CLOSED, 3 real gaps CONFIRMED:**
+- **Speed spikes: NONE on this build.** Original TR has short invincibility-boost powerups; the user's
+  modified phone build has NO boost. Speed rises ONLY gradually → **velocity=f(distance) model is VALID**
+  (no boost state needed). NOT a gap.
+- **Path curves: NONE.** The path is STRAIGHT + narrows (lean) + swipe-junctions; no smooth non-junction
+  bends. The §17 "curve piece pt3/4" worry was about the TRACK-FORCING experiment, not normal play. NOT a
+  gap; the sim's straight+junction geometry is right.
+- **TURN mechanic (THE fix, task #21):** a swipe JUST BEFORE the junction is HELD and fires AT the
+  junction → CENTERED. TOO EARLY → a hit + slowdown (stumble). AT the junction → immediate (lands per
+  cprog). So the SAFE play is PRE-AIM on the late-approach cell; the policy currently waits for is_turn
+  (junction cell) + swipes late (16f latch holds is_turn to 0.60) → immediate exec at high cprog →
+  off-center landing = the §18 death. FIX: model a TIGHT approach-buffer (late-approach swipe → held →
+  fires at junction center; far-early → stumble). CAUTION (§14): the OLD buffer fired on next_is_turn ANY
+  time = SIM EXPLOIT (off-path on device) → keep it TIGHT + replay_diff-validate on real turn frames +
+  turn_gate PRE-FIRE(far) must still stumble/die. This is **v10** (after v9).
+- **After-turn hazards + two-action combos: BOTH confirmed.** (1) a hazard often appears right AFTER a
+  junction (the policy is busy turning → reacts late; §11 residual death) — sim should place obstacles
+  right after junctions. (2) some obstacles need TWO quick actions (jump-then-slide / lean+jump) — the sim
+  models ONE obstacle per cell; a real gap. Model both (secondary to the turn buffer). UPDATE: user says
+  after-turn holes are handled "quite well" already → DEPRIORITIZE (1); combos stay low priority.
+
+## 21. v9 DEVICE eval + the TURN fix REFRAMED by replay_diff (2026-07-03) — RESUME HERE
+
+**v9 device (hook 16f, 8 eps, `captures/speed_v9_16f.jsonl`): median 830→ REGRESSED (v1=1173).** BUT the
+v9 FIXES WORKED: slide-jump deaths 0 (was v7=22), crevasse mostly gone. The deaths MOVED: **7/8 are
+now the off-center TURN LANDING / lateral** (death-frame |lane| 10–17 on straights, death_type 1 Fall).
+So the crevasse/slide fixes exposed the turn+lateral death underneath. Offline v9 crushed v7 (slide-jump
+22→0, high-speed survival 33→68%, narrows held) — but the sim couldn't SEE the turn/lateral death (below).
+
+**MEASURED turn latency (device, no guess):** a swipe ON the junction cell (is_turn True) flips facing
+**1 frame (100ms) later** (21/21, constant in time). A swipe EARLY on the APPROACH (probe_turn_window,
+can_turn set) is BUFFERED → fires ~4 frames later AT the junction → CENTERED (= user's Q2). Late
+junction-cell swipe → off-center: swipe cprog>0.60 → |lane| 8.9med/17max (dies), r=0.68. Per-frame cprog
+advance ≈ 0.0016·vel.
+
+**`replay_diff.py captures/speed_v9_16f.jsonl` REFRAMED the fix — the sim turn model is wrong 3 ways
+(not just latency):**
+1. **Over-kills turns from off-center lane** — `turn_lane_carry=3` kills turns the device SURVIVES
+   (junction is_dead agreement only **37–39%**; turn_land_err 3.7–4.3).
+2. **Under-kills off-edge straights** — `sim_env.py:1002` HARD-CLIPS `_lane` to ±7, so the real death
+   (lane→11 off the path edge on a straight) is UNMODELED → the policy strafes/lands high for FREE in sim.
+3. **No approach-BUFFER** — the safe real play (early swipe → held → centered) isn't modeled; nor is the
+   1-frame late-swipe penalty.
+Death chain: late junction-cell swipe → land off-center ~lane 10 → can't recover → fall off the edge on
+the next straight. **Off-edge death is CONDITIONAL, NOT a lane threshold** — device SURVIVING frames
+reach |lane| 17 transiently (post-turn recenter); deaths are high-lane AT a cell crossing/no-recover. So
+DON'T hard-threshold |lane| — must measure the trigger.
+
+**DONE this session (safe):** `predicted_landing` obs (obs.py, OBS_LEN 30→**31**, index 30 =
+`cell_progress + DCPROG_PER_VEL·velocity`, DCPROG_PER_VEL=0.1/60; host-side, no hook change; VERIFIED).
+Plan file `read-the-claude-md-before-abundant-gray.md` (v10). Memory [[turn-latency-sampling-ideas]].
+**GOTCHA: OBS_LEN=31 breaks the K-adaptive loaders for OLD obs-30 models** ((dim−31)//7≠4) — revert
+OBS_LEN or add an adapter to eval v1/v9 again.
+
+**RESUME — the turn+lateral fidelity package (replay_diff-gated, each threshold MEASURED, user to steer
+which first):** (a) off-edge death (CONDITIONAL — measure the trigger: cell-crossing at high lane? N
+sustained frames? un-clip `_lane`), (b) `turn_lane_carry` recalibration (sim over-kills; maybe junction
+lane reads are unreliable → clamp), (c) approach-buffer + 1-frame latency (model the user's Q2 so the
+policy pre-swipes on approach → centered). Then retrain v10 (warm-start-surgery from v9_best for obs 31).
+Deploy floor stays v1 (1173); ppo_best still v7. Injector was alive on 3f80a3a this session (may drop).

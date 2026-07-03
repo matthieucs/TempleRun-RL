@@ -136,6 +136,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
                                        # tilt); probe: offset 8-10 survived, >=11 (swipe <=0.14 or
                                        # >=0.61) died. Survivable swipe window ~[0.24, 0.64].
     "turn_window_frac": 0.60,          # [alias] is_turn presentation upper bound = turn_exec_late
+    # APPROACH-BUFFER (flag, 2026-07-03, device probe_turn_window): the game's HandleDelayedTurning — a
+    # swipe on the APPROACH cell (next cell is the junction) is HELD and fires CENTERED on entering the
+    # junction (measured: an early approach-swipe flips facing ~4 frames later AT the junction). This is
+    # the SAFE play the policy should learn (a late junction-cell swipe lands off-center via the 1-frame
+    # lag). OFF by default (keeps the current behavior + scorecard). Distinct from the §14 EXPLOIT (which
+    # fired the turn IMMEDIATELY on the approach -> off-path): here the swipe is LATCHED and fires at the
+    # junction center. `turn_buffer_ttl` = cells the latch survives before timing out (no-op = the game's
+    # TimeSinceShouldTurn timeout). Pre-turn lane STILL carries (turn_lane_carry) -> the buffer helps only
+    # a CENTERED approach; leaning in still lands off (correct lesson: center, then approach-swipe).
+    "turn_approach_buffer": False,     # gate the buffer mechanic (train_sim --turn-approach-buffer)
+    "turn_buffer_ttl": 3,              # cells a latched approach-swipe persists before timing out
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
     # longer reads these; turning at any cprog in the window (or buffered early) is clean.
@@ -558,6 +569,13 @@ class TempleRunSimEnv(gym.Env):
             return self._next_cell_replay()
         return self._next_cell_procedural()
 
+    def _peek_next(self) -> dict:
+        """The already-generated next cell (what the obs's ``next_*`` fields reflect). NOT ``_next_cell()``
+        — that GENERATES a fresh cell (advancing RNG + spacing counters); peeking with it corrupts the
+        track. ``_extend_track`` keeps ``lookahead+1`` cells ahead so index+1 normally exists."""
+        ni = self._cell_index + 1
+        return self._track[ni] if ni < len(self._track) else {}
+
     def _next_cell_replay(self) -> dict:
         track = self._injected_track or []
         if self._replay_cursor < len(track):
@@ -918,6 +936,17 @@ class TempleRunSimEnv(gym.Env):
                 cell.get("can_turn_left") if want_left else cell.get("can_turn_right")):
             self._execute_turn(cell, want_left, cp)
             return
+        # APPROACH-BUFFER (flag `turn_approach_buffer`): a swipe on the APPROACH cell (the NEXT cell is the
+        # junction, valid exit side) is LATCHED and fired CENTERED on entering the junction (see
+        # _cross_into_next_cell) — the game's HandleDelayedTurning. NOT the §14 exploit (which turned
+        # immediately on the approach). A swipe FAR from any junction still falls through to FATAL below.
+        if self.cfg.get("turn_approach_buffer") and not bool(cell.get("is_turn")):
+            nxt = self._peek_next()
+            if bool(nxt.get("is_turn")) and (
+                    nxt.get("can_turn_left") if want_left else nxt.get("can_turn_right")):
+                self._pending_turn = "L" if want_left else "R"
+                self._pending_turn_ttl = int(self.cfg.get("turn_buffer_ttl", 3))
+                return
         # TURN ON A STRAIGHT = FATAL [DEVICE-MEASURED 2026-07-02, single TurnLeft on a plain centered
         # straight: 8/8 DIED, lane thrown to +/-8-14 off the path]. The native turn rotates the runner
         # off the path -> water. This SUPERSEDES the old "swipe on a straight = survivable stumble"
@@ -925,7 +954,7 @@ class TempleRunSimEnv(gym.Env):
         # gave free turns anywhere (stumble), the device kills each one. A turn with NO junction context
         # (not on a turn cell, not approaching one) -> Fall. Only a MISTIMED turn AT/NEAR a junction
         # (right place, wrong cprog/side) is a survivable stumble.
-        near_junction = bool(cell.get("is_turn")) or bool(self._next_cell().get("is_turn"))
+        near_junction = bool(cell.get("is_turn")) or bool(self._peek_next().get("is_turn"))
         if near_junction:
             self._stumble()      # mistimed at a junction -> survivable wobble (2nd too soon -> Fall)
         else:
@@ -1090,6 +1119,22 @@ class TempleRunSimEnv(gym.Env):
         self._cell_index += 1
         self._extend_track()
         entered = self._current_cell()
+        # APPROACH-BUFFER fire (flag `turn_approach_buffer`): a swipe latched on the approach cell fires
+        # CENTERED (swipe_cp = turn_center_cprog) on entering the junction — the game's HandleDelayedTurning.
+        # Pre-turn lane still carries (so only a centered approach lands clean). Expires (no-op = the game's
+        # buffer timeout) if the latch runs out before a junction is reached.
+        if self._pending_turn is not None:
+            _wl = self._pending_turn == "L"
+            if bool(entered.get("is_turn")) and (
+                    entered.get("can_turn_left") if _wl else entered.get("can_turn_right")):
+                self._pending_turn = None
+                self._execute_turn(entered, _wl, float(self.cfg["turn_center_cprog"]))
+                if self._is_dead:
+                    return
+            else:
+                self._pending_turn_ttl -= 1
+                if self._pending_turn_ttl <= 0:
+                    self._pending_turn = None
         # Obstacle death checked on ENTRY: the jump/slide must already be ACTIVE when crossing into
         # the obstacle cell. So the policy must act on the LOOKAHEAD (next_must_jump/slide) one cell
         # early — matching the real phone, where reacting only when the obstacle is the nearest cell

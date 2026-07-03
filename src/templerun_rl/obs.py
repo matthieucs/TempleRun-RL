@@ -1,6 +1,6 @@
 """Observation encoding: raw game-state dict -> normalized float32 vector.
 
-The policy sees an OBS_LEN-element ``Box(0, 1)`` vector (see OBS_FIELDS; 30 as of 2026-07-02). We deliberately exclude the raw
+The policy sees an OBS_LEN-element ``Box(0, 1)`` vector (see OBS_FIELDS; 31 as of 2026-07-03). We deliberately exclude the raw
 ``score`` (unbounded / accumulating -> would break MlpPolicy normalization); it feeds
 the reward instead and is always available in ``info["raw_state"]``.
 """
@@ -36,9 +36,9 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # fire a turn at cell-center instead of too early), lane = which of the 3 lanes (L/C/R) the runner is in
 # (for narrow strips). Both come from the hook (CharacterPlayer.GetPosition2D + PathElement.Rectangle)
 # and from the sim's own state — they are OBSERVATIONS, not actions.
-OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane")
+OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 23 bool/lookahead + 4 scalar + 3 extra = 30 (keep derived from OBS_FIELDS)
+OBS_LEN = len(OBS_FIELDS)  # 23 bool/lookahead + 4 scalar + 4 extra = 31 (keep derived from OBS_FIELDS)
 
 # Lane geometry (real device units, 2026-07-01 tilt-controlled model): the lateral position is
 # CONTINUOUS and centered on 0 — center 0, one strafe ~ 3.7 -> lanes at -3.7 / 0 / +3.7, side walls
@@ -53,6 +53,16 @@ LANE_OBS_MAX = 8.0    # symmetric, just past the right wall
 # kept for the capture/analysis scripts that bucket lane for display (center-0 lane boundaries).
 LANE_LEFT_MAX = -1.85
 LANE_RIGHT_MIN = 1.85
+
+# PREDICTED-LANDING geometry (2026-07-03, v10): a turn swiped NOW executes ~1 frame (100 ms) LATER
+# (device-measured: constant 1-frame lag, 21/21 turns), during which cell_progress advances
+# velocity*dt/cell_len. So the runner LANDS at cell_progress + DCPROG_PER_VEL*velocity, and the landing
+# offset = (that - 0.44)*45. Feeding this projected-landing cprog as an obs lets the policy aim the
+# LANDING (not the swipe) at 0.44 at ANY speed, with no internal velocity math -> fixes the late-swipe
+# off-center turn LANDING (dominant device death, CLAUDE.md §21). Device fit slope 0.0016 ~= sim
+# dt/cell_len 0.1/60; one shared constant keeps sim-training and device-deploy consistent (<5% on the
+# device cell_len, absorbed by DR).
+DCPROG_PER_VEL = 0.1 / 60.0   # per-frame cprog advance per unit velocity (= step_dt / cell_length)
 
 
 def lane_to_obs(lane) -> float:
@@ -114,7 +124,7 @@ def make_observation_space(frame_stack: int = 1, action_history_len: int = 0) ->
 
 
 def state_to_obs(state: dict) -> np.ndarray:
-    """Convert a raw state dict to the base (26-element) normalized float32 observation vector.
+    """Convert a raw state dict to the base (OBS_LEN=31) normalized float32 observation vector.
 
     Tolerant of missing keys (falls back to ``constants.STATE_DEFAULTS``) so a
     malformed/truncated JSON line never crashes a step. Action history (if any) is appended
@@ -136,6 +146,11 @@ def state_to_obs(state: dict) -> np.ndarray:
     # narrow_target_lane: which lane to be in for the upcoming narrow (-1 L / 0 C / +1 R), mapped onto
     # the SAME continuous scale as `lane` so the policy compares them and strafes to match (None -> home).
     out[base + 6] = narrow_lane_to_obs(g("narrow_target_lane"))
+    # predicted_landing: where a turn swiped THIS frame would LAND (in cell_progress), accounting for the
+    # ~1-frame exec latency. The policy learns to swipe when this ~= 0.44 (centered) -> speed-invariant
+    # turn timing. Derived host-side from the already-streamed cell_progress + velocity (no hook change).
+    cp0 = cp if cp is not None else 0.0
+    out[base + 7] = float(np.clip(cp0 + DCPROG_PER_VEL * v, 0.0, 1.0))
     return out
 
 

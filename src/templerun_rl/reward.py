@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Optional
 
 from . import constants as C
+from .obs import DCPROG_PER_VEL
 
 
 def shaping_reward(
@@ -117,12 +118,12 @@ def shaping_reward(
         elif (prev.get("must_slide") or prev.get("next_must_slide")) and action == int(C.Action.SLIDE):
             r += reaction_bonus
         elif prev.get("is_turn"):
-            # AIM-CENTER: scale the turn reward by how CENTERED the swipe is (max at cprog ~0.44, the
-            # device-measured landing minimum; falls to ~0 at the window edges). The plain bonus rewarded
-            # turning ANYWHERE in the window, giving no gradient toward 0.44 -> the policy landed 0.43-0.53
-            # mostly but drifted to 0.34/0.71 on some junctions (the residual ~5% turn-death tail on
-            # device). This pulls every swipe toward the center. aim_center_weight 0 -> flat bonus (old).
-            cp = float(prev.get("cell_progress") or 0.44)
+            # AIM-CENTER on the LANDING, not the swipe (2026-07-03, v10): the turn executes ~1 frame later,
+            # landing at cell_progress + Δ(velocity) (Δ = DCPROG_PER_VEL*vel). Reward a junction-cell swipe
+            # whose predicted LANDING is centered (~0.44) — so the policy swipes EARLIER at speed (it has
+            # the predicted_landing obs to do so). The old version rewarded a centered SWIPE cprog, which
+            # on device lands late (swipe 0.44 -> land 0.6-0.8 at speed = the dominant turn death).
+            cp = float(prev.get("cell_progress") or 0.44) + DCPROG_PER_VEL * float(prev_velocity)
             center = 0.44
             aim = max(0.0, 1.0 - aim_center_weight * abs(cp - center) / 0.16)  # 1 at center, ~0 at +/-0.16
             side_ok = ((action == int(C.Action.TURN_LEFT) and prev.get("can_turn_left"))
