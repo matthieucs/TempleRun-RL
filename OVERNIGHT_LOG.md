@@ -41,8 +41,18 @@ replay_diff on v14 capture: **turns are the least-faithful family (junction TL/T
 - Validated: scorecard `--strict` **GREEN** (turn.gates still pass — off-center/lean/pre-fire die via
   post-turn held-tilt drift, not carry); replay_diff junction 36→58%, turn_land_err 3.0→2.4. Committed b9e1b7c.
 - v17 = warm-start v14 + **v14 TAMED recipe** (cmax5000, NO high-speed skew) + carry fix. Training. Device: _pending_.
-- ALSO found: a separate LATERAL-EDGE gap (sim kills lane 12.7, device tolerates 12+) — candidate next fix.
-- Human v210 crevasse takeoff cp≈0.58 (above) still pending as a crevasse-apex calibration.
+- ALSO checked the LATERAL-EDGE: **NO gap.** Device Fall deaths on straights start at |lane| ~6.5
+  (median 10.7); 99% of survivors under 6.7; sim edge ~7.5 ≈ device. The v15/v16 lane-22 deaths were the
+  POLICY over-strafing (curriculum artifact), not a sim-edge bug. The replay_diff lane-12.7 mismatch was a
+  turn-transient (improved by the carry fix). → no lateral-edge fix warranted.
+- Human v210 crevasse takeoff cp≈0.58 still pending as a crevasse-apex calibration (deep-crevasse tail;
+  scorecard crevasse.speed already passes, so it's a refinement not a break — do it after v17 if turns fixed).
+
+## Deliverables so far this night
+1. v15 + v16 device evals → high-speed curriculum ABANDONED (device-toxic over-strafe).
+2. **Turn fidelity fix** (turn_lane_carry 3.0→0.25): device carry-sweep 46%→99% junction agreement,
+   scorecard GREEN, committed b9e1b7c. → v17 retrain (tamed recipe) testing it.
+3. Lateral edge: no gap (measured). Human v210 crevasse takeoff cp≈0.58 (calibration for next).
 
 ## Op notes (autonomous gotchas)
 - **NEVER `pkill -f <pattern>` where the pattern also appears in the invoking command** — `pkill -f`
