@@ -44,7 +44,7 @@ LOG_FIELDS = (
     "player_x_offset", "over_turn_area",
     "dist_to_turn", "dist_to_turn_end", "dist_since_turn",
     "dist_to_change_temple", "dist_to_change_other", "dist_since_level_change", "dist_remainder",
-    "ground_height", "is_over_ground", "ground_change_higher",
+    "ground_height", "is_over_ground", "ground_change_higher", "next_ground_change_higher",
     "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
     # --- Region2D narrow-band probe (hook 15c): game-polygon safe band of the upcoming narrow ---
     "narrow_band_lo", "narrow_band_hi", "on_region", "_hv",

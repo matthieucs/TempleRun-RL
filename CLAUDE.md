@@ -66,22 +66,24 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 - **Jump-into-slide death**, **turn-direction** (native CanTurn opposite-origin, hook 16f), **lateral =
   analog tilt** (alpha 0.446/0.1s), **stumble** 2-strike — all modeled + scorecard-guarded.
 
-**FAILED / OPEN — CREVASSES (the current wall):**
-- After turns were fixed, crevasses (zone step-ups, pt 33-36) became the top device death (~600 m,
-  DeathType 4 = Ledge). replay_diff proved it's the **SIM, not the reward** (reaction_bonus unchanged;
-  it rewards jumping, never timing — the sim must enforce timing, and it was too lenient).
-- Device facts: velocity capped 210 (human's 14,956 m run confirms; speed plateaus ~4000 m). The
-  crevasse is a **2-cell step** — the raised ledge (`ground_height=15`) is on the 2nd cell; the runner
-  clips it (Ledge) if not near jump apex there. Takeoff is **velocity-dependent** (human jumps earlier at
-  high speed). Many sim models tried (fixed late-gate → velocity-dependent apex → **2-cell apex, current**);
-  each improved in-sim but device crevasses still fail. The apex threshold is NOT yet calibrated to the
-  ground_height=15 ledge. **v210 crevasse takeoff not cleanly measured** (chicken-and-egg: must survive to
-  4000 m to reach v210 on device).
+- **Crevasses LARGELY FIXED (v14, device-verified 2026-07-03)** — was the top device death after turns
+  (v10: 5/8 @~600 m, DeathType 4 = Ledge). replay_diff proved it was the **SIM, not the reward** (reward
+  rewards jumping, never timing; the sim was too lenient). Fix = model the crevasse as a **2-cell step**:
+  gap on cell 1, raised ledge (`ground_height=15`) on cell 2 where a velocity-dependent APEX check fires
+  (clip = Ledge if not near jump apex there). Retrained (v14) → **device median 1652, best 2908, crevasse
+  deaths 2/8** (down from 5/8). `next_ground_change_higher` obs (pt 33-36, hook 16i) **verified firing on
+  device** (7/7 crevasse-approach frames) — prior "0 fires" was a capture-logging artifact, not a bug.
+
+**OPEN / RESIDUAL:**
+- Velocity capped 210 (human's 14,956 m run confirms; speed plateaus ~4000 m). The **deep v210 crevasse**
+  is the residual death (v14 ep7 died Ledge @2908 m) — takeoff is velocity-dependent and the apex
+  threshold isn't yet calibrated to the exact ledge at top speed. **v210 takeoff not cleanly measured**
+  (chicken-and-egg: must survive to ~4000 m to reach v210 on device). Next levers: read
+  `GroundHeight`/`JumpVelocity` live to nail the apex, or a crevasse-only isolation curriculum swept
+  across velocities (the trick that cracked narrows).
+- In-sim dominant death is now TURNS again (~22/110 offline) — the next frontier after crevasses.
 
 **WHERE WE ARE:**
-- **Deploy floor = v1** (`runs/ppo_valid_v1_best.zip`, device median **1173**) — still the best real result.
-- Best real single run = **v10's 2608 m** (turns fixed, crevasse-limited).
-- **v14 training** = warm-start v13 + the 2-cell crevasse apex model (scorecard GREEN). Pending device eval.
-- NEXT: calibrate the crevasse apex to the exact ledge (read `GroundHeight`/`JumpVelocity` live), device
-  eval v14, and/or a crevasse-only isolation curriculum swept across velocities (the trick that cracked
-  narrows). NN decides all actions — no hook action rules.
+- **NEW BEST = v14** (`runs/ppo_v14_best.zip`, device **median 1652, best 2908**) — beats the old deploy
+  floor v1 (1173) and v10 (615). Deploy candidate; not yet promoted to `runs/ppo_best.zip`.
+- 2-cell crevasse model TRANSFERRED to device. NN decides all actions — no hook action rules.
