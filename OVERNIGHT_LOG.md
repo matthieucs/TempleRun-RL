@@ -48,6 +48,30 @@ replay_diff on v14 capture: **turns are the least-faithful family (junction TL/T
 - Human v210 crevasse takeoff cp≈0.58 still pending as a crevasse-apex calibration (deep-crevasse tail;
   scorecard crevasse.speed already passes, so it's a refinement not a break — do it after v17 if turns fixed).
 
+### v17 — turn-carry fidelity fix: REJECTED (device median 308, worst regression)
+- Device: ALL deaths at lane 15-22. FIRST theory (over-strafe) was WRONG. Hold-probe
+  (`scratchpad/hold_probe.py`) proved **device lane CAPS at ±7 under a sustained hold, same as the sim**
+  — NO over-strafe gap. The lane-22 deaths are **TURN-LANDING OVERSHOOTS**: the policy swiped turns from
+  near-center (lane -1.3) and LANDED at -15.6/22.8 → Fall. carry=0.25 taught bad turn timing.
+- **turn_lane_carry=3 is a LOAD-BEARING REGULARIZER, not physics.** It keeps the policy centered AND
+  times turns well; "fixing" it to device-faithful 0.25 degraded turns on device. Reverted (kept carry=3).
+- Corrected root cause of ALL 3 regressions (v15/16/17): **TURN degradation** (high-speed curriculum →
+  bad-cp swipes at v210; carry change → bad landings), NOT over-strafe. v14's turns are the best this
+  sim+obs produces.
+
+### Ruled OUT this night (so the morning doesn't re-try them)
+- High-speed deep-start curriculum → degrades turns on device (v15, v16).
+- off_center_penalty → device-toxic (v15).
+- turn_lane_carry "fidelity" fix → degrades turns; it's a load-bearing regularizer (v17).
+- Over-strafe lateral gap → DOESN'T EXIST (device caps lane at ±7, hold-probe measured).
+- Crevasse apex miscalibration → DOESN'T EXIST (sim clears the human's v210 0.58 takeoff; span 2.8 cells).
+
+### The remaining real lever (needs user's call — big architectural change)
+- **Control frequency.** The residual turn death is late swipes (cp≥0.6) at v210, where the ~0.35-cprog/
+  frame spacing at 10 Hz is marginal — the swipe window can fall between samples. Higher/adaptive sampling
+  (hook POLL_MS 100→50, sim step_dt 0.1→0.05 + retime all durations, obs, retrain) is the plan's deferred
+  idea. Large new fidelity surface — NOT attempted blindly overnight. This is the lever to reach 10k.
+
 ## Deliverables so far this night
 1. v15 + v16 device evals → high-speed curriculum ABANDONED (device-toxic over-strafe).
 2. **Turn fidelity fix** (turn_lane_carry 3.0→0.25): device carry-sweep 46%→99% junction agreement,
