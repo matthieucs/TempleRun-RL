@@ -226,8 +226,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # An early takeoff (the 1-cell-lookahead reflex, or a jump 2 cells before the gap) => Fall; taking
     # off near the gap edge (as the oracle does, cprog>=0.62) clears. Level-DOWN + same-level long holes
     # are UNAFFECTED (only cells flagged stepup are checked). Keep below the oracle's 0.62 jump so it's fair.
-    "stepup_min_takeoff_prog": 0.0,    # [DEAD 2026-07-02] device-refuted (controlled sweep: early
-                                       # takeoffs clear step-ups); kept only so old sidecars don't break
+    "stepup_min_takeoff_prog": 0.85,   # [RE-INSTATED 2026-07-03, device probe crevasse_stepup_probe] a
+                                       # 1-cell level-UP crevasse needs takeoff cprog >= this on the
+                                       # pre-gap cell (probe: 0.78 DIES, 0.94 CLEARS). step-down unaffected.
     "gap_entry_grace": 0.2,            # [MEASURED 2026-07-02] solid lip at a wide-gap cell's entry:
                                        # grounded entry survives until this cprog (device takeoffs
                                        # 0.98-1.02 cleared); still grounded past it -> Fall
@@ -671,10 +672,12 @@ class TempleRunSimEnv(gym.Env):
                 self._zone_level += -1 if self._rng.random() < 0.65 else 1
             level = int(self._zone_level)   # the crevasse cell already sits in the NEW zone (matches live capture)
             # DEVICE-MEASURED gap width: a transition touching HIGH (mid<->high) is a 2-cell gap; low<->mid
-            # is a single cell. Queue the extra cell(s) accordingly (continuation emitted at _next_cell top).
-            involves_high = (prev_zone >= hi) or (self._zone_level >= hi)
-            self._pending_gap = int(cfg["zone_gap_extra_cells_high"] if involves_high
-                                    else cfg["zone_gap_extra_cells_lowmid"])
+            # ZONE crevasse = a SINGLE cell [device probe crevasse_stepup_probe 2026-07-03]: BOTH step-up
+            # and step-down clear from a LATE takeoff (0.94-1.04), which a 2-cell airtime span CANNOT ->
+            # it is NOT a 2-cell gap. step-UP adds the late-takeoff GATE (_resolve_obstacle_on_enter);
+            # step-down clears from ANY takeoff. (The old 2-cell model conflicted with the gate -> the
+            # gate was wrongly "refuted" §15; that sweep saw step-downs, which clear broadly.)
+            self._pending_gap = 0
             self._pending_gap_obst = OBST_LEVEL_CHANGE
             self._pending_gap_type = 35    # ~ real SingleLevelStepDownCap path_type (obs match)
             self._pending_gap_level = int(self._zone_level)
@@ -1175,10 +1178,17 @@ class TempleRunSimEnv(gym.Env):
                 else:
                     self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / LevelChange/Tree
                 return
-            # STEP-UP early-takeoff gate: DEVICE-REFUTED 2026-07-02 (controlled --gap-override sweep,
-            # captures/crevasse_sweep.jsonl: takeoffs 0.26-0.98 of the pre-gap cell all CLEAR incl.
-            # step-ups; human clears 2->3 at 0.16-0.57). Early jumps are fine when airtime spans the
-            # gap — the per-cell airborne check above IS the mechanic. Gate removed (knob [DEAD]).
+            # STEP-UP LATE-TAKEOFF gate [RE-INSTATED 2026-07-03, device probe crevasse_stepup_probe]: a
+            # 1-cell level-UP crevasse (raised far ledge) needs a LATE takeoff so the runner is still
+            # RISING when it reaches the ledge — takeoff cprog >=0.94 CLEARS, 0.78 DIES; step-down/flat
+            # clears from ANY takeoff (0.09-1.0, 0/10). An early takeoff is already DESCENDING at the
+            # ledge -> clips it -> Fall. This is why v10 died 5/6 at device step-ups (~600m) after turns
+            # were fixed. Only cells flagged `stepup` are gated; step-down / holes UNAFFECTED.
+            if cell.get("stepup") and self._jump_takeoff_pos is not None:
+                takeoff_cprog = self._jump_takeoff_pos - (self._cell_index - 1)
+                if takeoff_cprog < float(self.cfg["stepup_min_takeoff_prog"]):
+                    self._kill(2)   # took off too early -> descending at the raised ledge -> Fall
+                    return
         elif obst in _MUST_SLIDE:
             # die if NOT sliding OR AIRBORNE (jumped into the low bar — device-fatal, 2026-07-03).
             if self._slide_t <= 0.0 or self._jump_t > 0.0:
@@ -1297,7 +1307,11 @@ class TempleRunSimEnv(gym.Env):
             "next_can_turn_right": bool(nxt.get("can_turn_right")),
             "next_must_jump": nobst in _MUST_JUMP,
             "next_must_slide": nobst in _MUST_SLIDE,
-            "next_wide_gap": bool(nxt.get("wide_gap")),   # the upcoming gap is 2-cell -> jump LATE
+            "next_wide_gap": bool(nxt.get("wide_gap")),   # a wide gap ahead (long hole OR zone crevasse)
+            # STEP-UP ahead: the next cell is a level-UP crevasse (raised ledge) -> needs a LATE takeoff
+            # (vs a 2-cell long hole which needs an earlier takeoff to span). The policy distinguishes
+            # the two jump timings via this. Device streams ground_change_higher; mirror as a lookahead.
+            "next_ground_change_higher": bool(nxt.get("stepup")),
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).

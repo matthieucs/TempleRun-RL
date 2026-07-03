@@ -108,7 +108,11 @@ def _oracle(st: dict) -> int:
     # measured sweep optimum at crevasse speed (lower wastes airtime early; >0.65 skips the window at
     # the ~0.38-cprog/step top-speed stepping). See sim_env wide_gap_extra_cells / sim-calibration memory.
     if st.get("next_wide_gap"):
-        return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= 0.62 else int(C.Action.NOOP)
+        # a step-UP crevasse (next_ground_change_higher) is a 1-cell RAISED ledge -> LATE takeoff (>=0.85;
+        # device probe 2026-07-03: 0.78 dies, 0.94 clears). A 2-cell LONG HOLE / step-down -> EARLIER
+        # takeoff (>=0.62) so the airtime SPANS both cells. Different mechanics -> the obs distinguishes.
+        thresh = 0.85 if st.get("next_ground_change_higher") else 0.62
+        return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= thresh else int(C.Action.NOOP)
     # Anticipate: jump/slide on the LOOKAHEAD (obstacle is the NEXT cell) so the action is active
     # when entering the obstacle cell (the sim resolves obstacles on entry).
     if st["must_jump"] or st.get("next_must_jump"):

@@ -39,7 +39,8 @@ _TURN_AIM = 0.28                     # swipe at first frame in the survival wind
 
 def _base(st):
     if st.get("next_wide_gap"):
-        return C.Action.JUMP if float(st.get("cell_progress", 1)) >= 0.62 else C.Action.NOOP
+        thresh = 0.85 if st.get("next_ground_change_higher") else 0.62   # step-up late / long-hole early
+        return C.Action.JUMP if float(st.get("cell_progress", 1)) >= thresh else C.Action.NOOP
     if st["must_jump"] or st.get("next_must_jump"):
         return C.Action.JUMP
     if st["must_slide"] or st.get("next_must_slide"):

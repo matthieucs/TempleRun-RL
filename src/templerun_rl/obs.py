@@ -26,9 +26,10 @@ OBS_BOOL_FIELDS = (
     "can_turn_left", "can_turn_right", "is_turn",
     # 1-cell lookahead — anticipation (see a junction/obstacle before it's the nearest cell).
     "next_is_turn", "next_can_turn_left", "next_can_turn_right", "next_must_jump", "next_must_slide",
-    # the upcoming must-jump is a 2-CELL gap (long hole / zone LevelChange) -> jump LATE (at the gap
-    # edge) so airtime spans both cells; jumping 1 cell early (the single-obstacle reflex) falls in.
-    "next_wide_gap",
+    # the upcoming must-jump is a wide gap -> jump LATE. next_ground_change_higher distinguishes a
+    # 1-cell step-UP crevasse (raised ledge, needs a LATE takeoff, device probe 2026-07-03) from a
+    # 2-cell long hole (needs an EARLIER takeoff to span both cells) — different jump timings.
+    "next_wide_gap", "next_ground_change_higher",
 )
 OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # Perception added 2026-06-19 so the NN can time turns + control its lane natively (replacing the
@@ -38,7 +39,7 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # and from the sim's own state — they are OBSERVATIONS, not actions.
 OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 23 bool/lookahead + 4 scalar + 4 extra = 31 (keep derived from OBS_FIELDS)
+OBS_LEN = len(OBS_FIELDS)  # 24 bool/lookahead + 4 scalar + 4 extra = 32 (keep derived from OBS_FIELDS)
 
 # Lane geometry (real device units, 2026-07-01 tilt-controlled model): the lateral position is
 # CONTINUOUS and centered on 0 — center 0, one strafe ~ 3.7 -> lanes at -3.7 / 0 / +3.7, side walls

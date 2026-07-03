@@ -978,3 +978,32 @@ crevasse fidelity gap) is newly EXPOSED now that runs survive turns and reach th
 until the crevasse fix lands. **NEXT: crevasse takeoff fidelity** (measure device takeoff cprog vs sim at
 the mid/high transitions, §11/§20; the TURN frontier is CLOSED). Unused buffer + off-edge/carry replay_diff
 fixes remain optional. Registry: v10 = `runs/ppo_v10_best.zip` (=2.8M). See [[turn-latency-sampling-ideas]].
+
+## 23. CREVASSE step-up REMODEL — device-anchored, scorecard GREEN, v11 training (2026-07-03)
+
+**v10's crevasse deaths are STEP-UP specific** (controlled device probe `--gap-override`,
+`captures/crevasse_stepup_probe.jsonl`): a level-UP crevasse (raised ledge) needs a **LATE takeoff**
+(cprog 0.78 DIES, 0.94 CLEARS — must still be RISING at the ledge); step-DOWN/flat clears from ANY takeoff
+(0.09-1.0, 0/10). The §15 "stepup gate device-refuted" was WRONG — that sweep saw step-downs. See
+[[crevasse-stepup-remodel]].
+
+**THE REMODEL (scorecard `--strict` GREEN):**
+- **Zone crevasse = 1 CELL** (`_pending_gap=0`), not the old 2-cell wide_gap (device: both clear from a
+  late takeoff, which a 2-cell airtime span cannot → not a 2-cell gap; the 2-cell model CONFLICTED with
+  the late-gate → why it was "refuted").
+- **Step-UP late-takeoff GATE** re-instated: `stepup_min_takeoff_prog=0.85`; on entering a `stepup` cell,
+  Fall if `_jump_takeoff_pos-(cell_index-1) < 0.85` (early takeoff → descending → clips the ledge).
+- **NEW OBS `next_ground_change_higher`** (OBS_LEN 31→**32**, bool idx 23; sim emits from the next cell's
+  `stepup`): the policy MUST distinguish a step-UP (jump LATE ≥0.85) from a 2-cell LONG HOLE (pt12, jump
+  EARLIER ≥0.62 to span 2 cells) — different mechanics, both set `next_wide_gap`. Device streams
+  `ground_change_higher`; deployment needs a lookahead version (hook/host-side — VERIFY before device
+  eval). Oracle/turn_gate prompt: `thresh = 0.85 if next_ground_change_higher else 0.62`.
+- Scorecard `crevasse.curve` (median-dist: late clears far / early dies at the gate) + `crevasse.speed`
+  (late clears low-speed; high-speed window non-empty) reworked. **CAVEAT: high-speed (v210) step-ups are
+  genuinely harder (late-jump only +206m past 5000) — no v210 device probe yet; may be a real 10,000m
+  limiter → a v210 `--gap-override` probe is the TODO.**
+
+**v11 = warm-start-surgery from v10 (obs 59→60, zero-col @23) + v10 recipe + the step-up remodel.**
+Training now (`runs/ppo_v11`). NEXT: checkpoint-select (offline `eval_v8.py` + crevasse survival), device
+eval — VERIFY the device provides `next_ground_change_higher` first. Deploy floor v1 (1173); best-so-far
+v10 (best 2608, turns fixed, crevasse-limited median 615).
