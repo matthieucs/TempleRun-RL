@@ -169,3 +169,21 @@ Frida-over-TCP latency eating the turn-swipe window.
   turn_approach_buffer, warm-start v14. Trained-consistent with 16k. Residual deaths to beat: crevasse,
   narrow, pt-1 post-turn drift (strafe held into the junction). Target: > v14 1652.
 - Deploy note: v14+16k already ties v14+16i (1594≈1652) with turns SOLVED — 16k is a safe hook upgrade.
+
+## Night 2 (2026-07-04) — user feedback + clean turns + power-ups + small narrows
+User watched the phone, gave feedback:
+- **Turns looked "exploity/strange"** — my ShouldTurnLeft memory-write + every-frame flag-HOLD (16m) was
+  the culprit. REVERTED the hold. User chose (AskUserQuestion) the CLEAN version: single ShouldTurnLeft
+  write = the game's own swipe-queue (HandleDelayedTurning), what a real early swipe does. Hook 16o/16p.
+- **Small narrows: policy did nothing** — HUMAN DATA (human_calib_v2): human JUMPS small narrows (pt17/18)
+  82% of frames. Fix: hook 16p flags pt17/18 as must_jump -> v14 jumps them (device-verified is_jumping
+  6/6). No retrain (must_jump->jump generalizes). No sim change needed (reverted the sim small-narrow
+  branch — it broke narrow.rates/semantics scorecard; the hook flag + generalization suffices).
+- **Power-ups removed from obs** (user ask): 5 always-0 flags dropped, OBS_LEN 32->27. Surgery
+  ppo_v14_obs27.zip = EXACT (0/200 action mismatches vs v14). scorecard GREEN.
+- **DEVICE VERY FLAKY tonight** (degrades after ~1-3 eps; app alive but capture_calib bails). v14+16p best
+  run 2430m but pooled median dragged by short crevasse/hole deaths (likely device fatigue, not policy).
+- **v22 training**: warm-start v14-obs27 + hook_turn_buffer (sim models the swipe-queue: turns land
+  centered, timing-free) + turn_approach_buffer, obs27, 2M short fine-tune (limit drift). Goal: policy
+  turns cleanly (one command, no spam) consistent with 16p. Device-eval when the phone recovers.
+- Deploy floor still v14 (median 1652). Hook improvements (16p) + obs27 are the safe deliverable.
