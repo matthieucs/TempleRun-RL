@@ -150,6 +150,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
                                        # (sim cp 0.30, 0% marginal) so the tail-risk never bites — the
                                        # real turn gap is the ~2-frame CONTROL LATENCY (stale obs +
                                        # delayed exec), not marginal-swipe choice. Kept for reference.
+    "turn_exec_lat_frames": 0.0,       # CONTROL LATENCY on junction-cell swipes (default 0 = off). v20
+                                       # sets ~2.0 to model the phone's ~2-frame lag -> junction swipes
+                                       # LAND LATE (die at speed) -> forces the approach-buffer (immune).
     # APPROACH-BUFFER (flag, 2026-07-03, device probe_turn_window): the game's HandleDelayedTurning — a
     # swipe on the APPROACH cell (next cell is the junction) is HELD and fires CENTERED on entering the
     # junction (measured: an early approach-swipe flips facing ~4 frames later AT the junction). This is
@@ -983,7 +986,7 @@ class TempleRunSimEnv(gym.Env):
         else:
             self._kill(1)        # turn on a plain straight -> rotates off the path -> water
 
-    def _execute_turn(self, cell: dict, want_left: bool, swipe_cp: float) -> None:
+    def _execute_turn(self, cell: dict, want_left: bool, swipe_cp: float, from_buffer: bool = False) -> None:
         """Round the corner and LAND at a lateral offset set by the swipe cprog (device-measured):
         offset = (swipe_cp - center) * scale + carry(pre-turn lane). Land past the edge -> off the exit
         path -> Fall (water). Otherwise land there; the analog tilt recenters. Swipe at ~0.44 = centered."""
@@ -991,6 +994,16 @@ class TempleRunSimEnv(gym.Env):
         scale = float(self.cfg["turn_offset_scale"])
         kill = float(self.cfg["turn_land_kill"])
         carry = float(self.cfg["turn_lane_carry"])
+        # CONTROL LATENCY [DEVICE-MEASURED 2026-07-04]: on the phone the Frida-over-TCP loop lags a
+        # JUNCTION-CELL swipe by ~2 frames (obs staleness +~0.20cp + exec delay +~0.24cp), so it LANDS
+        # LATE (execution cp ~ swipe_cp + velocity*lat_frames*dt/cell). At speed this pushes the landing
+        # past the kill edge -> Fall. The APPROACH-BUFFER swipe is IMMUNE (from_buffer -> fires centered,
+        # HandleDelayedTurning), so with lat>0 the ONLY latency-robust strategy is to PRE-SWIPE on the
+        # approach cell. Default lat_frames=0 (fidelity harness / replay unchanged); v20 training turns it on.
+        if not from_buffer:
+            lat_frames = float(self.cfg.get("turn_exec_lat_frames", 0.0))
+            if lat_frames > 0.0:
+                swipe_cp = swipe_cp + self._velocity * lat_frames * float(self.step_dt) / float(self.cfg["cell_length"])
         # SIGN [DEVICE-MEASURED 2026-07-02, replay_diff turn-landing detail]: TurnLeft lands the runner
         # to the RIGHT of the new-path center when swiped late (cp>center), TurnRight to the LEFT — i.e.
         # left -> +offset, right -> -offset. (Was backwards, giving turn_land_err ~4.6; the magnitude
@@ -1167,7 +1180,7 @@ class TempleRunSimEnv(gym.Env):
             if bool(entered.get("is_turn")) and (
                     entered.get("can_turn_left") if _wl else entered.get("can_turn_right")):
                 self._pending_turn = None
-                self._execute_turn(entered, _wl, float(self.cfg["turn_center_cprog"]))
+                self._execute_turn(entered, _wl, float(self.cfg["turn_center_cprog"]), from_buffer=True)
                 if self._is_dead:
                     return
             else:
