@@ -187,3 +187,18 @@ User watched the phone, gave feedback:
   centered, timing-free) + turn_approach_buffer, obs27, 2M short fine-tune (limit drift). Goal: policy
   turns cleanly (one command, no spam) consistent with 16p. Device-eval when the phone recovers.
 - Deploy floor still v14 (median 1652). Hook improvements (16p) + obs27 are the safe deliverable.
+
+## Night-2 CONCLUSION
+- **All 3 user asks DONE:** clean swipe-queue turns (16o/16p), small narrows jumped (16p, human-grounded),
+  power-ups removed from obs (obs27, exact surgery). Deliverable = v14 + obs27 + hook 16p.
+- **v22 (12th retrain) regressed** (median 699). RETRAINING IS EXHAUSTED — 12 straight regressions
+  (v15-v22). v14 is a fragile optimum that warm-start+finetune always drifts below. STOP retraining.
+- **Device degraded tonight** (hours of runs): v14+16p AND v22 both die at crevasses ~600-800, anomalous
+  vs v14's normal 1652. Best run tonight 2430 (v14+16p). Numbers UNRELIABLE tonight — RE-MEASURE on a
+  FRESH/REBOOTED phone for the true median with 16p.
+- **What actually works here: HOOK/perception fixes** (native turn buffer, small-narrow must_jump), NOT
+  retraining. The turn wall broke via the game's own swipe-queue; narrows via a must_jump flag.
+- **Remaining wall = crevasses** (top death when device healthy). Same latency root as turns, but no clean
+  game-native fix (jumps are immediate, no corner-buffer). Needs either a perception "jump earlier" signal
+  + a training method that doesn't regress, or a fresh-device re-measure to confirm 16p's real median.
+- Device left on hook 16p (clean turns + small-narrow jump). Deploy model = v14 (runs/ppo_best.zip).
