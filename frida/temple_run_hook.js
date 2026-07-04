@@ -177,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'turnbuf-16j'; // 16j = TURN_BUFFER enabled (fires native turn at cp 0.40, 60Hz) — latency fix for the turn-timing ceiling
+const HOOK_VERSION = 'nativeturn-16k'; // 16k = route turns through the game's HandleDelayedTurning buffer (native timing)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -186,7 +186,10 @@ let cachedTurnDiag = null;          // lane offset + cell progress, for calibrat
 // off-center -> it falls off the exit path (measured: 9/12 on-device deaths). Firing the SAME turn at
 // the cell CENTER (progress ~0.45) lands it centered every time (postLat <=2). So we don't execute the
 // turn byte immediately: we LATCH it and fire when the player reaches the cell center.
-const TURN_BUFFER = true;       // 2026-07-04 LATENCY FIX (user-mandated): the NN still DECIDES to turn
+const TURN_BUFFER = false;      // superseded by TURN_NATIVE_BUFFER (game's own delayed-turn). Was: the
+                                // hook fires fn.TurnLeft at cp 0.40 — but a LATE byte (obs staleness)
+                                // fires immediately off-path. The native buffer handles late sends.
+const TURN_BUFFER_LEGACY = false; // 2026-07-04 LATENCY FIX (user-mandated): the NN still DECIDES to turn
                                 // (sends the byte near a junction); the hook fires the native TurnLeft/
                                 // Right at cell_progress 0.40 on the 60Hz Update -> removes the 10Hz
                                 // turn-timing latency (the ~2-frame lag that lands turns off-edge, the
@@ -215,6 +218,12 @@ const TILT_LEFT_SIGN = -1.0;    // sign of force X that moves the runner LEFT (v
 let tiltCmd = 0.0;              // commanded accelerometer force X (0 = level phone)
 const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress crosses this (cell-center)
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
+let giPtr = null;                  // GameController.GameInput* cached each Update (native delayed-turn write)
+// NATIVE DELAYED-TURN (2026-07-04): route the policy's turn byte through the game's OWN HandleDelayedTurning
+// buffer (set GI_ShouldTurnLeft/Right + TimeSinceShouldTurn=0) — the game then fires the turn at the corner
+// with its native timing, exactly like a real swipe. Handles late/early sends gracefully (unlike the
+// hook's immediate fn.TurnLeft, which overshoots on a late byte). Mutually exclusive with TURN_BUFFER.
+const TURN_NATIVE_BUFFER = true;
 let pendingTurn = 0;                // 0 none, 4 TurnLeft, 5 TurnRight (buffered, fires at cell center)
 let pendingTurnAge = 0;
 let pendingSawTurnCell = false;     // became true once we were on the turn cell while a turn is pending
@@ -563,6 +572,7 @@ function installHooks() {
       // turn-buffer state (GameInput @0x78) — the delayed-turn queue the probe measures
       try {
         const gi = gcInstance.add(OFF.GameInput).readPointer();
+        giPtr = gi;   // cache the GameInput* for the action dispatch (native delayed-turn write)
         if (!gi.isNull()) {
           cachedShouldTurnL = readBool(gi, OFF.GI_ShouldTurnLeft);
           cachedShouldTurnR = readBool(gi, OFF.GI_ShouldTurnRight);
@@ -893,9 +903,19 @@ function dispatchAction(a, gc, cp) {
     case 4: // TurnLeft — BUFFERED: latch it, fire at the cell center (maybeFireTurn) so it lands on-path.
     case 5: // TurnRight
       if (!cp.isNull()) {
-        if (TURN_BUFFER) {
-          // Only latch a turn the policy issues AT a junction (on it, or the next cell is one). A turn
-          // on a pure straight is a policy error that would kill -> drop it (don't fire later, off-edge).
+        if (TURN_NATIVE_BUFFER) {
+          // Route through the game's OWN HandleDelayedTurning buffer: set ShouldTurnLeft/Right +
+          // TimeSinceShouldTurn=0. The game fires the turn at the corner with native timing (like a real
+          // swipe) — forgiving of late/early sends. Only near a junction (else it's a policy error).
+          if ((cachedRawIsTurn || cachedNextIsTurn) && giPtr && !giPtr.isNull()) {
+            try {
+              if (a === 4) giPtr.add(OFF.GI_ShouldTurnLeft).writeU8(1);
+              else         giPtr.add(OFF.GI_ShouldTurnRight).writeU8(1);
+              giPtr.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
+              dbg('turn_native', a, 'prog', Math.round(cachedCellProg * 100) / 100);
+            } catch (_) { if (a === 4) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); }
+          } else { dbg('turn_ignore_straight', a); }
+        } else if (TURN_BUFFER_LEGACY) {
           if (cachedRawIsTurn || cachedNextIsTurn) {
             pendingTurn = a; pendingTurnAge = 0; pendingSawTurnCell = cachedRawIsTurn;
             maybeFireTurn(cp); // a turn issued LATE (already past cell center) fires immediately
