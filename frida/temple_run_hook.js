@@ -156,6 +156,11 @@ const POLL_MS = 100;  // 10 Hz broadcast. (Tried 20 Hz to cut turn-lag — the 2
 // LevelChange (7) marks a ZONE/ALTITUDE TRANSITION (path_level changes, e.g. 2->3 mid->high) which is
 // a CREVASSE that must be jumped — captured live: obstacle=7 + path_level 2->3 + no jump => fell+died.
 const MUST_JUMP_TYPES = [1, 3, 4, 7]; // Hole, TreeStumble, TreeJump, LevelChange(zone-transition crevasse)
+// SMALL NARROW (path_type 17/18) -> report as must_jump so the policy JUMPS it (human data 2026-07-04:
+// jumps 82% of small-narrow frames). Uses v14's existing jump-on-must_jump behavior (no retrain; the NN
+// still decides). Was modeled "center-safe" -> policy did nothing and barely survived by speed.
+const SMALL_NARROW_JUMP = true;
+const SMALL_NARROW_TYPES = [17, 18];
 const MUST_SLIDE_TYPES = [5, 6];      // kObstacleTreeSlide, kObstacleFlameTower
 
 // ---------------------------------------------------------------------------
@@ -177,7 +182,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'swipequeue-16o'; // 16o = game's swipe-queue (single ShouldTurn write, no flag-hold) — clean turn latency fix
+const HOOK_VERSION = 'narrowjump-16p'; // 16p = small narrows (pt17/18) flagged must_jump (human jumps 82%); swipe-queue turns
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -689,7 +694,8 @@ function installHooks() {
             cachedObst = pe.add(OFF.PE_Obstacles).readS32();
             cachedIsLevelChange = (cachedObst === OBST_LEVEL_CHANGE)
               || WIDE_GAP_TYPES.indexOf(cachedPathType) !== -1;  // wide gap (long hole / level change)
-            cachedMustJump = !cachedIsLevelChange && MUST_JUMP_TYPES.indexOf(cachedObst) !== -1;
+            cachedMustJump = (!cachedIsLevelChange && MUST_JUMP_TYPES.indexOf(cachedObst) !== -1)
+              || (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(cachedPathType) !== -1);
             cachedMustSlide = MUST_SLIDE_TYPES.indexOf(cachedObst) !== -1;
             // DEBUG: absolute neighbor existence + the query, to verify direction logic at junctions.
             const OPP = { 1: 3, 2: 4, 3: 1, 4: 2 }[facing] || facing;   // incoming dir = opposite of facing
@@ -711,6 +717,7 @@ function installHooks() {
               cachedNextMustJump = MUST_JUMP_TYPES.indexOf(nobs) !== -1;
               cachedNextMustSlide = MUST_SLIDE_TYPES.indexOf(nobs) !== -1;
               cachedNextPathType = nxt.add(OFF.PE_Type).readS32();
+              if (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(cachedNextPathType) !== -1) cachedNextMustJump = true;
               cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE)
                 || WIDE_GAP_TYPES.indexOf(cachedNextPathType) !== -1;
               // STEP-UP lookahead: the altitude Level RISES within the next 2 cells -> a raised ledge
