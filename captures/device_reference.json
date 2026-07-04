@@ -1,0 +1,1207 @@
+{
+ "_meta": {
+  "generated": "2026-07-02",
+  "note": "device truth frozen from captures; scorecard diffs sim vs THIS"
+ },
+ "turn_window": {
+  "source": "human_calib_v2.jsonl",
+  "values": {
+   "is_turn_cprog": {
+    "n": 391,
+    "med": 0.23152669270833334,
+    "p10": 0.08808186848958334,
+    "p90": 0.37550455729166665
+   },
+   "facing_change_cprog": {
+    "n": 365,
+    "med": 0.6759256998697917,
+    "p10": 0.55177001953125,
+    "p90": 0.8263069661458334
+   },
+   "is_turn_runlen": {
+    "1": "91%",
+    "2": "8%",
+    "3": "1%"
+   },
+   "next_is_turn_runlen": {
+    "2": "14%",
+    "3": "77%",
+    "4": "8%",
+    "5": "1%"
+   }
+  }
+ },
+ "velocity_curve": {
+  "source": "human_calib_v2.jsonl",
+  "edges": [
+   0,
+   200,
+   500,
+   1000,
+   1500,
+   2000,
+   3000,
+   4000,
+   6000,
+   10000
+  ],
+  "mean_per_bin": [
+   132.4,
+   155.5,
+   173.5,
+   183.4,
+   189.1,
+   197.0,
+   207.3,
+   210.0,
+   207.4
+  ]
+ },
+ "event_rates": {
+  "source": "human_calib_v2.jsonl",
+  "bands": {
+   "500-1500": {
+    "frames": 1127,
+    "is_turn%": 2.48,
+    "must_jump%": 10.47,
+    "must_slide%": 5.86,
+    "narrow%": 0.0,
+    "crevasse%": 3.82,
+    "airborne%": 23.43,
+    "sliding%": 9.41,
+    "vel_med": 179.8
+   },
+   "1500-3000": {
+    "frames": 1205,
+    "is_turn%": 4.15,
+    "must_jump%": 8.22,
+    "must_slide%": 4.07,
+    "narrow%": 11.54,
+    "crevasse%": 3.24,
+    "airborne%": 25.98,
+    "sliding%": 8.05,
+    "vel_med": 193.37
+   },
+   "3000-6000": {
+    "frames": 1416,
+    "is_turn%": 6.5,
+    "must_jump%": 6.64,
+    "must_slide%": 2.82,
+    "narrow%": 6.71,
+    "crevasse%": 2.12,
+    "airborne%": 20.48,
+    "sliding%": 5.58,
+    "vel_med": 210.0
+   }
+  }
+ },
+ "stumble": {
+  "source": [
+   "eval_stumble.jsonl",
+   "eval_stumble2.jsonl",
+   "human_calib_v2.jsonl"
+  ],
+  "values": {
+   "events": 3,
+   "slowdown_med": 0.85,
+   "slowdown_all": [
+    0.85,
+    0.85,
+    0.851
+   ],
+   "double_stumble_gap_fatal": [],
+   "double_stumble_gap_survived": [],
+   "kill_window_band": [
+    null,
+    null
+   ],
+   "documented": {
+    "kill_window_s": 2.0,
+    "slowdown": 0.85
+   }
+  }
+ },
+ "narrow_map": {
+  "source": [
+   "human_calib_v2.jsonl",
+   "human_calib_2026-06-26.jsonl",
+   "human.jsonl",
+   "human_turn_calib.jsonl",
+   "human_narrows.jsonl"
+  ],
+  "confidence": "measured",
+  "note": "human-play mined; needs the --narrow-override device sweep",
+  "values": {
+   "strip_len": {
+    "1": 53,
+    "3": 43,
+    "2": 45,
+    "5": 10,
+    "4": 20,
+    "6": 4,
+    "7": 3
+   },
+   "map": {
+    "17,N": {
+     "lanes": {
+      "L": [
+       5,
+       0
+      ],
+      "C": [
+       3,
+       0
+      ],
+      "R": [
+       9,
+       0
+      ]
+     },
+     "hook_guess": "C",
+     "safe": "R",
+     "surv_lane_band": [
+      -6.41,
+      6.78
+     ]
+    },
+    "17,S": {
+     "lanes": {
+      "L": [
+       4,
+       0
+      ],
+      "C": [
+       3,
+       0
+      ],
+      "R": [
+       8,
+       0
+      ]
+     },
+     "hook_guess": "C",
+     "safe": "R",
+     "surv_lane_band": [
+      -5.7,
+      7.0
+     ]
+    },
+    "18,E": {
+     "lanes": {
+      "C": [
+       1,
+       1
+      ],
+      "R": [
+       4,
+       0
+      ]
+     },
+     "hook_guess": "C",
+     "safe": "R",
+     "surv_lane_band": [
+      -3.64,
+      3.11
+     ]
+    },
+    "18,W": {
+     "lanes": {
+      "L": [
+       9,
+       0
+      ],
+      "C": [
+       2,
+       0
+      ],
+      "R": [
+       8,
+       0
+      ]
+     },
+     "hook_guess": "C",
+     "safe": "L",
+     "surv_lane_band": [
+      -7.0,
+      6.9
+     ]
+    },
+    "20,N": {
+     "lanes": {
+      "L": [
+       24,
+       0
+      ]
+     },
+     "hook_guess": "L",
+     "safe": "L",
+     "surv_lane_band": [
+      -7.0,
+      5.9
+     ]
+    },
+    "21,S": {
+     "lanes": {
+      "R": [
+       21,
+       0
+      ]
+     },
+     "hook_guess": "R",
+     "safe": "R",
+     "surv_lane_band": [
+      -5.51,
+      9.26
+     ]
+    },
+    "23,N": {
+     "lanes": {
+      "R": [
+       11,
+       0
+      ]
+     },
+     "hook_guess": "R",
+     "safe": "R",
+     "surv_lane_band": [
+      -3.04,
+      7.0
+     ]
+    },
+    "24,S": {
+     "lanes": {
+      "L": [
+       8,
+       0
+      ],
+      "R": [
+       2,
+       0
+      ]
+     },
+     "hook_guess": "L",
+     "safe": "L",
+     "surv_lane_band": [
+      -7.0,
+      2.84
+     ]
+    },
+    "26,E": {
+     "lanes": {
+      "L": [
+       17,
+       0
+      ]
+     },
+     "hook_guess": "R",
+     "safe": "L",
+     "surv_lane_band": [
+      -7.0,
+      6.71
+     ]
+    },
+    "27,W": {
+     "lanes": {
+      "R": [
+       9,
+       0
+      ]
+     },
+     "hook_guess": "L",
+     "safe": "R",
+     "surv_lane_band": [
+      -4.05,
+      6.99
+     ]
+    },
+    "29,E": {
+     "lanes": {
+      "R": [
+       14,
+       0
+      ]
+     },
+     "hook_guess": "L",
+     "safe": "R",
+     "surv_lane_band": [
+      0.77,
+      7.0
+     ]
+    },
+    "30,W": {
+     "lanes": {
+      "L": [
+       14,
+       0
+      ],
+      "C": [
+       1,
+       0
+      ]
+     },
+     "hook_guess": "R",
+     "safe": "L",
+     "surv_lane_band": [
+      -7.0,
+      5.93
+     ]
+    }
+   }
+  },
+  "region_bands": {
+   "-1,N": [
+    [
+     3,
+     7
+    ]
+   ],
+   "17,N": [
+    [
+     -7,
+     -1
+    ]
+   ],
+   "17,S": [
+    [
+     -7,
+     -2
+    ],
+    [
+     1,
+     7
+    ]
+   ],
+   "18,E": [
+    [
+     1,
+     7
+    ]
+   ],
+   "18,W": [
+    [
+     -7,
+     -1
+    ]
+   ],
+   "19,N": [
+    [
+     -7,
+     -2
+    ]
+   ],
+   "19,S": [
+    [
+     2,
+     7
+    ]
+   ],
+   "20,N": [
+    [
+     -7,
+     -2
+    ]
+   ],
+   "20,S": [
+    [
+     2,
+     7
+    ]
+   ],
+   "21,N": [
+    [
+     -7,
+     -2
+    ]
+   ],
+   "21,S": [
+    [
+     2,
+     7
+    ]
+   ],
+   "22,N": [
+    [
+     3,
+     7
+    ]
+   ],
+   "22,S": [
+    [
+     -7,
+     -3
+    ]
+   ],
+   "23,N": [
+    [
+     3,
+     7
+    ]
+   ],
+   "23,S": [
+    [
+     -7,
+     -3
+    ]
+   ],
+   "24,N": [
+    [
+     3,
+     7
+    ]
+   ],
+   "24,S": [
+    [
+     -7,
+     -3
+    ]
+   ],
+   "25,E": [
+    [
+     -7,
+     -3
+    ]
+   ],
+   "25,W": [
+    [
+     3,
+     7
+    ]
+   ],
+   "26,E": [
+    [
+     -7,
+     -3
+    ]
+   ],
+   "26,W": [
+    [
+     3,
+     7
+    ]
+   ],
+   "27,E": [
+    [
+     -7,
+     -3
+    ]
+   ],
+   "27,W": [
+    [
+     3,
+     7
+    ]
+   ],
+   "28,E": [
+    [
+     2,
+     7
+    ]
+   ],
+   "28,W": [
+    [
+     -7,
+     -2
+    ]
+   ],
+   "29,E": [
+    [
+     2,
+     7
+    ]
+   ],
+   "29,W": [
+    [
+     -7,
+     -2
+    ]
+   ],
+   "30,E": [
+    [
+     2,
+     7
+    ]
+   ],
+   "30,W": [
+    [
+     -7,
+     -2
+    ]
+   ]
+  }
+ },
+ "crevasse": {
+  "source": [
+   "eval_stumble.jsonl",
+   "eval_stumble2.jsonl",
+   "turnfix_eval.jsonl",
+   "turnfix2_eval.jsonl",
+   "lateral_eval.jsonl",
+   "deploy_faithful.jsonl",
+   "deploy_faithful3.jsonl",
+   "deploy_faithful4.jsonl",
+   "deploy_faithful4b.jsonl",
+   "deploy_faithful5.jsonl",
+   "deploy_faithful6.jsonl",
+   "deploy_faithful6b.jsonl",
+   "human_narrows.jsonl",
+   "human_calib_v2.jsonl"
+  ],
+  "confidence": "measured",
+  "values": {
+   "altitude": {
+    "1->2": {
+     "n": 41,
+     "survived": 41,
+     "fell": 0,
+     "path_types": {
+      "2": 306,
+      "1": 217,
+      "34": 49,
+      "35": 30,
+      "33": 29,
+      "36": 21
+     },
+     "obstacles": {
+      "0": 518,
+      "7": 129,
+      "1": 2,
+      "3": 5,
+      "6": 2
+     },
+     "gap_cell_span": {
+      "1": 35,
+      "2": 6
+     },
+     "takeoff_cprog_surv": [
+      0.1,
+      0.1,
+      0.12,
+      0.17,
+      0.17,
+      0.2,
+      0.23,
+      0.24,
+      0.28,
+      0.3,
+      0.32,
+      0.37,
+      0.37,
+      0.4,
+      0.41,
+      0.42,
+      0.42,
+      0.43,
+      0.44,
+      0.49,
+      0.52,
+      0.53,
+      0.59,
+      0.59,
+      0.6,
+      0.61,
+      0.63,
+      0.63,
+      0.69,
+      0.71,
+      0.71,
+      0.74,
+      0.79,
+      0.8,
+      0.81,
+      0.84,
+      0.89,
+      0.9,
+      0.91,
+      1.0,
+      1.02
+     ],
+     "takeoff_cprog_died": []
+    },
+    "2->1": {
+     "n": 30,
+     "survived": 30,
+     "fell": 0,
+     "path_types": {
+      "1": 232,
+      "2": 154,
+      "36": 41,
+      "33": 20,
+      "34": 18,
+      "35": 15
+     },
+     "obstacles": {
+      "0": 386,
+      "7": 94
+     },
+     "gap_cell_span": {
+      "1": 24,
+      "2": 6
+     },
+     "takeoff_cprog_surv": [
+      0.18,
+      0.19,
+      0.27,
+      0.47,
+      0.49,
+      0.66,
+      0.74,
+      0.87,
+      0.91,
+      0.93,
+      1.01,
+      1.02
+     ],
+     "takeoff_cprog_died": []
+    },
+    "2->3": {
+     "n": 27,
+     "survived": 21,
+     "fell": 6,
+     "path_types": {
+      "1": 131,
+      "2": 95,
+      "35": 52,
+      "36": 48,
+      "34": 39,
+      "33": 38
+     },
+     "obstacles": {
+      "0": 226,
+      "7": 177
+     },
+     "gap_cell_span": {
+      "3": 7,
+      "2": 20
+     },
+     "takeoff_cprog_surv": [
+      0.16,
+      0.24,
+      0.3,
+      0.3,
+      0.3,
+      0.3,
+      0.31,
+      0.31,
+      0.33,
+      0.33,
+      0.35,
+      0.35,
+      0.36,
+      0.38,
+      0.53,
+      0.57,
+      0.58,
+      0.83,
+      0.97,
+      1.01,
+      1.03
+     ],
+     "takeoff_cprog_died": [
+      0.76,
+      0.78,
+      0.82,
+      0.83,
+      0.85,
+      0.86
+     ]
+    },
+    "3->1": {
+     "n": 11,
+     "survived": 11,
+     "fell": 0,
+     "path_types": {
+      "1": 101,
+      "2": 39,
+      "36": 15,
+      "33": 9,
+      "35": 9,
+      "11": 3
+     },
+     "obstacles": {
+      "0": 140,
+      "7": 33,
+      "1": 3
+     },
+     "gap_cell_span": {
+      "1": 11
+     },
+     "takeoff_cprog_surv": [
+      0.21,
+      0.22,
+      0.43,
+      0.68,
+      0.75
+     ],
+     "takeoff_cprog_died": []
+    },
+    "3->2": {
+     "n": 6,
+     "survived": 6,
+     "fell": 0,
+     "path_types": {
+      "1": 30,
+      "2": 27,
+      "34": 10,
+      "33": 9,
+      "35": 9,
+      "36": 9
+     },
+     "obstacles": {
+      "0": 57,
+      "7": 37,
+      "6": 2
+     },
+     "gap_cell_span": {
+      "2": 6
+     },
+     "takeoff_cprog_surv": [
+      0.58,
+      0.78,
+      0.8,
+      0.86,
+      0.95,
+      1.03
+     ],
+     "takeoff_cprog_died": []
+    }
+   },
+   "same_level": {
+    "events": 108,
+    "survived": 105,
+    "fell": 3,
+    "cell_span": {
+     "1": 70,
+     "2": 34,
+     "5": 1,
+     "3": 3
+    },
+    "path_types": {
+     "36": 77,
+     "34": 67,
+     "15": 42,
+     "16": 42,
+     "33": 58,
+     "12": 49,
+     "13": 129,
+     "35": 54
+    },
+    "takeoff_cprog_surv": [
+     0.06,
+     0.08,
+     0.08,
+     0.1,
+     0.1,
+     0.12,
+     0.13,
+     0.14,
+     0.15,
+     0.15,
+     0.17,
+     0.17,
+     0.18,
+     0.19,
+     0.2,
+     0.2,
+     0.21,
+     0.21,
+     0.22,
+     0.23,
+     0.23,
+     0.24,
+     0.27,
+     0.27,
+     0.28,
+     0.29,
+     0.3,
+     0.32,
+     0.37,
+     0.37,
+     0.4,
+     0.41,
+     0.42,
+     0.42,
+     0.43,
+     0.43,
+     0.44,
+     0.49,
+     0.52,
+     0.53,
+     0.54,
+     0.57,
+     0.59,
+     0.59,
+     0.6,
+     0.61,
+     0.63,
+     0.63,
+     0.66,
+     0.68,
+     0.69,
+     0.71,
+     0.71,
+     0.72,
+     0.73,
+     0.74,
+     0.75,
+     0.79,
+     0.8,
+     0.81,
+     0.82,
+     0.84,
+     0.87,
+     0.87,
+     0.88,
+     0.89,
+     0.89,
+     0.89,
+     0.9,
+     0.91,
+     0.91,
+     0.91,
+     0.93,
+     0.94,
+     0.98,
+     1.0,
+     1.01,
+     1.02,
+     1.02,
+     1.05
+    ],
+    "takeoff_cprog_died": [
+     0.68,
+     1.01
+    ]
+   }
+  },
+  "controlled_sweep": {
+   "source": "crevasse_sweep.jsonl",
+   "curve": {
+    "0.2": [
+     {
+      "takeoff": 0.39,
+      "survived": false
+     },
+     {
+      "takeoff": 0.26,
+      "survived": true
+     },
+     {
+      "takeoff": 0.42,
+      "survived": true
+     }
+    ],
+    "0.35": [
+     {
+      "takeoff": 0.36,
+      "survived": true
+     },
+     {
+      "takeoff": 0.43,
+      "survived": true
+     },
+     {
+      "takeoff": 0.57,
+      "survived": false
+     }
+    ],
+    "0.5": [
+     {
+      "takeoff": 0.73,
+      "survived": true
+     },
+     {
+      "takeoff": 0.62,
+      "survived": true
+     },
+     {
+      "takeoff": 0.54,
+      "survived": true
+     }
+    ],
+    "0.65": [
+     {
+      "takeoff": 0.8,
+      "survived": true
+     },
+     {
+      "takeoff": 0.66,
+      "survived": true
+     },
+     {
+      "takeoff": 0.92,
+      "survived": false
+     }
+    ],
+    "0.8": [
+     {
+      "takeoff": 0.81,
+      "survived": true
+     },
+     {
+      "takeoff": 0.96,
+      "survived": true
+     },
+     {
+      "takeoff": 0.85,
+      "survived": true
+     }
+    ],
+    "0.9": [
+     {
+      "takeoff": 1.02,
+      "survived": false
+     },
+     {
+      "takeoff": 0.98,
+      "survived": true
+     }
+    ]
+   }
+  }
+ },
+ "lateral": {
+  "source": "strafe_probe_tilt2.jsonl",
+  "hook": "lateral-accel-15a",
+  "values": {
+   "model": "first-order lag, alpha per 0.1s control frame",
+   "phases": {
+    "base": [
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 6,
+      "lane_start": 0,
+      "lane_end": 0
+     }
+    ],
+    "Lhold": [
+     {
+      "n": 10,
+      "lane_start": -2.28,
+      "lane_end": -6.98
+     },
+     {
+      "n": 10,
+      "lane_start": 0,
+      "lane_end": -6.73
+     },
+     {
+      "n": 10,
+      "lane_start": 0,
+      "lane_end": -6.73
+     },
+     {
+      "n": 10,
+      "lane_start": 0,
+      "lane_end": -6.75
+     },
+     {
+      "n": 10,
+      "lane_start": 0,
+      "lane_end": -6.86
+     },
+     {
+      "n": 10,
+      "lane_start": 0,
+      "lane_end": -4.39
+     },
+     {
+      "n": 10,
+      "lane_start": 0,
+      "lane_end": -6.75
+     }
+    ],
+    "Lhold_settle": [
+     {
+      "n": 15,
+      "lane_start": -5.06,
+      "lane_end": -0.03
+     },
+     {
+      "n": 15,
+      "lane_start": 0,
+      "lane_end": 0
+     },
+     {
+      "n": 15,
+      "lane_start": -5.07,
+      "lane_end": -0.13
+     },
+     {
+      "n": 15,
+      "lane_start": -5.13,
+      "lane_end": -0.04
+     },
+     {
+      "n": 15,
+      "lane_start": -3.76,
+      "lane_end": -0.11
+     },
+     {
+      "n": 15,
+      "lane_start": -5.07,
+      "lane_end": -0.0
+     }
+    ],
+    "Rhold": [
+     {
+      "n": 10,
+      "lane_start": -0.06,
+      "lane_end": 4.38
+     },
+     {
+      "n": 10,
+      "lane_start": 2.22,
+      "lane_end": 6.98
+     },
+     {
+      "n": 10,
+      "lane_start": 2.28,
+      "lane_end": 6.98
+     }
+    ],
+    "Rhold_settle": [
+     {
+      "n": 15,
+      "lane_start": 3.76,
+      "lane_end": 0.0
+     },
+     {
+      "n": 15,
+      "lane_start": 6.99,
+      "lane_end": 0.0
+     },
+     {
+      "n": 15,
+      "lane_start": 6.99,
+      "lane_end": 0.0
+     }
+    ],
+    "Lpulse": [
+     {
+      "n": 2,
+      "lane_start": -2.28,
+      "lane_end": -4.38
+     },
+     {
+      "n": 2,
+      "lane_start": -1.79,
+      "lane_end": -4.11
+     },
+     {
+      "n": 2,
+      "lane_start": -1.79,
+      "lane_end": -4.11
+     }
+    ],
+    "Lpulse_settle": [
+     {
+      "n": 15,
+      "lane_start": -3.61,
+      "lane_end": -0.0
+     },
+     {
+      "n": 15,
+      "lane_start": -3.61,
+      "lane_end": -0.0
+     },
+     {
+      "n": 15,
+      "lane_start": -3.61,
+      "lane_end": -0.0
+     }
+    ],
+    "flipL": [
+     {
+      "n": 8,
+      "lane_start": -2.28,
+      "lane_end": -4.42
+     },
+     {
+      "n": 8,
+      "lane_start": -1.79,
+      "lane_end": -5.27
+     },
+     {
+      "n": 8,
+      "lane_start": -0.0,
+      "lane_end": -6.51
+     }
+    ],
+    "flipR": [
+     {
+      "n": 8,
+      "lane_start": -1.01,
+      "lane_end": 6.87
+     },
+     {
+      "n": 8,
+      "lane_start": -2.46,
+      "lane_end": 6.85
+     },
+     {
+      "n": 8,
+      "lane_start": -3.15,
+      "lane_end": 6.85
+     }
+    ],
+    "flip_settle": [
+     {
+      "n": 15,
+      "lane_start": 5.14,
+      "lane_end": 0.0
+     },
+     {
+      "n": 15,
+      "lane_start": 6.92,
+      "lane_end": 0.01
+     },
+     {
+      "n": 15,
+      "lane_start": 6.49,
+      "lane_end": 0.0
+     }
+    ]
+   },
+   "alpha_hold": 0.446,
+   "alpha_recenter": 0.446,
+   "alpha_hold_all": 0.326,
+   "alpha_recenter_all": 0.446,
+   "reach": 7.0,
+   "wall_bounce_observed": true
+  }
+ }
+}

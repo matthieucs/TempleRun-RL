@@ -12,6 +12,7 @@ frida-server*
 *.keystore
 tr-debug.keystore
 *.png
+!assets/banner.png
 
 # --- RL run outputs ---
 runs/
@@ -35,3 +36,20 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# recorded phone traces (data; can be large)
+traces/
+logs/
+captures/
+# keep only the committed device-truth reference the scorecard reads (not raw capture dumps)
+!captures/device_reference.json
+
+# --- sim-calibration session (2026-06-26): throwaway logs + device capture dumps ---
+*.log
+.human_log.out
+captures/deploy_*.jsonl
+captures/demo_baseline.jsonl
+captures/calib_passive.jsonl
+captures/turn6_partial.jsonl
+captures/human_snap.jsonl
+captures/human.jsonl

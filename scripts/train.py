@@ -58,13 +58,23 @@ def parse_args() -> argparse.Namespace:
                    help="multiply the cap by this on each pure-truncation (with --grow-episode-steps)")
     p.add_argument("--max-episode-steps-ceiling", type=int, default=6000,
                    help="hard upper bound the growing cap can never exceed (~10 min at 0.1 s/step)")
-    p.add_argument("--reward-scale", type=float, default=0.01)
+    p.add_argument("--reward-mode", choices=("distance", "score"), default="distance",
+                   help="reward signal: 'distance' (DistanceTraveled-delta, the true objective; immune "
+                        "to the challenge score-multiplier) or 'score' (legacy, multiplier-inflated)")
+    p.add_argument("--reward-scale", type=float, default=0.1,
+                   help="reward = reward-delta * scale; 0.1 suits distance (~1-2/step), use 0.01 for score")
     p.add_argument("--death-penalty", type=float, default=1.0)
     # reward shaping (opt-in) — speeds learning / curbs early thrashing; see env._shaping_reward
     p.add_argument("--action-cost", type=float, default=0.0,
                    help="penalty per non-NoOp action (curb thrashing); try ~0.02-0.05")
     p.add_argument("--reaction-bonus", type=float, default=0.0,
                    help="bonus for the correct jump/slide/turn reaction; try ~0.1 (> action-cost)")
+    p.add_argument("--turn-spam-penalty", type=float, default=0.0,
+                   help="penalty for a turn right after another turn (curb junction turn-spam); try ~0.15 (> reaction-bonus)")
+    p.add_argument("--idle-action-penalty", type=float, default=0.0,
+                   help="penalty for JUMP with no must_jump / SLIDE with no must_slide (curb erratic jumping/sliding); try ~0.06")
+    p.add_argument("--ent-coef", type=float, default=0.003,
+                   help="PPO entropy bonus; HIGH (0.01) keeps the policy random/'excited', LOW (~0.003) lets it commit to NoOp+reactions. Applied on resume too.")
     return p.parse_args()
 
 
@@ -90,9 +100,12 @@ def _make_one(args: argparse.Namespace, index: int):
             max_episode_steps_growth=args.max_episode_steps_growth,
             max_episode_steps_ceiling=args.max_episode_steps_ceiling,
             reward_scale=args.reward_scale,
+            reward_mode=args.reward_mode,
             death_penalty=args.death_penalty,
             action_cost=args.action_cost,
             reaction_bonus=args.reaction_bonus,
+            turn_spam_penalty=args.turn_spam_penalty,
+            idle_action_penalty=args.idle_action_penalty,
         )
         return Monitor(env)
 
@@ -118,6 +131,8 @@ def main() -> None:
     if args.resume:
         print(f"Resuming from {args.resume}")
         model = PPO.load(args.resume, env=env, tensorboard_log=args.tensorboard)
+        model.ent_coef = args.ent_coef  # apply the (lowered) entropy bonus to the resumed policy too
+        print(f"  ent_coef set to {args.ent_coef}")
     else:
         model = PPO(
             "MlpPolicy",
@@ -128,7 +143,7 @@ def main() -> None:
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.01,            # encourage exploration across the 7 actions
+            ent_coef=args.ent_coef,   # entropy bonus; low -> commit to NoOp+reactions, high -> stay random
             learning_rate=3e-4,
             vf_coef=0.5,
             max_grad_norm=0.5,
