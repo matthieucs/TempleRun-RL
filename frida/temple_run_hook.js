@@ -1068,7 +1068,8 @@ function snapshot() {
     s.path_type = readI32(pe, OFF.PE_Type);
     s.path_level = readI32(pe, OFF.PE_Level);
     const obs = readI32(pe, OFF.PE_Obstacles);
-    s.must_jump = MUST_JUMP_TYPES.indexOf(obs) !== -1;
+    s.must_jump = (MUST_JUMP_TYPES.indexOf(obs) !== -1)
+      || (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(s.path_type) !== -1);   // small narrow -> jump
     s.must_slide = MUST_SLIDE_TYPES.indexOf(obs) !== -1;
     s.obstacle = obs;   // raw ObstacleType enum (diagnose crevasse / tree-root)
     // COINS on the nearest cell (CoinRunLocation: 0 None, 1 Center, 2 Left, 3 Right)
