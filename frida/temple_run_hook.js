@@ -177,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'nativeturn-16k'; // 16k = route turns through the game's HandleDelayedTurning buffer (native timing)
+const HOOK_VERSION = 'nativeturn-16l'; // 16l = native delayed-turn + anti-double-turn debounce + valid-dir guard
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -219,6 +219,7 @@ let tiltCmd = 0.0;              // commanded accelerometer force X (0 = level ph
 const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress crosses this (cell-center)
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
 let giPtr = null;                  // GameController.GameInput* cached each Update (native delayed-turn write)
+let nativeTurnCd = 0;              // Update-frame cooldown after a native turn (anti double-turn debounce)
 // NATIVE DELAYED-TURN (2026-07-04): route the policy's turn byte through the game's OWN HandleDelayedTurning
 // buffer (set GI_ShouldTurnLeft/Right + TimeSinceShouldTurn=0) — the game then fires the turn at the corner
 // with its native timing, exactly like a real swipe. Handles late/early sends gracefully (unlike the
@@ -573,6 +574,7 @@ function installHooks() {
       try {
         const gi = gcInstance.add(OFF.GameInput).readPointer();
         giPtr = gi;   // cache the GameInput* for the action dispatch (native delayed-turn write)
+        if (nativeTurnCd > 0) nativeTurnCd--;   // tick down the anti-double-turn debounce
         if (!gi.isNull()) {
           cachedShouldTurnL = readBool(gi, OFF.GI_ShouldTurnLeft);
           cachedShouldTurnR = readBool(gi, OFF.GI_ShouldTurnRight);
@@ -908,12 +910,22 @@ function dispatchAction(a, gc, cp) {
           // TimeSinceShouldTurn=0. The game fires the turn at the corner with native timing (like a real
           // swipe) — forgiving of late/early sends. Only near a junction (else it's a policy error).
           if ((cachedRawIsTurn || cachedNextIsTurn) && giPtr && !giPtr.isNull()) {
-            try {
-              if (a === 4) giPtr.add(OFF.GI_ShouldTurnLeft).writeU8(1);
-              else         giPtr.add(OFF.GI_ShouldTurnRight).writeU8(1);
-              giPtr.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
-              dbg('turn_native', a, 'prog', Math.round(cachedCellProg * 100) / 100);
-            } catch (_) { if (a === 4) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); }
+            const wantL = (a === 4);
+            // Only fire a GEOMETRICALLY VALID exit (else the flag mis-turns), and DEBOUNCE: after one
+            // native turn, ignore further turn bytes for ~0.3s so the policy's double/opposite-turn spam
+            // (v14 wasn't trained that one byte suffices) can't over-rotate off the path (the pt-1 Falls).
+            const valid = wantL ? (cachedCanLeft || cachedNextCanLeft) : (cachedCanRight || cachedNextCanRight);
+            if (nativeTurnCd > 0) { dbg('turn_debounce', a); }
+            else if (!valid) { dbg('turn_invalid_dir', a); }
+            else {
+              try {
+                if (wantL) giPtr.add(OFF.GI_ShouldTurnLeft).writeU8(1);
+                else       giPtr.add(OFF.GI_ShouldTurnRight).writeU8(1);
+                giPtr.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
+                nativeTurnCd = 18;   // ~0.3s @60Hz Update — anti double-turn
+                dbg('turn_native', a, 'prog', Math.round(cachedCellProg * 100) / 100);
+              } catch (_) { if (wantL) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); }
+            }
           } else { dbg('turn_ignore_straight', a); }
         } else if (TURN_BUFFER_LEGACY) {
           if (cachedRawIsTurn || cachedNextIsTurn) {

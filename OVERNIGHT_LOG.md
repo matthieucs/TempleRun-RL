@@ -151,3 +151,21 @@ v14 (median 1652) is the ceiling for the current sim + obs + control rate.**
   to calibrate the sim's crevasse apex (`stepup_min_height` / takeoff window) instead of guessing — the
   deep-crevasse @2908 death is the target. TODO: verify the sim lets a cp-0.58 approach-takeoff clear at
   v210; adjust if it demands a later takeoff.
+
+## 2026-07-04 — LATENCY WORK: native delayed-turn buffer BREAKS the turn ceiling
+User mandate: reduce latency, especially if it improves performance. Root cause was the ~2-frame
+Frida-over-TCP latency eating the turn-swipe window.
+
+- **16j** (hook fires `fn.TurnLeft` at cp 0.40, 60Hz): v14+16j device median 1017 — turns timing-fixed
+  (overshoots 2/8) but a LATE byte (obs staleness) fires immediately off-path, and the after-turn CREVASSE
+  combo appeared (6/8, v14 not trained for it). v20 (retrain, harsh lane-carry buffer model): 1177.
+- **16k** (route the turn byte through the game's OWN `HandleDelayedTurning`: write `GI_ShouldTurnLeft/Right`
+  + `TimeSinceShouldTurn=0` — the game fires it at the corner with native timing, like a real swipe):
+  **v14+16k device median 1594, best 2020, turn-overshoots 0/8. Turns SOLVED, NO regression, NO retrain.**
+  The native buffer lands turns CENTERED (device: landing lane ~0, corr w/ approach lane -0.06). This is
+  the clean turn fix — the ceiling mechanism (turn-timing latency) is broken.
+- v20+16k = 404 (harsh-buffer-trained policy inconsistent w/ the forgiving native buffer; high variance).
+- **NEXT: v21** = retrain with the sim modeling 16k (native-buffer turns land CENTERED, offset 0) +
+  turn_approach_buffer, warm-start v14. Trained-consistent with 16k. Residual deaths to beat: crevasse,
+  narrow, pt-1 post-turn drift (strafe held into the junction). Target: > v14 1652.
+- Deploy note: v14+16k already ties v14+16i (1594≈1652) with turns SOLVED — 16k is a safe hook upgrade.
