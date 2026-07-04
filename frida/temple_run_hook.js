@@ -177,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'nativeturn-16l'; // 16l = native delayed-turn + anti-double-turn debounce + valid-dir guard
+const HOOK_VERSION = 'nativeturn-16m'; // 16m = hold ShouldTurn flag across the junction window (catch near-corner-late commands)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -220,6 +220,8 @@ const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress c
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
 let giPtr = null;                  // GameController.GameInput* cached each Update (native delayed-turn write)
 let nativeTurnCd = 0;              // Update-frame cooldown after a native turn (anti double-turn debounce)
+let heldTurnDir = 0;              // 4/5: a turn intent HELD across the junction window (re-writes the game's
+let heldTurnFrames = 0;          // ShouldTurn flag each Update so a borderline-late command still catches the corner)
 // NATIVE DELAYED-TURN (2026-07-04): route the policy's turn byte through the game's OWN HandleDelayedTurning
 // buffer (set GI_ShouldTurnLeft/Right + TimeSinceShouldTurn=0) — the game then fires the turn at the corner
 // with its native timing, exactly like a real swipe. Handles late/early sends gracefully (unlike the
@@ -575,6 +577,20 @@ function installHooks() {
         const gi = gcInstance.add(OFF.GameInput).readPointer();
         giPtr = gi;   // cache the GameInput* for the action dispatch (native delayed-turn write)
         if (nativeTurnCd > 0) nativeTurnCd--;   // tick down the anti-double-turn debounce
+        // HOLD the turn intent across the junction window: re-write the game's ShouldTurn flag each Update
+        // (60Hz) so a command that arrived a hair late still fires when the runner hits the corner. Clears
+        // once the game turned (JustTurned) or the window elapses. Safe: past the junction the flag no-ops.
+        if (heldTurnFrames > 0 && !gi.isNull()) {
+          if (cachedJustTurned) { heldTurnFrames = 0; heldTurnDir = 0; }
+          else {
+            try {
+              if (heldTurnDir === 4) gi.add(OFF.GI_ShouldTurnLeft).writeU8(1);
+              else                   gi.add(OFF.GI_ShouldTurnRight).writeU8(1);
+              gi.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
+            } catch (_) {}
+            heldTurnFrames--;
+          }
+        }
         if (!gi.isNull()) {
           cachedShouldTurnL = readBool(gi, OFF.GI_ShouldTurnLeft);
           cachedShouldTurnR = readBool(gi, OFF.GI_ShouldTurnRight);
@@ -922,6 +938,7 @@ function dispatchAction(a, gc, cp) {
                 if (wantL) giPtr.add(OFF.GI_ShouldTurnLeft).writeU8(1);
                 else       giPtr.add(OFF.GI_ShouldTurnRight).writeU8(1);
                 giPtr.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
+                heldTurnDir = a; heldTurnFrames = 10;  // HOLD ~0.17s so a near-corner command still fires
                 nativeTurnCd = 18;   // ~0.3s @60Hz Update — anti double-turn
                 dbg('turn_native', a, 'prog', Math.round(cachedCellProg * 100) / 100);
               } catch (_) { if (wantL) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); }
