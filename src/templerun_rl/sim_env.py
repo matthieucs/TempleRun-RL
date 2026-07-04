@@ -146,7 +146,10 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # instead of the sim-safe-but-device-fatal marginal zone. replay_diff sets pmax=0 (deterministic).
     "turn_tail_cp_lo": 0.50,
     "turn_tail_cp_hi": 0.64,
-    "turn_tail_pmax": 0.20,
+    "turn_tail_pmax": 0.0,             # DEFAULT OFF (2026-07-04): v19 showed v14 ALREADY aims early
+                                       # (sim cp 0.30, 0% marginal) so the tail-risk never bites — the
+                                       # real turn gap is the ~2-frame CONTROL LATENCY (stale obs +
+                                       # delayed exec), not marginal-swipe choice. Kept for reference.
     # APPROACH-BUFFER (flag, 2026-07-03, device probe_turn_window): the game's HandleDelayedTurning — a
     # swipe on the APPROACH cell (next cell is the junction) is HELD and fires CENTERED on entering the
     # junction (measured: an early approach-swipe flips facing ~4 frames later AT the junction). This is
