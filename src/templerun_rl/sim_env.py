@@ -163,6 +163,8 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # TimeSinceShouldTurn timeout). Pre-turn lane STILL carries (turn_lane_carry) -> the buffer helps only
     # a CENTERED approach; leaning in still lands off (correct lesson: center, then approach-swipe).
     "turn_approach_buffer": False,     # gate the buffer mechanic (train_sim --turn-approach-buffer)
+    "hook_turn_buffer": False,         # models hook 16j TURN_BUFFER=true: junction-cell turn fires
+                                       # CENTERED (timing-free) — removes the 10Hz turn latency. v20 on.
     "turn_buffer_ttl": 3,              # cells a latched approach-swipe persists before timing out
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
@@ -956,6 +958,16 @@ class TempleRunSimEnv(gym.Env):
         # DIRECT turn: on the junction cell, within the executable window, valid exit side. The turn
         # executes at ANY cprog in [early, late] but WHERE the swipe lands depends on cprog (see
         # _execute_turn) — swipe at cell center to land centered.
+        # HOOK TURN-BUFFER (2026-07-04) — models temple_run_hook.js TURN_BUFFER=true (hook 16j): a turn
+        # byte issued anywhere ON the junction cell fires the native turn CENTERED at cell-center (cp 0.40)
+        # on the 60Hz Update, timing-free. Removes the 10Hz turn-timing latency (the v14 ceiling). The
+        # policy must still be CENTERED (offset = lane*carry) and swipe near the junction; it no longer
+        # needs precise cp timing. Sim + device now MATCH on turns. Approach-cell pre-swipes are handled by
+        # turn_approach_buffer (enable both together).
+        if self.cfg.get("hook_turn_buffer") and bool(cell.get("is_turn")) and (
+                cell.get("can_turn_left") if want_left else cell.get("can_turn_right")):
+            self._execute_turn(cell, want_left, float(self.cfg["turn_center_cprog"]), from_buffer=True)
+            return
         early = float(self.cfg["turn_exec_early"])
         late = float(self.cfg["turn_exec_late"])
         if bool(cell.get("is_turn")) and early <= cp <= late and (

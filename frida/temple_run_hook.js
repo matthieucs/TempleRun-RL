@@ -177,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'lateral-accel-16i'; // 16i = next_ground_change_higher via LevelChange obstacle (deployable; future PE_Level unreadable)
+const HOOK_VERSION = 'turnbuf-16j'; // 16j = TURN_BUFFER enabled (fires native turn at cp 0.40, 60Hz) — latency fix for the turn-timing ceiling
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -186,7 +186,12 @@ let cachedTurnDiag = null;          // lane offset + cell progress, for calibrat
 // off-center -> it falls off the exit path (measured: 9/12 on-device deaths). Firing the SAME turn at
 // the cell CENTER (progress ~0.45) lands it centered every time (postLat <=2). So we don't execute the
 // turn byte immediately: we LATCH it and fire when the player reaches the cell center.
-const TURN_BUFFER = false;      // NN decides turns (no hook buffering). lane/cell_progress obs stay on.
+const TURN_BUFFER = true;       // 2026-07-04 LATENCY FIX (user-mandated): the NN still DECIDES to turn
+                                // (sends the byte near a junction); the hook fires the native TurnLeft/
+                                // Right at cell_progress 0.40 on the 60Hz Update -> removes the 10Hz
+                                // turn-timing latency (the ~2-frame lag that lands turns off-edge, the
+                                // v14 ceiling). Execution-timing fix (like the lateral=analog-tilt),
+                                // NOT a decision rule. Drops turns issued on a pure straight. obs stay on.
 // FINER LATERAL CONTROL (2026-07-01, user-approved 3-level tilt): the native StrafeLeft/Right SET a
 // persistent PlayerXOffset (±7) that the policy can NEVER un-set to 0 -> stuck off-center -> fatal turns.
 // Instead the hook OWNS the lateral: the policy commands a TARGET (byte0 -> -reach hold, byte1 -> +reach
