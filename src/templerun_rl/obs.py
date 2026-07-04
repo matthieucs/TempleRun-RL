@@ -21,8 +21,9 @@ FACING_MAX = 4.0   # PathDirection: None=0, N=1, E=2, S=3, W=4
 # Observation vector layout: the bool flags (incl. 1-cell lookahead), then normalized scalars.
 OBS_BOOL_FIELDS = (
     "is_dead", "is_jumping", "is_sliding", "is_on_ground", "is_stumbling",
-    "has_invincibility", "has_angel_wings", "has_vacuum", "has_boost",
-    "is_mega_boost", "is_strafing", "must_jump", "must_slide", "is_game_over",
+    # power-ups REMOVED 2026-07-04 (user): never spawn on device (rate 0) nor in the sim -> always-0 dead
+    # inputs. has_invincibility/has_angel_wings/has_vacuum/has_boost/is_mega_boost dropped. OBS_LEN 32->27.
+    "is_strafing", "must_jump", "must_slide", "is_game_over",
     "can_turn_left", "can_turn_right", "is_turn",
     # 1-cell lookahead — anticipation (see a junction/obstacle before it's the nearest cell).
     "next_is_turn", "next_can_turn_left", "next_can_turn_right", "next_must_jump", "next_must_slide",
