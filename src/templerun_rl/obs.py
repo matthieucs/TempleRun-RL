@@ -1,6 +1,6 @@
 """Observation encoding: raw game-state dict -> normalized float32 vector.
 
-The policy sees an OBS_LEN-element ``Box(0, 1)`` vector (see OBS_FIELDS; 32 as of 2026-07-03). We deliberately exclude the raw
+The policy sees an OBS_LEN-element ``Box(0, 1)`` vector (see OBS_FIELDS; 28 as of 2026-07-04). We deliberately exclude the raw
 ``score`` (unbounded / accumulating -> would break MlpPolicy normalization); it feeds
 the reward instead and is always available in ``info["raw_state"]``.
 """
@@ -38,9 +38,9 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # fire a turn at cell-center instead of too early), lane = which of the 3 lanes (L/C/R) the runner is in
 # (for narrow strips). Both come from the hook (CharacterPlayer.GetPosition2D + PathElement.Rectangle)
 # and from the sim's own state — they are OBSERVATIONS, not actions.
-OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing")
+OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing", "predicted_jump")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 24 bool/lookahead + 4 scalar + 4 extra = 32 (keep derived from OBS_FIELDS)
+OBS_LEN = len(OBS_FIELDS)  # 19 bool/lookahead + 4 scalar + 5 extra = 28 (keep derived from OBS_FIELDS)
 
 # Lane geometry (real device units, 2026-07-01 tilt-controlled model): the lateral position is
 # CONTINUOUS and centered on 0 — center 0, one strafe ~ 3.7 -> lanes at -3.7 / 0 / +3.7, side walls
@@ -65,6 +65,42 @@ LANE_RIGHT_MIN = 1.85
 # dt/cell_len 0.1/60; one shared constant keeps sim-training and device-deploy consistent (<5% on the
 # device cell_len, absorbed by DR).
 DCPROG_PER_VEL = 0.1 / 60.0   # per-frame cprog advance per unit velocity (= step_dt / cell_length)
+
+# PREDICTED-JUMP geometry (2026-07-04) — the CREVASSE analog of predicted_landing (device-measured
+# human_calib_v2: step-UP crevasses jumped 100%, and the takeoff LEAD scales with velocity — the human
+# takes off ~on the gap @v150 but ~1.5 cells early @v210). The sim's step-up death model
+# (sim_env `_check_death`) is a parabola: airborne span = jump_duration*velocity/cell_length cells, and
+# the runner must reach the raised LEDGE (2 cells ahead of the current cell when next_ground_change_higher
+# fires: cell1=gap, cell2=ledge) NEAR the apex (frac 0.5) or it clips the wall (DeathType 4 Ledge). So the
+# ideal takeoff is 0.5*span cells before the ledge. `predicted_jump` projects "how far am I from that ideal
+# takeoff point", velocity-invariant, so the policy learns ONE threshold ("jump when predicted_jump ~=
+# JUMP_NOW") that self-adjusts across speeds — the same trick predicted_landing used to break the turn wall
+# at all speeds. Derived host-side from the already-streamed cell_progress+velocity+next_ground_change_higher
+# (NO hook change; deployable). Constants match the sim's jump_duration/cell_length so sim-train == device.
+JUMP_DURATION = 0.8    # s — device jump airtime (= sim cfg jump_duration); span = JUMP_DURATION*v/CELL_LENGTH
+CELL_LENGTH = 60.0     # device units per path cell (= sim cfg cell_length; consistent w/ DCPROG_PER_VEL)
+LEDGE_CELLS_AHEAD = 2.0  # when next_ground_change_higher fires: cell1 = gap, cell2 = raised ledge (apex here)
+PJ_NONE = 1.0          # sentinel when no step-up crevasse is imminent (far from any ledge -> don't jump)
+
+
+def predicted_jump_obs(cell_progress, velocity, crevasse_ahead) -> float:
+    """Velocity-invariant step-up jump-timing cue. When a zone crevasse is the next cell
+    (``crevasse_ahead``), returns how far the runner is from the IDEAL takeoff point (small value ~=
+    "take off NOW"); otherwise ``PJ_NONE`` (far). Monotonic in the distance-to-ideal-takeoff, computed
+    identically in sim + on device so the learned threshold transfers.
+
+    dist_to_ledge = LEDGE_CELLS_AHEAD - cell_progress (cells to the raised ledge);
+    lead_needed    = 0.5 * span                       (take off half a span before the ledge = apex there);
+    raw            = dist_to_ledge - lead_needed       (0 = take off now, >0 too early, <0 too late).
+    """
+    if not crevasse_ahead:
+        return PJ_NONE
+    v = float(velocity or 0.0)
+    cp = float(cell_progress if cell_progress is not None else 0.0)
+    span = JUMP_DURATION * v / CELL_LENGTH
+    raw = (LEDGE_CELLS_AHEAD - cp) - 0.5 * span
+    # map the useful range [-0.5, 1.5] -> [0,1] (raw=0 "jump now" -> 0.25); clip keeps it bounded.
+    return float(np.clip((raw + 0.5) / 2.0, 0.0, 1.0))
 
 
 def lane_to_obs(lane) -> float:
@@ -126,7 +162,7 @@ def make_observation_space(frame_stack: int = 1, action_history_len: int = 0) ->
 
 
 def state_to_obs(state: dict) -> np.ndarray:
-    """Convert a raw state dict to the base (OBS_LEN=31) normalized float32 observation vector.
+    """Convert a raw state dict to the base (OBS_LEN=28) normalized float32 observation vector.
 
     Tolerant of missing keys (falls back to ``constants.STATE_DEFAULTS``) so a
     malformed/truncated JSON line never crashes a step. Action history (if any) is appended
@@ -153,6 +189,9 @@ def state_to_obs(state: dict) -> np.ndarray:
     # turn timing. Derived host-side from the already-streamed cell_progress + velocity (no hook change).
     cp0 = cp if cp is not None else 0.0
     out[base + 7] = float(np.clip(cp0 + DCPROG_PER_VEL * v, 0.0, 1.0))
+    # predicted_jump: velocity-invariant step-up crevasse takeoff cue (see predicted_jump_obs). Gated on
+    # next_ground_change_higher (the zone-crevasse-ahead flag, set by the sim snapshot / device hook).
+    out[base + 8] = predicted_jump_obs(cp0, v, g("next_ground_change_higher"))
     return out
 
 

@@ -202,3 +202,44 @@ User watched the phone, gave feedback:
   game-native fix (jumps are immediate, no corner-buffer). Needs either a perception "jump earlier" signal
   + a training method that doesn't regress, or a fresh-device re-measure to confirm 16p's real median.
 - Device left on hook 16p (clean turns + small-narrow jump). Deploy model = v14 (runs/ppo_best.zip).
+
+## 2026-07-04 (day) — CREVASSE PERCEPTION: `predicted_jump` obs built, STANDBY for tomorrow
+User insight (investigated + device-confirmed): (1) the game DOES expose altitude — `CharacterPlayer.
+GroundHeight` (0x134): human capture is a clean 3-level map `path_level 1/2/3 = gh -15/0/+15` = low/mid/
+high; (2) the RANDOM-START SPEED curriculum hurt crevasses — device-proven: pre-curriculum ppo_valid_v1
+had crevasse deaths 4/111, and the moment the speed curriculum landed (ppo_speed_v8) → "4/4 CREVASSE falls
+@v165-180, negative transfer, high-speed weight degraded mid-speed jump timing."
+
+REFRAME (per-direction human jump rates, human_calib_v2): step-UP crevasses (gh rises: -15→0, 0→+15)
+jumped **100%**; step-down (0→-15) 12%. Current altitude is ALREADY visible via `path_level` (in obs) — so
+the death cause is NOT missing altitude, it's **step-up apex TIMING at high velocity** (the killer the v8
+curriculum scattered). "jump every cap" is safe for up+down, so direction-from-mid isn't fatal.
+
+FIX BUILT (offline, NOT yet retrained — user said standby): **`predicted_jump` obs** — the crevasse analog
+of `predicted_landing`. Velocity-invariant step-up takeoff cue derived host-side from cell_progress +
+velocity + next_ground_change_higher (NO hook change, deployable). Encodes "how far from the ideal takeoff
+(0.5·span before the raised ledge)". Verified: jump-now cue at cp=1.0 @v150 (on-gap) → cp=0.6 @v210 (1.4
+cells early) = the exact human law, as ONE threshold (pj≈0.25). obs.py: OBS_LEN 27→28, predicted_jump @
+base+8. Scorecard `--strict` GREEN (0 FAIL/SKIP; crevasse.curve/speed still pass). Warm-start surgery EXACT
+(0/300 mismatches): `runs/ppo_v14_obs28_predjump.zip` (insert zero col @27 → v14 skills preserved, new cue
+starts at 0 influence). `scratchpad/surgery_v23_predjump.py`.
+
+### TOMORROW — exact steps (phone was OFFLINE tonight)
+1. **Fresh/rebooted phone → re-measure v14** (standing task; tonight's device was degraded). ⚠️ obs.py is
+   now OBS_LEN 28 → deployed v14 (width 60) won't load cleanly under capture_calib's K-inference. To
+   re-measure v14 first: `git stash` (or checkout obs.py from before commit) so OBS_LEN reverts, run
+   capture_calib on runs/ppo_best.zip, then `git stash pop`.
+2. **Retrain v23 (predicted_jump)** — v14/v9 recipe, warm-start the surgery base:
+   ```
+   .venv/bin/python scripts/train_sim.py --init-from runs/ppo_v14_obs28_predjump.zip \
+     --timesteps 3000000 --net-arch 128,128 --action-history-len 4 --frame-stack 1 \
+     --turn-linger 3 --ent-coef 0.04 --narrow-hold-bonus 0.18 --aim-center-weight 1.0 \
+     --slide-jump-penalty 0.15 --curriculum-max-start-dist 5000 --out runs/ppo_v23_predjump
+   ```
+   Keep the BEST checkpoint (runs/ppo_v23_predjump_*_steps.zip), not _final (late collapse).
+3. **Device-eval v23 vs v14** (hook 16p, fresh phone), classify crevasse (Ledge dt=4) deaths. This is the
+   make-or-break — same bet predicted_landing made for turns (won on device, flat offline).
+4. If v23 crevasses still regress: try the curriculum angle directly (crevasse cells sampled uniformly
+   across velocity, or lower deep-start frac) now that the policy can SEE the velocity-invariant cue.
+NOTE: predicted_jump is PERCEPTION (NN still decides all actions) — the endorsed category, not a 13th
+blind retrain. Everything offline-validated; only the device eval + retrain remain, both for tomorrow.
