@@ -77,7 +77,7 @@ def main() -> None:
         eps[f.get("ep", 0)].append(f)
 
     env = gym.make("TempleRunSim-v0", max_episode_steps=100000,
-                   config=dict(domain_rand=False)).unwrapped
+                   config=dict(domain_rand=False, turn_tail_pmax=0.0)).unwrapped  # deterministic one-step replay
     cell_len = float(env.cfg["cell_length"])
 
     # per (family, action): agreement + errors

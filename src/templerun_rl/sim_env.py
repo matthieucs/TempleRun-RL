@@ -140,6 +140,13 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
                                        # tilt); probe: offset 8-10 survived, >=11 (swipe <=0.14 or
                                        # >=0.61) died. Survivable swipe window ~[0.24, 0.64].
     "turn_window_frac": 0.60,          # [alias] is_turn presentation upper bound = turn_exec_late
+    # MARGINAL-ZONE TAIL RISK [DEVICE-MEASURED 2026-07-04]: swipes in [cp_lo, cp_hi] get a probabilistic
+    # catastrophic-landing kill ramping 0 -> pmax with cp (device death: cp0.50-0.58 ~8%, 0.58-0.64 ~18%),
+    # even when the deterministic offset would survive. Forces the policy to aim EARLY (reliable cp<0.50)
+    # instead of the sim-safe-but-device-fatal marginal zone. replay_diff sets pmax=0 (deterministic).
+    "turn_tail_cp_lo": 0.50,
+    "turn_tail_cp_hi": 0.64,
+    "turn_tail_pmax": 0.20,
     # APPROACH-BUFFER (flag, 2026-07-03, device probe_turn_window): the game's HandleDelayedTurning — a
     # swipe on the APPROACH cell (next cell is the junction) is HELD and fires CENTERED on entering the
     # junction (measured: an early approach-swipe flips facing ~4 frames later AT the junction). This is
@@ -998,6 +1005,22 @@ class TempleRunSimEnv(gym.Env):
         if abs(offset) > kill:
             self._kill(1)   # landed off the exit path -> water
             return
+        # MARGINAL-ZONE TAIL RISK [DEVICE-MEASURED 2026-07-04, 150 pooled turn-swipes]: a swipe in the
+        # marginal cp window occasionally lands CATASTROPHICALLY off-path (lane ~22 -> Fall) even when the
+        # deterministic offset would survive. Device death rate by swipe cp: 0.35-0.50 ~0%, 0.50-0.58 ~8%,
+        # 0.58-0.64 ~18% (median landing only ~4-5 — it's a sharp cliff at cp~0.60 + 10Hz frame
+        # quantization, NOT velocity/tilt driven). The deterministic sim can't see this, so retrains aim at
+        # the sim-safe marginal zone (cp 0.5-0.55) and die on device. Model it: a probabilistic kill that
+        # ramps with cp above turn_tail_cp_lo -> the sim PENALIZES aiming near the cliff -> the policy learns
+        # to aim EARLY (reliable cp<0.50) like v14. replay_diff sets turn_tail_pmax=0 (deterministic replay).
+        lo = float(self.cfg.get("turn_tail_cp_lo", 0.50))
+        hi = float(self.cfg.get("turn_tail_cp_hi", 0.64))
+        pmax = float(self.cfg.get("turn_tail_pmax", 0.20))
+        if pmax > 0.0 and swipe_cp > lo:
+            p = min(pmax, (swipe_cp - lo) / max(1e-6, hi - lo) * pmax)
+            if self._rng.random() < p:
+                self._kill(1)   # device marginal-zone tail: catastrophic off-path landing
+                return
         self._lane = offset          # lands here; the HELD tilt keeps pushing (lat_target unchanged)
         self._tilt_dir = 0
         self._turn_landed = True      # device shows the FULL landing at f+1; skip the recenter THIS step
