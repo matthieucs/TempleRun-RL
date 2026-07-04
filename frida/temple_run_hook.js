@@ -177,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'nativeturn-16m'; // 16m = hold ShouldTurn flag across the junction window (catch near-corner-late commands)
+const HOOK_VERSION = 'clean-16n'; // 16n = reverted to plain fn.TurnLeft (normal turns; native-buffer hack off per user)
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -226,7 +226,9 @@ let heldTurnFrames = 0;          // ShouldTurn flag each Update so a borderline-
 // buffer (set GI_ShouldTurnLeft/Right + TimeSinceShouldTurn=0) — the game then fires the turn at the corner
 // with its native timing, exactly like a real swipe. Handles late/early sends gracefully (unlike the
 // hook's immediate fn.TurnLeft, which overshoots on a late byte). Mutually exclusive with TURN_BUFFER.
-const TURN_NATIVE_BUFFER = true;
+const TURN_NATIVE_BUFFER = false;  // REVERTED 2026-07-04: user flagged the ShouldTurnLeft memory-write +
+                                   // flag-hold as an exploit ("strange turns, not what I want"). Back to
+                                   // plain fn.TurnLeft (the normal turn a swipe triggers). Code kept, off.
 let pendingTurn = 0;                // 0 none, 4 TurnLeft, 5 TurnRight (buffered, fires at cell center)
 let pendingTurnAge = 0;
 let pendingSawTurnCell = false;     // became true once we were on the turn cell while a turn is pending
