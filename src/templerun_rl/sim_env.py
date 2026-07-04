@@ -1028,7 +1028,15 @@ class TempleRunSimEnv(gym.Env):
         # survives. This is the on-device NN death the controlled track exposed (leaning into turns);
         # it forces the policy to CENTER (NoOp) before swiping. The tilt target is NOT reset here (it
         # persists through the turn on device), so a still-held strafe keeps the drift going after.
-        offset = sign * (swipe_cp - center) * scale + self._lane * carry
+        if from_buffer:
+            # NATIVE delayed-turn buffer (hook 16k): the game fires the turn at the corner and lands the
+            # runner CENTERED on the exit path — device-measured landing lane ~0, corr w/ approach lane
+            # = -0.06 (NO cp timing, NO lane amplification). v14+16k: 0/8 turn overshoots. The HELD tilt
+            # (lat_target) still drifts the lane AFTER, modelling the pt-1 post-turn Falls (strafe held
+            # into the turn). So the ONLY residual is: don't hold a strafe into the junction.
+            offset = 0.0
+        else:
+            offset = sign * (swipe_cp - center) * scale + self._lane * carry
         self._facing = _LEFT_OF[self._facing] if want_left else _RIGHT_OF[self._facing]
         if abs(offset) > kill:
             self._kill(1)   # landed off the exit path -> water
