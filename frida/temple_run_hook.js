@@ -177,7 +177,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'clean-16n'; // 16n = reverted to plain fn.TurnLeft (normal turns; native-buffer hack off per user)
+const HOOK_VERSION = 'swipequeue-16o'; // 16o = game's swipe-queue (single ShouldTurn write, no flag-hold) — clean turn latency fix
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -226,9 +226,9 @@ let heldTurnFrames = 0;          // ShouldTurn flag each Update so a borderline-
 // buffer (set GI_ShouldTurnLeft/Right + TimeSinceShouldTurn=0) — the game then fires the turn at the corner
 // with its native timing, exactly like a real swipe. Handles late/early sends gracefully (unlike the
 // hook's immediate fn.TurnLeft, which overshoots on a late byte). Mutually exclusive with TURN_BUFFER.
-const TURN_NATIVE_BUFFER = false;  // REVERTED 2026-07-04: user flagged the ShouldTurnLeft memory-write +
-                                   // flag-hold as an exploit ("strange turns, not what I want"). Back to
-                                   // plain fn.TurnLeft (the normal turn a swipe triggers). Code kept, off.
+const TURN_NATIVE_BUFFER = true;   // CLEAN version (2026-07-04, user choice): queue the turn ONCE via the
+                                   // game's own swipe buffer (ShouldTurnLeft) — exactly what a real early
+                                   // swipe does. The buggy every-frame flag-HOLD is removed (see handler).
 let pendingTurn = 0;                // 0 none, 4 TurnLeft, 5 TurnRight (buffered, fires at cell center)
 let pendingTurnAge = 0;
 let pendingSawTurnCell = false;     // became true once we were on the turn cell while a turn is pending
@@ -940,8 +940,9 @@ function dispatchAction(a, gc, cp) {
                 if (wantL) giPtr.add(OFF.GI_ShouldTurnLeft).writeU8(1);
                 else       giPtr.add(OFF.GI_ShouldTurnRight).writeU8(1);
                 giPtr.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
-                heldTurnDir = a; heldTurnFrames = 10;  // HOLD ~0.17s so a near-corner command still fires
-                nativeTurnCd = 18;   // ~0.3s @60Hz Update — anti double-turn
+                // (flag-HOLD removed — single write only, like a real swipe. The game's own buffer window
+                //  handles the corner timing; re-writing every frame was the buggy "exploit" look.)
+                nativeTurnCd = 18;   // ~0.3s @60Hz Update — anti double-turn (ignore a redundant 2nd byte)
                 dbg('turn_native', a, 'prog', Math.round(cachedCellProg * 100) / 100);
               } catch (_) { if (wantL) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); }
             }
