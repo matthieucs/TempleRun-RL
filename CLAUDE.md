@@ -148,9 +148,24 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 - **USER (live, 2026-07-06): low-speed dumb deaths (missed transition/turn) are the MEDIAN killer** —
   high speed works; prioritize low-speed reliability.
 
+**2026-07-06 EARLY — fresh-phone round 2 + JUMP-BYTE RULES (the low-speed dumb deaths):**
+- **v31 fresh: median 1331 best 2442 — turn hesitation CURED (1 junction death/91; dropout fix VERIFIED
+  on device).** v27 fresh: 1266/3864, still 5/8 missed turns (predates the dropout fix — kills the
+  "phone-state explains v27 turns" theory). v14 floor 2010/5462 stands.
+- **The game EATS Jump() bytes — 3 device-measured rules (131 grounded attempts):** (1) 56% refused while
+  the lane glides >0.8/frame vs 4% settled → sim `jump_refuse_strafing_prob 0.6` DEFAULT (gate
+  |target−lane|>1.8, settled narrow-riders unaffected); (2) refused on wide-gap/crevasse cells past the
+  lip cp~0.2 → `gap_jump_lip_cp 0.2` DEFAULT (takeoff = APPROACH cell; ALL grounded-at-gap crevasse
+  deaths were act-2 spam refused there); (3) "landing lock" = airborne rule + 10Hz phase, already covered
+  by jump_exec_lat 1±1. Refusals PERMANENT in context — the lesson is avoid-the-state, not retry-spam.
+  These explain v31's 3/8 crevasse deaths (its learned strafe-LEFT-before-crevasse habit — crevasse-zone
+  lane −2.56 vs v14 −0.46 — was free in the old sim, lethal on device) and the user-flagged low-speed
+  dumb deaths. Crevasse LATERAL sensitivity refuted (n=108: 13% vs 12% death rate).
+
 **WHERE WE ARE (2026-07-06):**
 - **Deploy floor = v14** (`runs/ppo_best.zip`, fresh-phone **median 2010, best 5462**; width 60 — needs
   v14-era obs.py: use a git worktree at 949a6e2, PYTHONPATH=wt/src, NOT a stash).
-- Crevasses: v27 best in-sim (3/20 @v210 vs v14 8/20; device 1/8 on tired phone). Fresh-phone v27 re-eval
-  RUNNING (`captures/v27_freshphone.jsonl`) → then v31@200k same-session. Best of the two = new candidate.
+- **v32 training** (v31 recipe + the 3 jump rules + jump_drop 0.1): must learn level-then-jump +
+  approach-cell takeoff + retry. Then fresh-phone eval vs the 2010 floor. Next perception lever queued:
+  next2-obstacle obs (chained-jump blindness @v200, both v14 long-run deaths).
 - NN decides all actions. Branch `sim-calibration` (safe to merge; `runs/*.zip`+MODELS.md gitignored).
