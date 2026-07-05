@@ -354,6 +354,9 @@ def main() -> None:
                    help="control tick seconds. 0.05 = 20 Hz (halves the on-device turn lag). MUST match "
                         "the hook POLL_MS and eval --step-dt. Pair with turn_linger ~4 at 20 Hz.")
     p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--learning-rate", type=float, default=3e-4,
+                   help="PPO LR. LOWER (e.g. 5e-5) for a GENTLE warm-start refinement that adopts new obs "
+                        "without knocking v14 off its fragile peak (the warm-start-collapse fix).")
     p.add_argument("--action-delay", type=int, default=0,
                    help="steps to buffer the action before applying. EXPERIMENTAL/off: delay=1 "
                         "over-models the phone lag and breaks the missed-turn death (a buffered turn "
@@ -387,7 +390,7 @@ def main() -> None:
     model = PPO(
         "MlpPolicy", venv,
         n_steps=512, batch_size=64, n_epochs=10, gamma=0.99, gae_lambda=0.95,
-        ent_coef=args.ent_coef, learning_rate=3e-4, clip_range=0.2,
+        ent_coef=args.ent_coef, learning_rate=args.learning_rate, clip_range=0.2,
         policy_kwargs=dict(net_arch=net_arch),
         tensorboard_log="runs/tb_sim", verbose=0,
     )

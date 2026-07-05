@@ -300,6 +300,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # is_sliding median 7 = 0.70s. The old 0.6 made the runner airborne ~2x too little vs real (14% vs
     # 22-32%) AND made the 2-cell crevasse too harsh — a real 0.8s jump spans ~2.8 cells at top speed.
     "jump_duration": 0.8,             # [MEASURED] airtime — IsJumping true ~0.80s
+    # JUMP EXECUTION LATENCY (2026-07-05): the device fires a jump ~1-2 frames after the command (TCP +
+    # obs-staleness + frame lag), the SAME control latency that kills turns — but the sim fired jumps
+    # INSTANTLY, giving a too-forgiving ~6-frame survival window at ALL speeds (measured). So v14 learned a
+    # lazy "jump anywhere in the window" that works in-sim but the device latency pushes off the real
+    # (narrower, speed-shifted) window -> Ledge deaths at high speed. Model it: buffer the jump firing by
+    # jump_exec_lat_frames (+/- jump_exec_lat_jitter frames of noise so the landing isn't perfectly
+    # predictable -> narrows the RELIABLE window). This forces the policy to PRE-AIM using predicted_jump
+    # (the velocity-invariant takeoff cue), which is exactly what should transfer to the phone. TRAINING
+    # only; the fidelity harness/replay run at 0 (instant, for one-step device-transition tests).
+    "jump_exec_lat_frames": 0,        # mean frames the JUMP action is buffered before it fires (0 = instant)
+    "jump_exec_lat_jitter": 0,        # +/- uniform frame jitter on the above (models latency variance)
     "slide_duration": 0.7,            # [MEASURED] SlideDuration ~0.70s
     "strafe_duration": 0.25,          # [INFERRED] strafe lane-shift dur@0x12C
     # [DEVICE-MEASURED 2026-06-26] a strafe is a GRADUAL lateral glide, not an instant lane jump: one
@@ -529,6 +540,7 @@ class TempleRunSimEnv(gym.Env):
         # off, so a level-UP crevasse can check the runner jumped late enough (near the gap edge). None
         # until the first jump; refreshed each fresh takeoff (a new jump only starts once airborne ends).
         self._jump_takeoff_pos: Optional[float] = None
+        self._pending_jump_frames = 0     # >0 = a JUMP command buffered by jump_exec_lat_frames, fires at 0
         self._slide_t = 0.0
         self._strafe_t = 0.0
         self._stumble_t = 0.0
@@ -906,10 +918,17 @@ class TempleRunSimEnv(gym.Env):
         if a == int(C.Action.JUMP):
             # only meaningful from the ground; sets IsJumping for jump_duration.
             if self._jump_t <= 0.0 and self._slide_t <= 0.0:
-                self._jump_t = float(cfg["jump_duration"])
-                # record WHERE this jump took off (longitudinal pos) — the step-up crevasse checks the
-                # runner jumped late enough (near the gap edge) so an early jump fails on the raised wall.
-                self._jump_takeoff_pos = self._long_pos()
+                lat = int(cfg.get("jump_exec_lat_frames", 0))
+                if lat > 0 and self._pending_jump_frames <= 0:
+                    # DEVICE JUMP LATENCY: don't fire now — schedule the takeoff `lat` (+/- jitter) frames
+                    # later (see jump_exec_lat_frames). The policy must PRE-AIM (predicted_jump).
+                    jit = int(cfg.get("jump_exec_lat_jitter", 0))
+                    self._pending_jump_frames = max(1, lat + (self._rng.integers(-jit, jit + 1) if jit > 0 else 0))
+                elif lat <= 0:
+                    self._jump_t = float(cfg["jump_duration"])
+                    # record WHERE this jump took off (longitudinal pos) — the step-up crevasse checks the
+                    # runner jumped late enough (near the gap edge) so an early jump fails on the raised wall.
+                    self._jump_takeoff_pos = self._long_pos()
         elif a == int(C.Action.SLIDE):
             if self._slide_t <= 0.0 and self._jump_t <= 0.0:
                 self._slide_t = float(cfg["slide_duration"])
@@ -1082,6 +1101,15 @@ class TempleRunSimEnv(gym.Env):
         the model so their own tiers stay meaningful. ``None`` = procedural: cross on velocity*dt.
         """
         cfg = self.cfg
+
+        # DEVICE JUMP LATENCY: a buffered JUMP command fires `jump_exec_lat_frames` steps after it was
+        # issued (see _apply_action). Count down and fire at the CURRENT position (so the takeoff is later
+        # than the policy's command -> it must pre-aim). Only fires if still grounded.
+        if self._pending_jump_frames > 0:
+            self._pending_jump_frames -= 1
+            if self._pending_jump_frames == 0 and self._jump_t <= 0.0 and self._slide_t <= 0.0:
+                self._jump_t = float(cfg["jump_duration"])
+                self._jump_takeoff_pos = self._long_pos()
 
         # tick down transient flags.
         self._jump_t = max(0.0, self._jump_t - dt)
