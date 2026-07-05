@@ -165,10 +165,18 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   lane −2.56 vs v14 −0.46 — was free in the old sim, lethal on device) and the user-flagged low-speed
   dumb deaths. Crevasse LATERAL sensitivity refuted (n=108: 13% vs 12% death rate).
 
-**WHERE WE ARE (2026-07-06):**
-- **Deploy floor = v14** (`runs/ppo_best.zip`, fresh-phone **median 2010, best 5462**; width 60 — needs
-  v14-era obs.py: use a git worktree at 949a6e2, PYTHONPATH=wt/src, NOT a stash).
-- **v32 training** (v31 recipe + the 3 jump rules + jump_drop 0.1): must learn level-then-jump +
-  approach-cell takeoff + retry. Then fresh-phone eval vs the 2010 floor. Next perception lever queued:
-  next2-obstacle obs (chained-jump blindness @v200, both v14 long-run deaths).
+**WHERE WE ARE (2026-07-06 dawn) — FLOOR SMASHED via obs freshness (hook 16t):**
+- **16s diag (turn-write verdicts) closed the junction case:** misses = DEAD-LETTER writes (flag written,
+  game's consume deadline live-cp ~0.67, pipeline med 0.21cp/tail 0.40) — policy decisions were perfect
+  all along. **16t = 30 Hz state broadcast (control stays 10 Hz, env drains to newest)** → sampling age
+  50→17ms → dead letters gone for EVERY model, no retrain.
+- **Fresh-phone @16t: v34@2M median 2863 best 4525, junctions 1/254 | v14 median 2833 best 6399
+  (ALL-TIME), junctions 3/255, crevasses 44/46.** Obs freshness = the dominant lift (+40% median both);
+  v34's trained rules = cleaner junctions. **DEPLOY = v34@2M (`runs/ppo_v34_carryfix_2000000_steps.zip`)
+  + hook 16t.**
+- Remaining walls (death mix @16t): (1) LOW-SPEED crevasse timing 600-1000m (median killer both models —
+  user-flagged priority), (2) gap/chained-jump blindness at speed (v14's 4633/6399 deaths, dt4 pt14) →
+  **next2-obstacle obs** (hook 2-ahead walk verified; breaks only through turns). Sim recalib notes:
+  gate 0.56 ≈ deadline 0.67 − 30Hz pipeline 0.10 (still right); jump_exec_lat 1±1 now slightly
+  over-modeled (fresher obs) — revisit with the next retrain.
 - NN decides all actions. Branch `sim-calibration` (safe to merge; `runs/*.zip`+MODELS.md gitignored).
