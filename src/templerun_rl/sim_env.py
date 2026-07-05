@@ -166,8 +166,16 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "hook_turn_buffer": False,         # models hook 16j TURN_BUFFER=true: junction-cell turn fires
                                        # CENTERED (timing-free) — removes the 10Hz turn latency. v20 on.
     "turn_buffer_ttl": 3,              # cells a latched approach-swipe persists before timing out
-    "turn_buffer_late_cp": 0.50,       # [2026-07-05] junction swipe queued past this cp = arrives past the
-                                       # corner (device +0.17cp staleness) -> MISS (see late-queue gate)
+    "turn_queue_lat_frames": 2.0,      # [2026-07-05 v2] junction swipe-queue ARRIVAL lag (1 obs-stale +
+                                       # 1 exec/TCP frame): the byte lands at cp + lat*vel*dt/cell_len; past
+                                       # the corner (1.0) = MISS. Device-validated on v27_deviceeval: all 4
+                                       # missed-turn deaths (v180-186) have every swipe arriving 1.01-1.25;
+                                       # survivors arrive <1.0. Velocity-dependent: safe swipe cp <=0.67
+                                       # @v100 but <=0.30 @v210 (frame spacing 0.35 -> a safe junction frame
+                                       # may NOT EXIST at speed -> approach-cell pre-swipe is the only robust
+                                       # strategy; this is the pressure that teaches it). REPLACES the
+                                       # constant turn_buffer_late_cp=0.50 gate, which NEVER BOUND in-sim
+                                       # (policies swipe p90 0.40 < 0.50 -> v29 got zero timing gradient).
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
     # longer reads these; turning at any cprog in the window (or buffered early) is clean.
@@ -998,15 +1006,18 @@ class TempleRunSimEnv(gym.Env):
         # turn_approach_buffer (enable both together).
         if self.cfg.get("hook_turn_buffer") and bool(cell.get("is_turn")) and (
                 cell.get("can_turn_left") if want_left else cell.get("can_turn_right")):
-            # LATE-QUEUE MISS [2026-07-05, v27/v28 device post-mortem]: the device swipe-queue only saves a
-            # swipe that ARRIVES before the corner. The policy's byte lands ~+0.17cp stale (TCP), so a sim
-            # swipe past turn_buffer_late_cp reaches the game past the exec point -> the turn NEVER FIRES
-            # ("stops turning at speed") -> runs off the edge. Without this gate the buffer made junction
-            # timing free (v28: zero pressure to swipe early -> device tail p90 0.59 still missed).
-            if cp <= float(self.cfg.get("turn_buffer_late_cp", 0.50)):
+            # LATE-QUEUE MISS [2026-07-05 v2, v27 device capture]: the device swipe-queue only saves a
+            # swipe whose byte ARRIVES (cp + lat*vel*dt/cell_len, ~2 frames: obs-stale + exec/TCP) before
+            # the corner (cp 1.0). Past it the write lands after HandleDelayedTurning's exec point -> the
+            # turn NEVER FIRES ("stops turning at speed") -> off the edge. Device-validated: all 4 v27
+            # missed-turn deaths (v180-186) had every swipe arriving 1.01-1.25. Velocity-dependent by
+            # construction — @v210 only cp<=0.30 survives and a junction frame there may not exist, so the
+            # approach-cell pre-swipe (latched, always-safe) is the strategy this gate teaches.
+            lat = float(self.cfg.get("turn_queue_lat_frames", 2.0))
+            arrival = cp + self._velocity * lat * float(self.step_dt) / float(self.cfg["cell_length"])
+            if arrival <= 1.0:
                 self._execute_turn(cell, want_left, float(self.cfg["turn_center_cprog"]), from_buffer=True)
-            # else: queued too late -> no turn (the junction will be MISSED unless a later in-window
-            # swipe lands via the positional path below on a subsequent frame).
+            # else: queued too late -> silent miss (junction missed; later frames arrive even later).
             return
         early = float(self.cfg["turn_exec_early"])
         late = float(self.cfg["turn_exec_late"])
