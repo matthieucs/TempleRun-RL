@@ -332,6 +332,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "jump_drop_prob": 0.0,            # [2026-07-05] P(a JUMP byte is silently eaten) — device-observed (game
                                       # refuses Jump() in some zones, e.g. right after a turn cell). Train
                                       # ~0.10 to teach the closed-loop retry; keep 0 for harness/replay.
+    "jump_refuse_strafing_prob": 0.6, # [2026-07-06 DEVICE-MEASURED, 3 fresh captures, deconfounded] the
+                                      # game REFUSES Jump() during a lateral glide: lane-moving refusal
+                                      # 5/9 (56%) vs 2/54 (4%) baseline once landing-phase and gap-cell
+                                      # cases are excluded. Faithful DEFAULT ON -> level (NoOp) first,
+                                      # then jump. (The apparent "landing lock" was the airborne rule +
+                                      # 10Hz phase — already modeled by jump_exec_lat; no extra knob.)
+    "gap_jump_lip_cp": 0.2,           # [2026-07-06 DEVICE-MEASURED] on a wide-gap/crevasse cell the game
+                                      # refuses Jump() past the solid lip (fired takeoffs on-gap only at
+                                      # cp<=0.18; 8 refusals at cp 0.15-0.95 incl ALL grounded-at-gap
+                                      # crevasse deaths). Matches gap_entry_grace (same lip). Jump from
+                                      # the APPROACH cell — predicted_jump already cues that takeoff.
     "jump_exec_lat_frames": 0,        # mean frames the JUMP action is buffered before it fires (0 = instant)
     "jump_exec_lat_jitter": 0,        # +/- uniform frame jitter on the above (models latency variance)
     "slide_duration": 0.7,            # [MEASURED] SlideDuration ~0.70s
@@ -949,6 +960,21 @@ class TempleRunSimEnv(gym.Env):
                 # must_jump and grounded). 0 by default (harness/replay fidelity unchanged).
                 if float(cfg.get("jump_drop_prob", 0.0)) > 0.0 and \
                         self._rng.random() < float(cfg.get("jump_drop_prob", 0.0)):
+                    return
+                # JUMP-WHILE-STRAFING REFUSAL [2026-07-06, DEVICE-MEASURED 56% vs 4% — see config]:
+                # a jump commanded mid-glide is usually eaten by the game. The device criterion is the
+                # lane actually MOVING (>0.8/frame), i.e. |target-lane| > 0.8/alpha ~ 1.8 — a rider
+                # SETTLED on a narrow strip (small residual) jumps normally; a fresh strafe glide does not.
+                if abs(self._lat_target - self._lane) > 1.8 and \
+                        self._rng.random() < float(cfg.get("jump_refuse_strafing_prob", 0.6)):
+                    return
+                # GAP-LIP REFUSAL [2026-07-06, DEVICE-MEASURED — see gap_jump_lip_cp]: past the solid lip
+                # of a wide-gap/crevasse cell the runner is already over the void — Jump() is ignored.
+                # (ALL grounded-at-gap crevasse deaths: act=2 spam on pt34/35 at cp 0.15+, takeoff never
+                # fired.) The survivable takeoff is on the APPROACH cell (predicted_jump cues it).
+                _cell_now = self._track[self._cell_index]
+                if _cell_now.get("wide_gap") and \
+                        self._cell_progress() > float(cfg.get("gap_jump_lip_cp", 0.2)):
                     return
                 lat = int(cfg.get("jump_exec_lat_frames", 0))
                 if lat > 0 and self._pending_jump_frames <= 0:
