@@ -146,8 +146,15 @@ const PLAYER_ID = 1; // confirmed: PlayerManager.GetActivePlayer() returns 1
 
 const STATE_PORT = 9999;
 const ACTION_PORT = 9998;
-const POLL_MS = 100;  // 10 Hz broadcast. (Tried 20 Hz to cut turn-lag — the 20 Hz-retrained model was
-                      // WORSE on device, median 180 vs 607; reverted. The turn-barrier is not the rate.)
+const POLL_MS = 33;   // [16t, 2026-07-06] 30 Hz broadcast — OBS freshness only; the host env drains to
+                      // the NEWEST line and still CONTROLS at 10 Hz (env.step_dt 0.1), so the policy
+                      // cadence is unchanged. 16s diag measured the obs->write pipeline at med 0.21cp /
+                      // tail 0.40cp @v180, ~50ms of it = the old 10 Hz sampling age; the game's swipe-
+                      // queue consume deadline is live-cp ~0.67 (writes <=0.64 consumed 91/91, >=0.70
+                      // dead-letter 3/3, GI flag stays set unconsumed) -> late junction onsets + jitter
+                      // tail = the residual ~3% junction deaths. 30 Hz cuts the sampling age to ~17ms.
+                      // (The OLD "20 Hz was WORSE" verdict was a 20 Hz-CONTROL retrain — different thing;
+                      // median 180 vs 607 came from retraining the policy at 20 Hz, not fresher obs.)
 
 // ObstacleType -> required reaction
 // TreeStumble (3) is lane-dependent on the phone (left lane = jump-or-die, middle = stumble/2nd-hit
@@ -182,7 +189,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'twdiag-16s'; // 16s = one-shot turn-write verdict streamed (s.turn_write) — junction misses self-explain; 16r base
+const HOOK_VERSION = 'fresh30-16t'; // 16t = 30 Hz state broadcast (obs freshness; control stays 10 Hz host-side) + 16s turn-write diag
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
