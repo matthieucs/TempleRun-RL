@@ -182,11 +182,17 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   50→17ms → dead letters gone for EVERY model, no retrain.
 - **Fresh-phone @16t: v34@2M median 2863 best 4525, junctions 1/254 | v14 median 2833 best 6399
   (ALL-TIME), junctions 3/255, crevasses 44/46.** Obs freshness = the dominant lift (+40% median both);
-  v34's trained rules = cleaner junctions. **DEPLOY = v34@2M (`runs/ppo_v34_carryfix_2000000_steps.zip`)
-  + hook 16t.**
-- Remaining walls (death mix @16t): (1) LOW-SPEED crevasse timing 600-1000m (median killer both models —
-  user-flagged priority), (2) gap/chained-jump blindness at speed (v14's 4633/6399 deaths, dt4 pt14) →
-  **next2-obstacle obs** (hook 2-ahead walk verified; breaks only through turns). Sim recalib notes:
-  gate 0.56 ≈ deadline 0.67 − 30Hz pipeline 0.10 (still right); jump_exec_lat 1±1 now slightly
-  over-modeled (fresher obs) — revisit with the next retrain.
+  v34's trained rules = cleaner junctions.
+- **DEPLOY (2026-07-06 latest) = v36@2M + hook 16u/16t** (`runs/ppo_best.zip`, obs30, 30Hz): device
+  **median 2642, BEST 7040 m — NEW ALL-TIME RECORD** (beats v14's 6399), junctions 1/303, crevasses
+  45/46. v36 = v34 self-warm-start + the USER-OBSERVED STACKED-obstacle blindspot (`compound_prob 0.12`:
+  narrow-A → jump-barrier → narrow-B-opposite, needs a mid-air/pre-swing). Offline: compound v210 7/50
+  vs v34 28/50, standard cfg 4/40 = v34 (ZERO regression). First strict improvement of the session —
+  new skill, no cost. Record run archived `captures/best_run_7040m_v36_hook16u.jsonl`. v34@2863 = prior.
+- **Remaining walls to 10k (v36 death mix): LOW-SPEED holes 600-1000m (multi-hole jump RHYTHM — v34/v36
+  survive 4-cell chains @v205 with staggered jumps but the low-speed rhythm is fragile), NARROWS-AT-SPEED
+  (the policy RELEASES the strafe-hold on the LAST strip cell when narrow_target_lane→None → drifts off
+  the inner edge @v205; next lever = current-narrow-lane obs / hold-through-last-cell), trees.** Settled:
+  single 2-cell FLAT holes are FORGIVING on device (probe 10/10, no sim change). Sim recalib note: gate
+  0.56 ≈ deadline 0.67 − 30Hz pipeline 0.10; jump_exec_lat 1±1 slightly over-modeled (fresher obs).
 - NN decides all actions. Branch `sim-calibration` (safe to merge; `runs/*.zip`+MODELS.md gitignored).
