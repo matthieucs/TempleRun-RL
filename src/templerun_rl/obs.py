@@ -44,9 +44,9 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # the NN the SIGNED transition (low->mid vs high->mid etc.) + magnitude, so it stops blindly jumping every
 # cap. The old "future Level reads 0" assumption was wrong for this build.
 OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing", "predicted_jump",
-                    "next_path_level", "next2_path_level")
+                    "next_path_level", "next2_path_level", "next2_must_jump", "next2_must_slide")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 19 bool/lookahead + 4 scalar + 7 extra = 30 (keep derived from OBS_FIELDS)
+OBS_LEN = len(OBS_FIELDS)  # 19 bool/lookahead + 4 scalar + 9 extra = 32 (keep derived from OBS_FIELDS)
 
 # Lane geometry (real device units, 2026-07-01 tilt-controlled model): the lateral position is
 # CONTINUOUS and centered on 0 — center 0, one strafe ~ 3.7 -> lanes at -3.7 / 0 / +3.7, side walls
@@ -202,6 +202,13 @@ def state_to_obs(state: dict) -> np.ndarray:
     # direction of a crevasse = sign(next2_path_level - path_level). Same enum normalization as path_level.
     out[base + 9] = _norm_enum(int(g("next_path_level")), PATH_LEVEL_MAX)
     out[base + 10] = _norm_enum(int(g("next2_path_level")), PATH_LEVEL_MAX)
+    # next2_must_jump/slide [2026-07-06, hook 16v]: 2-AHEAD obstacle lookahead. A jump @v200 spans
+    # ~2.75 cells — with only 1-cell lookahead the policy lands blind into TreeJump (the 4633/6399-m
+    # deaths, dt4 pt14) and can't plan chained jumps. Derived from the raw next2_obstacles enum
+    # (-1 = unreadable, e.g. through a turn — maps to 0/0 like the level dropout).
+    n2o = int(g("next2_obstacles") if g("next2_obstacles") is not None else -1)
+    out[base + 11] = 1.0 if n2o in (1, 3, 4, 7) else 0.0   # Hole/TreeStumble/TreeJump/LevelChange
+    out[base + 12] = 1.0 if n2o in (5, 6) else 0.0         # TreeSlide/FlameTower
     return out
 
 

@@ -136,6 +136,7 @@ STATE_DEFAULTS.update({"score": 0, "path_type": -1, "path_level": -1, "facing": 
                        "next_wide_gap": False, "narrow_target_lane": None,
                        "next_ground_change_higher": False,   # zone-crevasse-ahead flag (gates predicted_jump)
                        "next_path_level": -1, "next2_path_level": -1,  # upcoming altitude 2-cell lookahead (16q)
+                  "next2_obstacles": -1,  # 2-ahead obstacle enum (16v; -1 = unreadable/through-turn)
                        "stumble_kill_timer": 0.0, "stumble_count": 0})
 
 

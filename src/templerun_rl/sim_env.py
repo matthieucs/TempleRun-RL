@@ -1527,6 +1527,10 @@ class TempleRunSimEnv(gym.Env):
             "next_path_level": -1 if cell.get("is_turn") else int(nxt.get("level", -1)),
             "next2_path_level": -1 if (cell.get("is_turn") or nxt.get("is_turn"))
                                 else int(nxt2.get("level", -1)),
+            # 2-ahead obstacle (hook 16v): same neighbor walk as next2_path_level -> same through-turn
+            # dropout. Gives the chained-jump lookahead (a jump @v200 spans ~2.75 cells).
+            "next2_obstacles": -1 if (cell.get("is_turn") or nxt.get("is_turn"))
+                               else int(nxt2.get("obstacles", 0)),
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).
