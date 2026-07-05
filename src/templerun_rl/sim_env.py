@@ -128,6 +128,10 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "turn_exec_late": 0.60,            # ...until this cprog (past it = ran too far, swipe misses)
     "turn_center_cprog": 0.44,         # swipe here -> land centered (measured offset minimum)
     "turn_offset_scale": 45.0,         # landed |lane| = |swipe_cprog - center| * this (measured slope)
+    "turn_lane_carry_buffered": 1.0,   # [2026-07-06 DEVICE-MEASURED] carry for BUFFERED (swipe-queue)
+                                       # turns: native corner landing is forgiving (v14: lane<=4.6 swipes,
+                                       # 0 landing deaths in 212). Keeps a mild centering preference
+                                       # without teaching the fatal recenter-then-swipe hesitation.
     "turn_lane_carry": 3.0,            # [MEASURED 2026-07-02] pre-turn lane AMPLIFICATION through a turn
                                        # (device: strafe-into-turn lane 5 -> lands ~18). Punishes leaning
                                        # into turns -> the policy must center (NoOp) before swiping.
@@ -1092,6 +1096,14 @@ class TempleRunSimEnv(gym.Env):
         scale = float(self.cfg["turn_offset_scale"])
         kill = float(self.cfg["turn_land_kill"])
         carry = float(self.cfg["turn_lane_carry"])
+        # BUFFERED (swipe-queue) TURNS LAND NATIVELY [2026-07-06 DEVICE-MEASURED]: the game's own
+        # HandleDelayedTurning fires the turn at the corner with a forgiving native landing — v14 swiped
+        # off-center (lane up to 4.6) on 212/212 fresh-phone junctions with ZERO landing deaths. The
+        # carry=3.0 amplification was measured on the OLD immediate-turn path and, applied to buffered
+        # turns, teaches "recenter BEFORE swiping" -> the 2nd-frame swipe -> late-queue MISS (v27/v32
+        # device junction deaths at lane 2-3.4 onsets). Buffered turns use a mild carry instead.
+        if from_buffer:
+            carry = float(self.cfg.get("turn_lane_carry_buffered", 1.0))
         # CONTROL LATENCY [DEVICE-MEASURED 2026-07-04]: on the phone the Frida-over-TCP loop lags a
         # JUNCTION-CELL swipe by ~2 frames (obs staleness +~0.20cp + exec delay +~0.24cp), so it LANDS
         # LATE (execution cp ~ swipe_cp + velocity*lat_frames*dt/cell). At speed this pushes the landing
