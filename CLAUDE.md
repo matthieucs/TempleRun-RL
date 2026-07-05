@@ -64,8 +64,17 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   REMOVED 2026-07-04); reward `reward.py`; PPO `scripts/train_sim.py` (net 128,128, linger 3).
   Deploy = same obs on the phone via the hook.
 - Sim turn-buffer config: `hook_turn_buffer=true` models the device swipe-queue (turn near a junction lands
-  CENTERED, timing-free, `from_buffer` offset 0). Warm-start base **`runs/ppo_v14_obs30_leveldir.zip`**
-  (EXACT surgical equivalent of v14, new obs cols zero-init; `scratchpad/surgery_v24_leveldir.py`).
+  CENTERED, timing-free, `from_buffer` offset 0) + **late gate `turn_buffer_late_cp=0.56`** (swipe past it =
+  silent MISS; device-measured CanTurn window end, velocity-INDEPENDENT — v14 turned 46/46 up to v207).
+  Warm-start base **`runs/ppo_v14_obs30_leveldir.zip`** (EXACT surgical equivalent of v14, new obs cols
+  zero-init; `scratchpad/surgery_v24_leveldir.py`).
+- **JUNCTION LEVEL DROPOUT (2026-07-05 night, device-measured):** the hook's PE neighbor walk BREAKS through
+  turns → on-junction frames stream `next_path_level=next2_path_level=-1` (178/202), approach frames
+  `(lvl,-1)`. Sim `_snapshot` reproduces it (commit f8d7eff). Obs30 finetunes trained pre-fix saw a
+  junction-frame input spike on device they never met in training. v14 immune (zero-init cols).
+- **Capture-log alignment (capture_calib):** logged `action(i)` = policy's response to `state(i-1)` (predict
+  runs BEFORE env.step; the record holds the POST-step state). And a FIRED turn resets cell_progress → the
+  swipe record's cp is POST-turn — don't read "swipe cp" stats off fired turns (artifact; burned us twice).
 - **Jump exec latency (sim, 2026-07-05):** `jump_exec_lat_frames`/`jump_exec_lat_jitter` buffer the JUMP
   firing. DEVICE-MEASURED (`scripts/probe_jump_exec.py`, 25/25): **exactly 1 frame @10Hz, zero jitter**
   (uniform with the turn-side 1-frame exec). Constant latency is ABSORBED by policies (window shifts);
@@ -118,18 +127,30 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 - Ruled out (device-measured): over-strafe lateral gap (device caps lane ±7, same as sim); 20Hz sampling
   (WORSE); crevasse apex miscalibration (sim clears the human's v210 0.58 takeoff).
 
-**OPEN — CREVASSES the remaining wall** (top death when the phone is healthy, DeathType 4=Ledge). No
-  game-native fix (jumps fire immediately — no "buffer at the gap" like turns). Velocity caps 210 (~4000 m).
-  **The full toolchain for it is now built + calibrated:** perception (predicted_jump timing +
-  next2_path_level direction, both device-verified readable) + sim pressure (jump latency 1±1, measured) +
-  a stable trainer (LR 5e-5). v26 (single-phase full task on all of it) = the first test of the assembled
-  stack; device eval pending.
+**2026-07-05 NIGHT (autonomous session) — the retrain curse + turn mechanics fully decoded:**
+- **v14 FRESH-PHONE: median 2010, best 5462, 0 missed turns in 212 junctions** (`captures/
+  v14_freshphone.jsonl`). The old 1652 was the DEGRADED phone. ⚠️ ALL cross-model comparisons must be
+  same-session fresh-phone (v26/v27's "missed turns" were measured on the tired phone).
+- **Turn mechanics (205+ junctions, frame-level):** every policy decides the swipe on the junction's FIRST
+  frame; byte goes out 1 control-tick later. Early-phase onsets (cp<0.2) ALWAYS survive; late-phase onsets
+  (cp≥0.3) = a latency-jitter COIN FLIP (write lands 0.5-1.5 frames after the onset sample vs the CanTurn
+  window end ~0.56). Fresh phone = low jitter = coin lands good (v14 50/50 late onsets); degraded = misses
+  (v26/v27: 5/9+ late-onset deaths). Wrong models tried + discarded: v29 constant-0.50 gate (never binds
+  in-sim), v30 velocity-arrival lag-2 (refuted: v14 turns fine @v207). Hook drop paths (turn byte):
+  debounce 0.3s / invalid-dir(CanTurn false) / not-near-junction — pre-onset turn bytes: 0 in all captures.
+- **JUNCTION LEVEL DROPOUT found + fixed** (see Sim section) = why obs30 retrains looked worse on device.
+  v31 (v27 recipe + dropout + 0.56 gate) trained; in-sim clean turns WITH dropout. NOTE: in-training
+  EvalCallback env ≠ training env (no buffer flags) → its curve says "collapse" when device-true eval says
+  healthy. Judge checkpoints with `scratchpad/eval_swipe_deaths.py` (device-true cfg, deaths by mechanic).
+- **NEXT WALL @v200+ (both v14 long runs died on it): chained-jump blindness** — a jump spans ~2.75 cells,
+  obs lookahead = 1 cell → lands blind into TreeJump (3738m, 5462m deaths). Lever: next2-obstacle obs
+  (hook 2-ahead walk device-verified readable on straights; breaks only through turns = dropout above).
+- **USER (live, 2026-07-06): low-speed dumb deaths (missed transition/turn) are the MEDIAN killer** —
+  high speed works; prioritize low-speed reliability.
 
-**WHERE WE ARE (2026-07-05):**
-- **Deploy floor = v14** (`runs/ppo_best.zip`, device **median 1652, best 2908**).
-- **v26 training** (single-phase full task, lat 1±1, LR 5e-5, warm-start `ppo_v14_obs30_leveldir`): in-sim
-  median pegged at cap 1823, deaths falling — no collapse. Next: best-ckpt → offline gate (crevasse-under-
-  latency AND full-task both ≥ v14) → device eval on hook 16r (fresh phone).
-- **⚠️ v14 fresh-phone re-measure still pending** (its 1652 was pre-degradation). ⚠️ obs.py is now OBS_LEN
-  30 → to run v14 (width 60) under capture_calib, `git stash` obs.py first.
+**WHERE WE ARE (2026-07-06):**
+- **Deploy floor = v14** (`runs/ppo_best.zip`, fresh-phone **median 2010, best 5462**; width 60 — needs
+  v14-era obs.py: use a git worktree at 949a6e2, PYTHONPATH=wt/src, NOT a stash).
+- Crevasses: v27 best in-sim (3/20 @v210 vs v14 8/20; device 1/8 on tired phone). Fresh-phone v27 re-eval
+  RUNNING (`captures/v27_freshphone.jsonl`) → then v31@200k same-session. Best of the two = new candidate.
 - NN decides all actions. Branch `sim-calibration` (safe to merge; `runs/*.zip`+MODELS.md gitignored).
