@@ -25,7 +25,9 @@ Recover a flaky/crash-looped phone: `adb -s 3f80a3a shell am force-stop com.iman
 android:write_settings allow` + `settings put system screen_off_timeout 2147483647`.
 
 ## Protocol
-- **State (9999)**: newline JSON @ **10 Hz** (`POLL_MS=100`; game Updates @60Hz, so faster IS possible).
+- **State (9999)**: newline JSON @ **30 Hz** (`POLL_MS=33`, hook 16t+ — OBS freshness only; the host env
+  drains to the NEWEST line and CONTROLS at 10 Hz. The old "20 Hz was WORSE" verdict was a 20 Hz-CONTROL
+  retrain, unrelated). Game Updates @60Hz.
 - **Actions (9998)**: 1 byte over ONE persistent socket. `0`=StrafeLeft `1`=StrafeRight `2`=Jump
   `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp; reset-only `8`=RunAgainClicked `9`=OnPlayClicked
   (`reset()` sends 8 then 9). **Lateral = analog tilt** (hook replaces `GetAccelerometerForceX`):
@@ -39,11 +41,19 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 - **Small narrows (pt17/18) → `must_jump`** (hook 16p): human data = jumps them 82%. The policy's existing
   must_jump→jump generalizes → v14 jumps them, no retrain. Set on both `cachedMustJump` and streamed `s.must_jump`.
 - **Hook** `frida/temple_run_hook.js`, version in `HOOK_VERSION` (`_hv` on the stream). Current
-  **16r** (`leveldir-16r`) = 16p + streams `next_path_level`/`next2_path_level` (upcoming-cell PE_Level).
-  Device-VERIFIED 2026-07-05 (10/10): future PE_Level IS readable — the old "reads 0" assumption was WRONG;
-  `sign(next2_path_level − path_level)` = the crevasse direction (up/down). Streams raw state + derived
-  obs; executes action bytes. NO action-DECISION rules (NN decides); the swipe-queue + must_jump-flag are
-  perception/execution translations, not decisions.
+  **16u** (`seedprobe-16u`) = 16r (next/next2_path_level, device-verified 10/10 direction) + **16s**
+  (one-shot `s.turn_write` verdict: written/debounce/invalid — junction misses self-explain) + **16t**
+  (30 Hz broadcast) + 16u seed probe (OFF). Streams raw state + derived obs; executes action bytes. NO
+  action-DECISION rules (NN decides); swipe-queue + must_jump-flag = perception/execution translations.
+- **TRACK SEEDS (probe 16u, CONCLUDED 2026-07-06): device runs are NOT seedable.** Generation
+  (`PathElement.AddRandomPath → GetRandomPathElementForSide`) draws from Unity's GLOBAL RNG;
+  `Random.InitState(seed)` (RVA 0x24B3E6C) re-seeded at the first path draw of a run gives only a
+  ~6-cell identical prefix — mid-run generation interleaves with other consumers (coins/effects) and
+  desyncs. Full determinism would need a private RNG stream (not worth it). **Reproducibility tools:
+  SIM `reset(seed=N)` (exact); device runs are fully RECORDED in `captures/*.jsonl` (the 6399 m record
+  = `captures/v14_16t.jsonl` ep5) — replayable through replay_diff/analysis, not live.** `SEED_RUNS=-1`
+  keeps the capability OFF. Side find: `PathElement` statics `sAllowTurns/sAllowPathHoles/
+  sAllowPathNarrows/…` (0x4-0xC) = writable feature toggles (future isolation diagnostics).
 
 ## Key offsets (this build; from dump.cs)
 - **CharacterPlayer**: IsDead 0xD8, IsJumping 0xF8, IsSliding 0x100, Score 0x138, Velocity(Vec3) 0x34,
