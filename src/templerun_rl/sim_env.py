@@ -97,6 +97,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "stumble_kill_window": 2.0,       # [MEASURED] a 2nd stumble within this many seconds of the last -> death
     # --- B. Track generation (PathElement statics) — values READ off the device (Frida, baseline
     # Temple/level-2 section; the game ramps these by distance via section/level changes). -------
+    "compound_prob": 0.0,               # [2026-07-06 USER-OBSERVED blindspot] P(a narrow placement becomes
+                                        # a STACKED compound: narrow(side A) -> jump-barrier -> narrow(side
+                                        # B, OPPOSITE). Survivable only by a MID-AIR STRAFE (jump the
+                                        # barrier while sliding A->B). The sim never stacked obstacles
+                                        # (min_space 6) so the policy never learned it. 0 default (scorecard
+                                        # / existing behaviour unchanged); train ~0.15. Device: real + "not
+                                        # uncommon" (user). Bypasses min_space for the sequence's own cells.
+    "compound_after_distance": 300.0,   # only compound past this (early run stays simple)
+    "compound_land_cells": 2,           # clear cells after the barrier before narrow B (best oracle
+                                        # survival 16-17/40 vs 12 @1 / 11 @3 — 2 gives room for the
+                                        # A->B mid-air/pre-swing to land on strip B)
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
@@ -618,6 +629,7 @@ class TempleRunSimEnv(gym.Env):
         # policy strafe back too early and fall off the 2nd/3rd cell on the phone).
         self._pending_narrow = 0
         self._pending_narrow_lane = 0
+        self._pending_sequence: list[dict] = []   # compound stacked-obstacle queue (user blindspot)
         self._pending_narrow_type = 17
         # replay cursor (which injected element feeds the next generated cell)
         self._replay_cursor = 0
@@ -665,6 +677,40 @@ class TempleRunSimEnv(gym.Env):
         d = self._distance_real - float(self.cfg["start_distance"])
         return float(np.clip(d / max(1.0, float(self.cfg["ramp_distance"])), 0.0, 1.0))
 
+    def _queue_compound(self, lane_a: int, level: int, strip_a: int) -> int:
+        """Build a STACKED compound sequence (user-observed blindspot) into _pending_sequence: the
+        REST of narrow A (same lane) -> a jump-barrier -> a clear landing -> narrow B on the OPPOSITE
+        side. Survivable only by strafing A->B MID-AIR over the barrier. Returns lane_a (the current
+        cell = narrow A cell 1). The barrier + narrow B bypass min_space (that's the point)."""
+        cfg = self.cfg
+        seq: list[dict] = []
+        # rest of narrow A
+        for _ in range(max(0, strip_a - 1)):
+            e = _element(type=self._narrow_ptype(lane_a), level=level, is_turn=False)
+            e["narrow_lane"] = lane_a
+            seq.append(e)
+        # the jump-barrier (TreeJump: must-jump, has solid ground so you LAND after) — centered
+        seq.append(_element(type=2, level=level, obstacles=OBST_TREE_JUMP, is_turn=False))
+        # clear landing cell(s) after the barrier (where the mid-air strafe touches down toward B)
+        for _ in range(max(1, int(cfg.get("compound_land_cells", 1)))):
+            seq.append(_element(type=2, level=level, is_turn=False))
+        # narrow B on the OPPOSITE side
+        lane_b = -lane_a
+        lw = cfg["narrow_len_weights"]
+        lens = list(lw.keys())
+        probs = np.array([lw[k] for k in lens], dtype=float)
+        strip_b = int(self._rng.choice(lens, p=probs / probs.sum()))
+        for _ in range(max(1, strip_b)):
+            e = _element(type=self._narrow_ptype(lane_b), level=level, is_turn=False)
+            e["narrow_lane"] = lane_b
+            seq.append(e)
+        self._pending_sequence.extend(seq)
+        return lane_a
+
+    @staticmethod
+    def _narrow_ptype(lane: int) -> int:
+        return 19 if lane == -1 else 22
+
     def _next_cell_procedural(self) -> dict:
         cfg = self.cfg
         level = int(self._zone_level)
@@ -672,6 +718,13 @@ class TempleRunSimEnv(gym.Env):
         self._cells_since_turn += 1
         self._cells_since_bonus += 1
         self._cells_since_zone += 1
+
+        # COMPOUND-SEQUENCE emit (user-observed stacked blindspot): a pre-built list of cells
+        # (narrow A -> barrier -> narrow B-opposite) that bypasses the normal spacing so the policy must
+        # MID-AIR STRAFE across the barrier. Takes priority over all normal generation while non-empty.
+        if self._pending_sequence:
+            self._cells_since_obstacle = 0
+            return self._pending_sequence.pop(0)
 
         # WIDE-GAP continuation: the 2nd+ cell of a 2-cell gap (long hole / zone change). A single
         # well-timed jump must span both -> jumping a cell early lands in this far half and falls.
@@ -792,9 +845,21 @@ class TempleRunSimEnv(gym.Env):
                     lens = list(lw.keys())
                     probs = np.array([lw[k] for k in lens], dtype=float)
                     strip = int(self._rng.choice(lens, p=probs / probs.sum()))
-                    self._pending_narrow = strip - 1
-                    self._pending_narrow_lane = narrow_lane
-                    self._pending_narrow_type = ptype
+                    # COMPOUND (user blindspot): with compound_prob turn this narrow into a stacked
+                    # narrow(A) -> barrier -> narrow(B opposite) that needs a MID-AIR strafe. The current
+                    # cell is narrow A cell 1 (narrow_lane set below); _queue_compound enqueues the REST
+                    # of the whole sequence into _pending_sequence (bypasses _pending_narrow entirely).
+                    # short-circuit on compound_prob>0 FIRST so the default (prob 0) path draws NO rng
+                    # here — else the extra random() shifts the whole track stream (scorecard velocity).
+                    if (float(cfg.get("compound_prob", 0.0)) > 0.0
+                            and self._distance_real >= float(cfg.get("compound_after_distance", 0.0))
+                            and self._rng.random() < float(cfg.get("compound_prob", 0.0))):
+                        narrow_lane = self._queue_compound(narrow_lane, level, strip)
+                        ptype = {-1: 19, 1: 22}[narrow_lane]
+                    else:
+                        self._pending_narrow = strip - 1
+                        self._pending_narrow_lane = narrow_lane
+                        self._pending_narrow_type = ptype
                 else:
                     obstacle = self._sample_obstacle_type()
                     # a HOLE is sometimes a 2-cell LONG hole (path_type 12/13/15/16 on device).
