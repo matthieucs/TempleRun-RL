@@ -185,6 +185,11 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # [DEVICE-MEASURED 2026-06-26] crevasse frame-rate ~3.5% vs the old sim's 1.85% (2x too sparse);
     # first crevasse at dist 587. Halve the spacing to match the real density (audit-tuned).
     "zone_change_every_cells": 32,     # [MEASURED] cells between zone transitions (~2x denser to match real 3.5%)
+    # [DEVICE-MEASURED] first crevasse at ~587 m (v≈145). Gating the sim to the same onset matters MORE now
+    # that the apex check is device-tight (mh 0.95): below v≈140 the short arc physically cannot reach
+    # near-apex at the ledge from the approach cell, so early low-speed sim crevasses would be unsurvivable
+    # phantoms the device never poses (they were masked when mh was a lenient 0.45).
+    "zone_after_distance": 550.0,      # zone crevasses only past this distance (device onset)
     # WIDE GAPS (2-cell): on device, long holes (path_type 12/13/15/16) and zone LevelChange caps
     # (33-36) span TWO cells — a single jump must be timed at the gap EDGE to span both; jumping a cell
     # early (the single-obstacle reflex) lands in the far half -> Fall. Modeled as 2 consecutive
@@ -245,7 +250,12 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # An early takeoff (the 1-cell-lookahead reflex, or a jump 2 cells before the gap) => Fall; taking
     # off near the gap edge (as the oracle does, cprog>=0.62) clears. Level-DOWN + same-level long holes
     # are UNAFFECTED (only cells flagged stepup are checked). Keep below the oracle's 0.62 jump so it's fair.
-    "stepup_min_height": 0.45,         # [VELOCITY-DEP APEX model 2026-07-03, human_calib_v2 v210 probe] a
+    # [DEVICE-FIT 2026-07-05, v26 post-mortem] 0.45 was FAR too lenient on the EARLY side: device takeoffs
+    # at v165-190 SURVIVE only at approach-cp 0.61-0.98 (14 clears, levelprobe_16q) and DIE at cp<=0.57
+    # (5 v26 Ledge deaths) -> the device demands ~apex (within ~10% of peak) at the ledge. mh=0.95 is the
+    # unique fit (covers all survivors, excludes all deaths; @v210 window = 1.8 frames -> the late-game
+    # wall). The old 0.45 let the sim reward cp~0.4 takeoffs that the device kills -> v26 learned them.
+    "stepup_min_height": 0.95,         # [VELOCITY-DEP APEX model 2026-07-03, human_calib_v2 v210 probe] a
                                        # step-UP crevasse survives only if the jump HEIGHT (parabola, 1 at
                                        # apex) at the raised ledge >= this — auto velocity-dependent (span
                                        # = jump_dur*vel/cell_len). 0.45 -> survive ~[0.13,0.87] of the span.
@@ -693,7 +703,8 @@ class TempleRunSimEnv(gym.Env):
         if (not is_turn
                 and self._cells_since_turn >= int(cfg["min_clear_after_turn"])
                 and self._cells_since_obstacle >= int(cfg["min_space_between_obstacles"])
-                and self._cells_since_zone >= int(cfg["zone_change_every_cells"])):
+                and self._cells_since_zone >= int(cfg["zone_change_every_cells"])
+                and self._distance_real >= float(cfg.get("zone_after_distance", 0.0))):
             obstacle = OBST_LEVEL_CHANGE
             self._cells_since_zone = 0
             self._cells_since_obstacle = 0
@@ -1272,7 +1283,10 @@ class TempleRunSimEnv(gym.Env):
                 self._kill(2)       # not airborne at the step-up ledge -> fell in the gap
                 return
             span = float(self.cfg["jump_duration"]) * self._velocity / float(self.cfg["cell_length"])
-            d = self._long_pos() - self._jump_takeoff_pos   # cells travelled since takeoff
+            # evaluate at the ledge cell's ENTRY (not the current mid-cell frame pos): at 10Hz the first
+            # frame on the cell is up to ~0.3 cells past the lip, which skewed frac by up to +0.13 and
+            # made the device-fit mh (entry-referenced, 2026-07-05) effectively stricter than measured.
+            d = float(self._cell_index) - self._jump_takeoff_pos   # cells from takeoff to the ledge lip
             frac = d / max(1e-6, span)                      # 0=takeoff, 0.5=apex, 1=landing
             height = 1.0 - (2.0 * frac - 1.0) ** 2          # parabola: 0 at ends, 1 at apex
             if height < float(self.cfg["stepup_min_height"]):

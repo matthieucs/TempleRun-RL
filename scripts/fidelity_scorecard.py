@@ -250,19 +250,24 @@ def check_crevasse_curve(ref, n_eps=8, seed0=31000) -> dict:
     # the first step-up (the gate active). (Per-crevasse, not all-or-nothing survival which compounds
     # over ~25 crevasses and hides the mechanic.) Guards the too-easy model that made v10 die at
     # device step-ups.
+    # [2026-07-05] measure distance PAST the device crevasse onset (zone_after_distance ~550): the
+    # pre-onset stretch is crevasse-free "free distance" that would floor `worst` and hide the ratio.
+    onset = 550.0
     dist_by_x = {}
     for x in (0.1, 0.3, 0.5, 0.7, 0.9):
         med, _ = _rollout_policy(_jump_at(x), cfg, n_eps, seed0, max_steps=1200)
-        dist_by_x[x] = round(med)
+        dist_by_x[x] = max(0, round(med - onset))
     # 2-CELL APEX model [device v13_16i: ledge = ground_height 15 on the 2nd crevasse cell; runner clips
     # it dt=4 kDeathTypeLedge if not near jump apex there]. Timing-agnostic check: SOME jump timing must
     # CLEAR far (a survivable window exists) AND SOME timing must DIE (the window is real, not trivial).
+    # [DEVICE-FIT 2026-07-05, mh 0.95] the window is LATE+TIGHT (survivors cp 0.61-0.98, fatal <=0.57):
+    # only the 0.9 sweep timing sits inside it — best (late) must clear far, early timings must die.
     best = max(dist_by_x.values())
     worst = min(dist_by_x.values())
-    ok = best >= 800 and best >= worst * 2
+    ok = best >= 400 and best >= worst * 2
     return {"ref": "2-cell crevasse (ledge=gH15 on cell 2): a survivable jump-timing window exists + is real",
-            "sim": f"median-dist {dist_by_x} | best={best} worst={worst}",
-            "tol": "best ≥800m AND best ≥ 2×worst (real window)", "pass": ok}
+            "sim": f"median-dist-past-onset {dist_by_x} | best={best} worst={worst}",
+            "tol": "best ≥400m past onset AND best ≥ 2×worst (real window)", "pass": ok}
 
 
 def check_crevasse_speed(n_eps=8, seed0=32000) -> dict:
