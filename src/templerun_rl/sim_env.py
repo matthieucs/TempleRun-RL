@@ -1144,7 +1144,13 @@ class TempleRunSimEnv(gym.Env):
         if self._stumble_t > 0.0:
             self._stumble_t = max(0.0, self._stumble_t - dt)
         # WALL-HIT: over-tilted past the edge -> stumble (survivable once) and clamp back off the wall.
+        # HIGH GROUND (Cliff, zone level 3) [USER-OBSERVED on device 2026-07-05]: there is NO side wall up
+        # there — over-strafing past the edge falls off the cliff -> DEATH, not a stumble. The uniform
+        # wall-stumble taught policies to strafe fearlessly at altitude (v27 rode |lane| 6.9 on plvl 3).
         if abs(self._lane) > edge:
+            if int(self._track[self._cell_index].get("level", 2)) >= 3:
+                self._kill(1)   # fell off the high-ground cliff edge -> Fall
+                return
             self._stumble()
             self._lane = max(-edge, min(edge, self._lane))
         if self._post_turn_linger > 0:          # post-turn is_turn linger (sim-to-real trap) counts down
