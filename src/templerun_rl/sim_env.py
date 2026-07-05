@@ -329,6 +329,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # predictable -> narrows the RELIABLE window). This forces the policy to PRE-AIM using predicted_jump
     # (the velocity-invariant takeoff cue), which is exactly what should transfer to the phone. TRAINING
     # only; the fidelity harness/replay run at 0 (instant, for one-step device-transition tests).
+    "jump_drop_prob": 0.0,            # [2026-07-05] P(a JUMP byte is silently eaten) — device-observed (game
+                                      # refuses Jump() in some zones, e.g. right after a turn cell). Train
+                                      # ~0.10 to teach the closed-loop retry; keep 0 for harness/replay.
     "jump_exec_lat_frames": 0,        # mean frames the JUMP action is buffered before it fires (0 = instant)
     "jump_exec_lat_jitter": 0,        # +/- uniform frame jitter on the above (models latency variance)
     "slide_duration": 0.7,            # [MEASURED] SlideDuration ~0.70s
@@ -939,6 +942,14 @@ class TempleRunSimEnv(gym.Env):
         if a == int(C.Action.JUMP):
             # only meaningful from the ground; sets IsJumping for jump_duration.
             if self._jump_t <= 0.0 and self._slide_t <= 0.0:
+                # JUMP-BYTE DROP [2026-07-05, v14_freshphone ep6 @108m]: on device the game can silently
+                # REFUSE a Jump() (observed right after a turn cell: byte sent, is_jumping never fired,
+                # policy trusted its action history over the persisting must_jump -> died in the hole).
+                # Train with a small drop prob so the policy learns the CLOSED-LOOP retry (re-jump while
+                # must_jump and grounded). 0 by default (harness/replay fidelity unchanged).
+                if float(cfg.get("jump_drop_prob", 0.0)) > 0.0 and \
+                        self._rng.random() < float(cfg.get("jump_drop_prob", 0.0)):
+                    return
                 lat = int(cfg.get("jump_exec_lat_frames", 0))
                 if lat > 0 and self._pending_jump_frames <= 0:
                     # DEVICE JUMP LATENCY: don't fire now — schedule the takeoff `lat` (+/- jitter) frames
