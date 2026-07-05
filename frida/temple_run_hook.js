@@ -117,9 +117,6 @@ const RVA = {
   PlayerPrefs_GetInt: 0x24B37B8, // PlayerPrefs.GetInt(string key, int default) -> int
   // PathElement turn queries (origin = player's PathDirection / Facing):
   CanTurnLeft: 0x12E2E88,        // bool PathElement.CanTurnLeft(PathDirection origin)
-  RandomInitState: 0x24B3E6C,    // static UnityEngine.Random.InitState(int seed) [NativeMethod SetSeed]
-                                 // — track-seed probe: called at run start when SEED_RUNS >= 0
-  GetRandomPathElem: 0x12E3E48,  // PathElement.GetRandomPathElementForSide — the generation draw site
   CanTurnRight: 0x12E2F44,       // bool PathElement.CanTurnRight(PathDirection origin)
   IsTurn: 0x12E28B0,             // bool PathElement.IsTurn()
   // POSITION gate: the game's real "is the player physically over this element's turn area" test.
@@ -192,13 +189,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const SEED_RUNS = -1;           // [16u PROBE, CONCLUDED 2026-07-06] >=0 re-seeds UnityEngine.Random at
-                                // the first path draw of each run. RESULT: NOT deterministic — identical
-                                // prefix only ~6 cells, then the shared global RNG desyncs (coins/effects
-                                // consume draws interleaved with mid-run generation). Minecraft-style
-                                // device seeds would need generation on a PRIVATE stream (not worth it).
-                                // Keep -1 (OFF). The SIM is the reproducibility tool (reset(seed=N)).
-const HOOK_VERSION = 'seedprobe-16u'; // 16t = 30 Hz state broadcast (obs freshness; control stays 10 Hz host-side) + 16s turn-write diag
+const HOOK_VERSION = 'clean-16w'; // 16t = 30 Hz state broadcast (obs freshness; control stays 10 Hz host-side) + 16s turn-write diag
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -242,7 +233,6 @@ const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire wit
 let giPtr = null;                  // GameController.GameInput* cached each Update (native delayed-turn write)
 let nativeTurnCd = 0;              // Update-frame cooldown after a native turn (anti double-turn debounce)
 let lastTurnWrite = null;          // 16s: last turn-byte verdict {r, cp, ...} — streamed ONCE then cleared
-let runSeedPending = false;        // 16u: re-seed at the FIRST path-generation draw of the new run
 let heldTurnDir = 0;              // 4/5: a turn intent HELD across the junction window (re-writes the game's
 let heldTurnFrames = 0;          // ShouldTurn flag each Update so a borderline-late command still catches the corner)
 // NATIVE DELAYED-TURN (2026-07-04): route the policy's turn byte through the game's OWN HandleDelayedTurning
@@ -525,17 +515,9 @@ function resolve() {
   fn.OnPlayClicked = new NativeFunction(base.add(RVA.OnPlayClicked), 'void', ['pointer', 'pointer']);     // (MainMenu*, mi) — start a run from the menu
   fn.GetRunVelocity = new NativeFunction(base.add(RVA.GetRunVelocity), 'float', ['pointer', 'pointer']);   // (CharacterPlayer*, mi) -> float
   fn.CanTurnLeft = new NativeFunction(base.add(RVA.CanTurnLeft), 'bool', ['pointer', 'int', 'pointer']);   // (PathElement*, origin, mi) -> bool
-  fn.RandomInitState = new NativeFunction(base.add(RVA.RandomInitState), 'void', ['int', 'pointer']);  // (seed, mi)
-  // 16u: seed the global RNG IMMEDIATELY before the first path draw of a fresh run — no interleaved
-  // consumers can desync the stream between the seed call and generation.
-  Interceptor.attach(base.add(RVA.GetRandomPathElem), {
-    onEnter(args) {
-      if (runSeedPending) {
-        runSeedPending = false;
-        try { fn.RandomInitState(SEED_RUNS, NULLPTR); dbg('seeded_at_gen', SEED_RUNS); } catch (_) {}
-      }
-    }
-  });
+  // [16w] Track-seed probe REMOVED (concluded 2026-07-06: device runs not seedable). The interceptor on
+  // the generation function GetRandomPathElementForSide is GONE — nothing the hook does touches the
+  // game's track generation or RNG. The hook is now strictly READ-state + INJECT-action-bytes.
   fn.CanTurnRight = new NativeFunction(base.add(RVA.CanTurnRight), 'bool', ['pointer', 'int', 'pointer']); // (PathElement*, origin, mi) -> bool
   fn.IsTurn = new NativeFunction(base.add(RVA.IsTurn), 'bool', ['pointer', 'pointer']);                    // (PathElement*, mi) -> bool
   // Struct-by-value (arm64 HFA): Vector2 = {float,float} returned/passed in s0,s1 (libffi handles it).
@@ -1033,10 +1015,7 @@ function dispatchAction(a, gc, cp) {
       tiltCmd = 0.0; latTarget = 0.0;   // never carry a held tilt into a new run
       if (!cp.isNull()) {
         const egui = cp.add(OFF.GameOverInterface).readPointer();
-        if (!egui.isNull()) {
-          if (SEED_RUNS >= 0) runSeedPending = true;
-          fn.RunAgainClicked(egui, NULLPTR); dbg('runagain');
-        }
+        if (!egui.isNull()) { fn.RunAgainClicked(egui, NULLPTR); dbg('runagain'); }
         else { dbg('runagain_no_egui'); } // not at game-over (e.g. at the main menu) -> use byte 9
       }
       break;
@@ -1045,7 +1024,6 @@ function dispatchAction(a, gc, cp) {
       // Gated to "currently at the menu": MainMenu.Update must have run within the last few ticks,
       // else mmInstance is stale (a run is in progress) and calling it could crash.
       if (mmInstance !== null && !mmInstance.isNull() && (updateTicks - mmSeenAtTick) <= 5) {
-        if (SEED_RUNS >= 0) runSeedPending = true;
         fn.OnPlayClicked(mmInstance, NULLPTR); dbg('play_from_menu');
       } else { dbg('play_from_menu_skip', updateTicks - mmSeenAtTick); }
       break;
