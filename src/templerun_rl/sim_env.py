@@ -575,6 +575,7 @@ class TempleRunSimEnv(gym.Env):
         # until the first jump; refreshed each fresh takeoff (a new jump only starts once airborne ends).
         self._jump_takeoff_pos: Optional[float] = None
         self._pending_jump_frames = 0     # >0 = a JUMP command buffered by jump_exec_lat_frames, fires at 0
+        self._cliff_edge_frames = 0       # consecutive frames riding |lane|>=cliff_edge_lane on level>=3
         self._slide_t = 0.0
         self._strafe_t = 0.0
         self._stumble_t = 0.0
@@ -1199,15 +1200,28 @@ class TempleRunSimEnv(gym.Env):
         if self._stumble_t > 0.0:
             self._stumble_t = max(0.0, self._stumble_t - dt)
         # WALL-HIT: over-tilted past the edge -> stumble (survivable once) and clamp back off the wall.
+        # (Reachable only via turn-landing overshoot — the tilt glide itself clamps at the edge.)
         # HIGH GROUND (Cliff, zone level 3) [USER-OBSERVED on device 2026-07-05]: there is NO side wall up
-        # there — over-strafing past the edge falls off the cliff -> DEATH, not a stumble. The uniform
-        # wall-stumble taught policies to strafe fearlessly at altitude (v27 rode |lane| 6.9 on plvl 3).
+        # there — over-strafing past the edge falls off the cliff -> DEATH, not a stumble.
         if abs(self._lane) > edge:
             if int(self._track[self._cell_index].get("level", 2)) >= 3:
-                self._kill(1)   # fell off the high-ground cliff edge -> Fall
+                self._kill(1)   # landed/pushed past the high-ground cliff edge -> Fall
                 return
             self._stumble()
             self._lane = max(-edge, min(edge, self._lane))
+        # CLIFF EDGE-RIDING [2026-07-06 DEVICE-MEASURED — the check above was DEAD CODE for strafing (the
+        # glide clamps at the edge, so |lane|>edge never fired) -> v31 rode |lane| 7.0 on plvl 3 and died
+        # on device]. Captures: SUSTAINED |lane|>=6.3 on level>=3 for 8-10 frames = Fall (dt1); short
+        # touches (1-4 frames) survive. Kill after cliff_edge_kill_frames consecutive frames -> policies
+        # must not HOLD full tilt at altitude (transient dodges stay legal).
+        if int(self._track[self._cell_index].get("level", 2)) >= 3 and \
+                abs(self._lane) >= float(cfg.get("cliff_edge_lane", 6.3)):
+            self._cliff_edge_frames += 1
+            if self._cliff_edge_frames >= int(cfg.get("cliff_edge_kill_frames", 6)):
+                self._kill(1)   # rode the high-ground cliff edge too long -> Fall
+                return
+        else:
+            self._cliff_edge_frames = 0
         if self._post_turn_linger > 0:          # post-turn is_turn linger (sim-to-real trap) counts down
             self._post_turn_linger -= 1
 

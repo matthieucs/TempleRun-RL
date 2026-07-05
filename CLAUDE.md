@@ -14,7 +14,10 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 
 ## Run it
 `python scripts/setup_device.py` forwards 27042 + state **9999** + action **9998**, then injects.
-Inject one-liner (run EXACTLY ONE; it exits → in-phone agent unloads):
+Inject one-liner (run EXACTLY ONE; the host process must STAY alive — if it exits the in-phone agent
+unloads. ⚠️ Before re-injecting: `pkill` is forbidden — `kill <PID>` the OLD injector first (`ps -eo
+pid,cmd | grep gadget_inject`); stale injectors RE-INJECT after a force-stop+restart → multiple agents,
+port contention, corrupted evals [2026-07-06: 3 stale injectors stalled a capture at ep1]):
 `setsid nohup .venv/bin/python frida/gadget_inject.py frida/temple_run_hook.js 127.0.0.1:27042 &`
 Recover a flaky/crash-looped phone: `adb -s 3f80a3a shell am force-stop com.imangi.templerun` →
 `am start -n com.imangi.templerun/com.imangi.unityactivity.ImangiUnityActivity` → wait 12 s → re-forward
