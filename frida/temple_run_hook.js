@@ -182,7 +182,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'leveldir-16r'; // 16r = next_path_level/next2_path_level streamed (device-verified readable, 10/10 direction); 16p base
+const HOOK_VERSION = 'twdiag-16s'; // 16s = one-shot turn-write verdict streamed (s.turn_write) — junction misses self-explain; 16r base
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -225,6 +225,7 @@ const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress c
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
 let giPtr = null;                  // GameController.GameInput* cached each Update (native delayed-turn write)
 let nativeTurnCd = 0;              // Update-frame cooldown after a native turn (anti double-turn debounce)
+let lastTurnWrite = null;          // 16s: last turn-byte verdict {r, cp, ...} — streamed ONCE then cleared
 let heldTurnDir = 0;              // 4/5: a turn intent HELD across the junction window (re-writes the game's
 let heldTurnFrames = 0;          // ShouldTurn flag each Update so a borderline-late command still catches the corner)
 // NATIVE DELAYED-TURN (2026-07-04): route the policy's turn byte through the game's OWN HandleDelayedTurning
@@ -954,8 +955,19 @@ function dispatchAction(a, gc, cp) {
             // native turn, ignore further turn bytes for ~0.3s so the policy's double/opposite-turn spam
             // (v14 wasn't trained that one byte suffices) can't over-rotate off the path (the pt-1 Falls).
             const valid = wantL ? (cachedCanLeft || cachedNextCanLeft) : (cachedCanRight || cachedNextCanRight);
-            if (nativeTurnCd > 0) { dbg('turn_debounce', a); }
-            else if (!valid) { dbg('turn_invalid_dir', a); }
+            // 16s DIAGNOSTIC: record every turn-byte VERDICT (streamed once as s.turn_write) so device
+            // evals explain their own junction misses — written / debounce / invalid(+can flags) /
+            // straight, with the live cp at the write moment. Perception/logging only, no decisions.
+            if (nativeTurnCd > 0) {
+              lastTurnWrite = { r: 'debounce', cp: cachedCellProg, cd: nativeTurnCd, a: a };
+              dbg('turn_debounce', a);
+            }
+            else if (!valid) {
+              lastTurnWrite = { r: 'invalid', cp: cachedCellProg, a: a,
+                                cl: cachedCanLeft ? 1 : 0, cr: cachedCanRight ? 1 : 0,
+                                ncl: cachedNextCanLeft ? 1 : 0, ncr: cachedNextCanRight ? 1 : 0 };
+              dbg('turn_invalid_dir', a);
+            }
             else {
               try {
                 if (wantL) giPtr.add(OFF.GI_ShouldTurnLeft).writeU8(1);
@@ -964,10 +976,14 @@ function dispatchAction(a, gc, cp) {
                 // (flag-HOLD removed — single write only, like a real swipe. The game's own buffer window
                 //  handles the corner timing; re-writing every frame was the buggy "exploit" look.)
                 nativeTurnCd = 18;   // ~0.3s @60Hz Update — anti double-turn (ignore a redundant 2nd byte)
+                lastTurnWrite = { r: 'written', cp: cachedCellProg, a: a };
                 dbg('turn_native', a, 'prog', Math.round(cachedCellProg * 100) / 100);
-              } catch (_) { if (wantL) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); }
+              } catch (_) {
+                lastTurnWrite = { r: 'native_fallback', cp: cachedCellProg, a: a };
+                if (wantL) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR);
+              }
             }
-          } else { dbg('turn_ignore_straight', a); }
+          } else { lastTurnWrite = { r: 'straight', cp: cachedCellProg, a: a }; dbg('turn_ignore_straight', a); }
         } else if (TURN_BUFFER_LEGACY) {
           if (cachedRawIsTurn || cachedNextIsTurn) {
             pendingTurn = a; pendingTurnAge = 0; pendingSawTurnCell = cachedRawIsTurn;
@@ -1110,6 +1126,8 @@ function snapshot() {
   s.next_path_type = cachedNextPathType;      // forward cell PE_Type (for narrow detection / mapping)
   s.next_path_level = cachedNextPathLevel;    // forward cell PE_Level (upcoming altitude, +1)
   s.next2_path_level = cachedNext2PathLevel;  // 2-ahead cell PE_Level (+2) — direction = sign(next2 - path_level)
+  s.turn_write = lastTurnWrite;               // 16s: one-shot turn-byte verdict (null when none since last poll)
+  lastTurnWrite = null;
   // narrow_target_lane: PERCEPTION for the NN — which lane (-1 L/0 C/+1 R, runner-relative) the upcoming
   // narrow's strip is in (best-guess map via narrowStrafeDirFor; verify/refine from on-device deaths),
   // null if no narrow ahead. The NN reads it and decides the strafe (no hook action).
