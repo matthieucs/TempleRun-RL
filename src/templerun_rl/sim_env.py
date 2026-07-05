@@ -358,6 +358,16 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
                                       # cp<=0.18; 8 refusals at cp 0.15-0.95 incl ALL grounded-at-gap
                                       # crevasse deaths). Matches gap_entry_grace (same lip). Jump from
                                       # the APPROACH cell — predicted_jump already cues that takeoff.
+    "strafe_exec_lat_frames": 0,      # [2026-07-06] CONTROL LATENCY on the STRAFE/level tilt command (the
+                                      # commanded lat_target reaches the lane-lag N frames late). Device
+                                      # control latency is ~1 frame uniform (turn+jump both measured 1);
+                                      # strafe was UNMODELED (instant) -> the sim never reproduced the
+                                      # narrows-AT-SPEED death (v36 device ep0@7040/ep4: reached lane only
+                                      # +-1.8-2.8, short of the [3,7] band, fell off the inner edge — at
+                                      # v210 the 1-cell narrow lookahead + strafe lag = tilt starts too
+                                      # late to reach the band). Default 0 (harness/replay unchanged);
+                                      # train at 1. Absorbed constant (policy strafes earlier) — the
+                                      # POINT is to teach the earlier strafe.
     "jump_exec_lat_frames": 0,        # mean frames the JUMP action is buffered before it fires (0 = instant)
     "jump_exec_lat_jitter": 0,        # +/- uniform frame jitter on the above (models latency variance)
     "slide_duration": 0.7,            # [MEASURED] SlideDuration ~0.70s
@@ -565,7 +575,9 @@ class TempleRunSimEnv(gym.Env):
         self._facing = DIR_N
         self._lane = 0.0                     # CONTINUOUS lateral tilt offset, center 0 (recenters when idle)
         self._tilt_dir = 0                   # current tilt direction while strafing (-1 left / +1 right)
-        self._lat_target = 0.0               # commanded tilt target (hold -> +/-edge, level -> 0)
+        self._lat_target = 0.0               # ACTIVE tilt target driving the lane lag (post-latency)
+        self._lat_cmd = 0.0                  # COMMANDED tilt target (this frame's strafe/level byte)
+        self._lat_target_buf: list[float] = []   # strafe_exec_lat_frames delay buffer (cmd -> active)
         self._distance = 0.0
         self._distance_real = float(self.cfg["start_distance"])  # real-scale DistanceTraveled (reward signal)
         # high-speed curriculum: jump-start a fraction of episodes deep into the run (fast + dense).
@@ -1064,16 +1076,16 @@ class TempleRunSimEnv(gym.Env):
             # ANALOG TILT (device-measured 2026-07-02, lateral-accel-15a): byte0 = HOLD LEFT — sets a
             # persistent lateral target -edge; the lane first-order-lags toward it in _advance. The
             # target STAYS until byte1/byte6 (level) — exactly the hook's tiltCmd semantics.
-            self._lat_target = -float(cfg["lane_edge"])
+            self._lat_cmd = -float(cfg["lane_edge"])
             self._tilt_dir = -1
         elif a == int(C.Action.STRAFE_RIGHT):
-            self._lat_target = +float(cfg["lane_edge"])
+            self._lat_cmd = +float(cfg["lane_edge"])
             self._tilt_dir = +1
         elif a in (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT)):
             self._attempt_turn(a)
         elif a == int(C.Action.NOOP):
             # NoOp = LEVEL the phone: target 0, the game recenters (measured alpha == hold alpha).
-            self._lat_target = 0.0
+            self._lat_cmd = 0.0
             self._tilt_dir = 0
         # jump/slide/turn leave the tilt target UNCHANGED (device: lateral drift continues mid-jump)
 
@@ -1259,6 +1271,17 @@ class TempleRunSimEnv(gym.Env):
         self._jump_t = max(0.0, self._jump_t - dt)
         self._slide_t = max(0.0, self._slide_t - dt)
         self._strafe_t = max(0.0, self._strafe_t - dt)
+
+        # STRAFE-COMMAND LATENCY (strafe_exec_lat_frames): the commanded tilt (_lat_cmd) reaches the
+        # ACTIVE target (_lat_target, driving the lag below) N frames late — the device Frida-TCP control
+        # lag on the tilt byte. lat=0 -> immediate (harness/replay unchanged).
+        slat = int(cfg.get("strafe_exec_lat_frames", 0))
+        if slat > 0:
+            self._lat_target_buf.append(self._lat_cmd)
+            if len(self._lat_target_buf) > slat:
+                self._lat_target = self._lat_target_buf.pop(0)
+        else:
+            self._lat_target = self._lat_cmd
 
         # LATERAL model (device-MEASURED 2026-07-02, strafe_probe_tilt2 / lateral-accel-15a): the lane
         # is a FIRST-ORDER LAG toward the commanded target (hold -> +/-edge, level/NoOp -> 0):
@@ -1652,6 +1675,8 @@ class TempleRunSimEnv(gym.Env):
         self._strafe_t = self._timer_from(None, s.get("is_strafing"), self.cfg["strafe_duration"],
                                          explicit=hidden.get("strafe_t"))
         self._lat_target = float(hidden.get("lat_target") or 0.0)
+        self._lat_cmd = self._lat_target
+        self._lat_target_buf = []
         self._gap_grace_cell = None
         self._stumble_t = self._timer_from(None, s.get("is_stumbling"), self.cfg["stumble_duration"],
                                           explicit=hidden.get("stumble_t"))
