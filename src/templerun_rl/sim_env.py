@@ -166,6 +166,8 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "hook_turn_buffer": False,         # models hook 16j TURN_BUFFER=true: junction-cell turn fires
                                        # CENTERED (timing-free) — removes the 10Hz turn latency. v20 on.
     "turn_buffer_ttl": 3,              # cells a latched approach-swipe persists before timing out
+    "turn_buffer_late_cp": 0.50,       # [2026-07-05] junction swipe queued past this cp = arrives past the
+                                       # corner (device +0.17cp staleness) -> MISS (see late-queue gate)
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
     # longer reads these; turning at any cprog in the window (or buffered early) is clean.
@@ -996,7 +998,15 @@ class TempleRunSimEnv(gym.Env):
         # turn_approach_buffer (enable both together).
         if self.cfg.get("hook_turn_buffer") and bool(cell.get("is_turn")) and (
                 cell.get("can_turn_left") if want_left else cell.get("can_turn_right")):
-            self._execute_turn(cell, want_left, float(self.cfg["turn_center_cprog"]), from_buffer=True)
+            # LATE-QUEUE MISS [2026-07-05, v27/v28 device post-mortem]: the device swipe-queue only saves a
+            # swipe that ARRIVES before the corner. The policy's byte lands ~+0.17cp stale (TCP), so a sim
+            # swipe past turn_buffer_late_cp reaches the game past the exec point -> the turn NEVER FIRES
+            # ("stops turning at speed") -> runs off the edge. Without this gate the buffer made junction
+            # timing free (v28: zero pressure to swipe early -> device tail p90 0.59 still missed).
+            if cp <= float(self.cfg.get("turn_buffer_late_cp", 0.50)):
+                self._execute_turn(cell, want_left, float(self.cfg["turn_center_cprog"]), from_buffer=True)
+            # else: queued too late -> no turn (the junction will be MISSED unless a later in-window
+            # swipe lands via the positional path below on a subsequent frame).
             return
         early = float(self.cfg["turn_exec_early"])
         late = float(self.cfg["turn_exec_late"])
