@@ -36,8 +36,11 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 - **Small narrows (pt17/18) → `must_jump`** (hook 16p): human data = jumps them 82%. The policy's existing
   must_jump→jump generalizes → v14 jumps them, no retrain. Set on both `cachedMustJump` and streamed `s.must_jump`.
 - **Hook** `frida/temple_run_hook.js`, version in `HOOK_VERSION` (`_hv` on the stream). Current
-  **16p** (`narrowjump-16p`). Streams raw state + derived obs; executes action bytes. NO action-DECISION
-  rules (NN decides); the swipe-queue + must_jump-flag are perception/execution translations, not decisions.
+  **16r** (`leveldir-16r`) = 16p + streams `next_path_level`/`next2_path_level` (upcoming-cell PE_Level).
+  Device-VERIFIED 2026-07-05 (10/10): future PE_Level IS readable — the old "reads 0" assumption was WRONG;
+  `sign(next2_path_level − path_level)` = the crevasse direction (up/down). Streams raw state + derived
+  obs; executes action bytes. NO action-DECISION rules (NN decides); the swipe-queue + must_jump-flag are
+  perception/execution translations, not decisions.
 
 ## Key offsets (this build; from dump.cs)
 - **CharacterPlayer**: IsDead 0xD8, IsJumping 0xF8, IsSliding 0x100, Score 0x138, Velocity(Vec3) 0x34,
@@ -54,13 +57,22 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   `docs/CLAUDE_FULL_HISTORY.md` §5 / `docs/OFFSETS.md`.
 
 ## Sim + training
-- `src/templerun_rl/sim_env.py` = fast headless model (`TempleRunSim-v0`); obs `obs.py` (**OBS_LEN 27**,
+- `src/templerun_rl/sim_env.py` = fast headless model (`TempleRunSim-v0`); obs `obs.py` (**OBS_LEN 30**,
   bools + scalars + cell_progress/lane/narrow_target_lane/**predicted_landing**/next_ground_change_higher
-  + K=4 action history → 55-wide; power-ups REMOVED 2026-07-04 — always-0 dead inputs); reward `reward.py`;
-  PPO `scripts/train_sim.py` (net 128,128, linger 3, ent 0.04). Deploy = same obs on the phone via the hook.
+  + **predicted_jump** (velocity-invariant step-up takeoff cue, host-derived) + **next_path_level/
+  next2_path_level** (upcoming-altitude direction, hook 16r) + K=4 action history → 58-wide; power-ups
+  REMOVED 2026-07-04); reward `reward.py`; PPO `scripts/train_sim.py` (net 128,128, linger 3).
+  Deploy = same obs on the phone via the hook.
 - Sim turn-buffer config: `hook_turn_buffer=true` models the device swipe-queue (turn near a junction lands
-  CENTERED, timing-free, `from_buffer` offset 0). `runs/ppo_v14_obs27.zip` = obs-27 warm-start base (EXACT
-  surgical equivalent of v14; `scratchpad/surgery_v22.py`).
+  CENTERED, timing-free, `from_buffer` offset 0). Warm-start base **`runs/ppo_v14_obs30_leveldir.zip`**
+  (EXACT surgical equivalent of v14, new obs cols zero-init; `scratchpad/surgery_v24_leveldir.py`).
+- **Jump exec latency (sim, 2026-07-05):** `jump_exec_lat_frames`/`jump_exec_lat_jitter` buffer the JUMP
+  firing. DEVICE-MEASURED (`scripts/probe_jump_exec.py`, 25/25): **exactly 1 frame @10Hz, zero jitter**
+  (uniform with the turn-side 1-frame exec). Constant latency is ABSORBED by policies (window shifts);
+  only JITTER creates training pressure (v14 hiMed 2246→130 under 2±1; a predicted_jump pre-aim oracle
+  survives). Train at **1±1** (measured mean + TCP obs-staleness variance); harness/replay at 0.
+- **Warm-start recipe that does NOT collapse: `--learning-rate 5e-5`** (new knob; default 3e-4 ALWAYS
+  collapses a v14 warm-start regardless of ent). Keep the BEST checkpoint — drift resumes past ~500k-1M.
 - **THE FEEDBACK LOOPS (use before any retrain/deploy):**
   - `scripts/fidelity_scorecard.py --strict` — ~13 phone-free checks vs `captures/device_reference.json`.
     GREEN required before retrain. (Blind for un-checked mechanics — green ≠ complete.)
@@ -93,25 +105,31 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   deaths 2/8** (down from 5/8). `next_ground_change_higher` obs (pt 33-36, hook 16i) **verified firing on
   device** (7/7 crevasse-approach frames) — prior "0 fires" was a capture-logging artifact, not a bug.
 
-**FAILED — RETRAINING IS EXHAUSTED (2026-07-03/04):**
-- **12 straight retrain regressions (v15→v22).** Every warm-start+finetune from v14 drifts BELOW it on
-  device, regardless of change (high-speed curriculum, off_center_penalty [device-TOXIC], turn_lane_carry
-  "fidelity" [it's a load-bearing REGULARIZER, keep 3.0], tail-risk, action_delay, low-ent, buffer models).
-  Offline metrics do NOT predict device turns. **v14 is a fragile optimum; STOP retraining.**
-- **What actually works here = HOOK/perception fixes, NOT retraining** (native turn swipe-queue,
-  small-narrow must_jump). The turn wall broke via a hook change on v14, no retrain.
+**FAILED / LESSONS (2026-07-03/05):**
+- **12 retrain regressions (v15→v22) at LR 3e-4.** Every warm-start+finetune from v14 drifted BELOW it on
+  device (high-speed curriculum, off_center_penalty [device-TOXIC], turn_lane_carry "fidelity" [it's a
+  load-bearing REGULARIZER, keep 3.0], tail-risk, action_delay, low-ent, buffer models). Offline metrics do
+  NOT predict device turns. **AMENDED 2026-07-05: the collapse mechanism was the LR** — 3e-4 knocks the
+  policy off v14's sharp optimum; **5e-5 fine-tunes stably** (v25c/v26 verified: no collapse, skills adopt).
+- **v25 (2-phase: crevasse-only isolation → full) DEVICE-REGRESSED (median ~650): 6/8 deaths = MISSED
+  TURNS.** Crevasse-ONLY training ATROPHIES device turns even after a full-task Phase B restores them
+  in-sim. **Isolation curricula: OK for narrows, WRONG for turns — keep turns practiced in every phase.**
+  Also 2/8 crevasse jumped too EARLY = the guessed lat 2±1 over-modeled (real = 1). Both fixed in v26.
 - Ruled out (device-measured): over-strafe lateral gap (device caps lane ±7, same as sim); 20Hz sampling
-  (already tried, WORSE); crevasse apex miscalibration (sim clears the human's v210 0.58 takeoff).
+  (WORSE); crevasse apex miscalibration (sim clears the human's v210 0.58 takeoff).
 
-**OPEN — CREVASSES are the remaining wall** (top death when the phone is healthy, DeathType 4=Ledge). Same
-  ~2-frame latency root as turns, but NO clean game-native fix (jumps fire immediately — no "buffer at the
-  gap" like turns). Velocity caps 210 (~4000 m). Needs a perception "jump-earlier" signal + a non-regressing
-  training method, or the crevasse-latency angle (untried).
+**OPEN — CREVASSES the remaining wall** (top death when the phone is healthy, DeathType 4=Ledge). No
+  game-native fix (jumps fire immediately — no "buffer at the gap" like turns). Velocity caps 210 (~4000 m).
+  **The full toolchain for it is now built + calibrated:** perception (predicted_jump timing +
+  next2_path_level direction, both device-verified readable) + sim pressure (jump latency 1±1, measured) +
+  a stable trainer (LR 5e-5). v26 (single-phase full task on all of it) = the first test of the assembled
+  stack; device eval pending.
 
-**WHERE WE ARE (2026-07-04):**
-- **Deploy floor = v14** (`runs/ppo_best.zip`, device **median 1652, best 2908**). Best real run tonight 2430.
-- **Deliverable added (no regression):** obs27 (power-ups out) + hook 16p (clean swipe-queue turns +
-  small-narrow jump). Warm-start base `runs/ppo_v14_obs27.zip`.
-- **⚠️ PHONE DEGRADED after hours of runs** (both v14+16p AND v22 died ~600-800 at crevasses, anomalous vs
-  1652). **RE-MEASURE v14 on hook 16p on a FRESH/rebooted phone** for the true median.
-- NN decides all actions. Branch `sim-calibration` pushed (safe to merge; `runs/*.zip`+MODELS.md gitignored).
+**WHERE WE ARE (2026-07-05):**
+- **Deploy floor = v14** (`runs/ppo_best.zip`, device **median 1652, best 2908**).
+- **v26 training** (single-phase full task, lat 1±1, LR 5e-5, warm-start `ppo_v14_obs30_leveldir`): in-sim
+  median pegged at cap 1823, deaths falling — no collapse. Next: best-ckpt → offline gate (crevasse-under-
+  latency AND full-task both ≥ v14) → device eval on hook 16r (fresh phone).
+- **⚠️ v14 fresh-phone re-measure still pending** (its 1652 was pre-degradation). ⚠️ obs.py is now OBS_LEN
+  30 → to run v14 (width 60) under capture_calib, `git stash` obs.py first.
+- NN decides all actions. Branch `sim-calibration` (safe to merge; `runs/*.zip`+MODELS.md gitignored).
