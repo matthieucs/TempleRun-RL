@@ -4,6 +4,15 @@ Goal: an RL policy that reaches **10,000 m** on real **Temple Run** (`com.imangi
 trained in a headless sim, deployed on a physical Android phone via **Frida** (read game state + inject
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
+## 🎯 GOAL REACHED — 2026-07-06: device run **10,545 m** (v36, hook 16w; `captures/best_run_10545m_v36_hook16u.jsonl`)
+Died Burnt on a flame tower at the end after 180 turns / 34 crevasses / 56 narrows / 54 holes / 92 jumps,
+117 s at the v210 cap. **NEXT PHASE = RELIABILITY: a 10 k MEDIAN, not just best** (same session runs were
+2320/1872/2368/**10545**/589 — high variance). Edge cases still to model in the SIM: (1) FLAME-TOWER
+slide-under at speed (the 10545 death), (2) multi-hole jump RHYTHM (4-cell must-jump chains — jump-spam
+fails, needs staggered land-then-rejump), (3) narrows-at-speed strict [3,7] band (the 256-net v39 breaks
+the narrow↔crevasse interference but drifts — needs a stable from-scratch train, see `scratchpad/
+train_gpu_256.sh`), (4) stumble→rejump recovery.
+
 ## Setup
 - **Engine** Unity 2022.3 IL2CPP, arm64 only → needs a REAL arm64 phone (no emulator: Frida can't hook
   the ARM lib under x86 translation). Device **3f80a3a** (Redmi, Android 15, NOT rooted).
