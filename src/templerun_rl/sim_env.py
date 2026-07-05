@@ -1347,6 +1347,7 @@ class TempleRunSimEnv(gym.Env):
         # 1-cell lookahead: the cell ahead of the nearest (raw, not window-gated -> anticipation).
         self._extend_track()
         nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
+        nxt2 = self._track[self._cell_index + 2] if self._cell_index + 2 < len(self._track) else {}
         nobst = int(nxt.get("obstacles", 0))
 
         on_ground = self._jump_t <= 0.0 and not self._is_dead
@@ -1386,6 +1387,10 @@ class TempleRunSimEnv(gym.Env):
             # device hook emits it from next_path_type ∈ 33-36 (the future PE_Level is unreadable=0, but
             # the SingleLevelStepDownCap path_type is reliable). Was `stepup` (step-up only, undeployable).
             "next_ground_change_higher": int(nxt.get("obstacles", 0)) == OBST_LEVEL_CHANGE,
+            # upcoming altitude 2-cell lookahead (device-verified readable, probe 16q): the cap/ledge cells
+            # carry the NEW zone level, so sign(next2_path_level - path_level) = the crevasse direction.
+            "next_path_level": int(nxt.get("level", -1)),
+            "next2_path_level": int(nxt2.get("level", -1)),
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).

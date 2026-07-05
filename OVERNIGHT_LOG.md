@@ -224,7 +224,37 @@ base+8. Scorecard `--strict` GREEN (0 FAIL/SKIP; crevasse.curve/speed still pass
 (0/300 mismatches): `runs/ppo_v14_obs28_predjump.zip` (insert zero col @27 → v14 skills preserved, new cue
 starts at 0 influence). `scratchpad/surgery_v23_predjump.py`.
 
-### TOMORROW — exact steps (phone was OFFLINE tonight)
+## 2026-07-05 — DIRECTION FIX (strong foundations): upcoming-altitude obs, device-VERIFIED
+User pushed: the NN can't tell up vs down from mid (`next_ground_change_higher` is non-directional, and
+from mid path_level=2 is identical for mid→high and mid→low). Asked if easily fixable → **YES, device-proven.**
+
+- Ruled out: crevasse subtype (pt33/34/35/36) does NOT encode direction (each mixes UP/DOWN — it's Horz/Vert).
+- Dump has no dedicated "next level / step-up" field (only LastLevel=previous, sPathLevel=generator static,
+  player IsGroundHeightChangeHigher=fires too late). So the fix = read the UPCOMING cell's PE_Level.
+- **PROBE 16q (device):** the hook long ASSUMED future PE_Level reads 0 — WRONG for this build. Read the
+  forward neighbor's and 2-ahead cell's PE_Level (`next_path_level`/`next2_path_level`). Drove v14-like
+  (ppo_v14_obs28_predjump) through crevasses, logged `captures/levelprobe_16q.jsonl` (4562 frames).
+  **`sign(next2_path_level - path_level)` = the realized ground_height direction 10/10** across ALL types
+  (low→mid, mid→high, mid→low, high→mid, high→low). next_path_level alone only 1/4 (too immediate); next2 wins.
+- **FIX (deployed in code, device-verified):** stream `next_path_level`+`next2_path_level` (hook **16r**
+  `leveldir-16r`), add both to obs (OBS_LEN 28→30, cols 28/29, `_norm_enum` /4), emit from the sim snapshot
+  (`nxt2` = track[cell_index+2]; cap/ledge cells carry the new zone → in-sim both dirs present). Scorecard
+  `--strict` GREEN. Warm-start surgery EXACT (0/300): `runs/ppo_v14_obs30_leveldir.zip` (zero cols @28,29;
+  keeps v14 + predicted_jump). `scratchpad/surgery_v24_leveldir.py`.
+- Net obs foundation now: path_level (current) + next_path_level + next2_path_level (2-cell altitude
+  lookahead, DIRECTION) + predicted_jump (velocity-invariant TIMING) + next_ground_change_higher (presence).
+
+### TOMORROW — exact steps (updated: base = obs30_leveldir, hook 16r)
+- **Retrain base is now `runs/ppo_v14_obs30_leveldir.zip`** (has predicted_jump + direction, both zero-init
+  on v14). Device eval uses **hook 16r** (`--out` a fresh capture). ⚠️ obs.py now OBS_LEN 30 → to re-measure
+  v14 (width 60) first, `git stash` obs.py.
+- Retrain: `--init-from runs/ppo_v14_obs30_leveldir.zip` + v14/v9 recipe (net 128,128, K4, linger3, ent0.04,
+  narrow-hold0.18, aim-center1.0, slide-jump-penalty0.15, curriculum-max-start-dist5000). OPEN: pair with the
+  crevasse-only isolation curriculum (validated: turn_prob=0/turn_prob_late=0/obstacle_prob=0/
+  zone_change_every=6, deep-start all speeds → 26% crevasse cells, 0 turns) as a Phase-A warm-start, then
+  Phase-B full task (mirrors narrow-only→v7). User leaning toward this.
+
+### (superseded) earlier standby — exact steps (phone was OFFLINE)
 1. **Fresh/rebooted phone → re-measure v14** (standing task; tonight's device was degraded). ⚠️ obs.py is
    now OBS_LEN 28 → deployed v14 (width 60) won't load cleanly under capture_calib's K-inference. To
    re-measure v14 first: `git stash` (or checkout obs.py from before commit) so OBS_LEN reverts, run

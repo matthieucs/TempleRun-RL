@@ -182,7 +182,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'narrowjump-16p'; // 16p = small narrows (pt17/18) flagged must_jump (human jumps 82%); swipe-queue turns
+const HOOK_VERSION = 'leveldir-16r'; // 16r = next_path_level/next2_path_level streamed (device-verified readable, 10/10 direction); 16p base
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -292,6 +292,8 @@ function narrowStrafeDirFor(subtype, facing) {   // -1 strafe left, +1 strafe ri
 const STRAFE_COOLDOWN_TICKS = 14;   // ~0.25 s strafe settle @ 60 Hz Update — don't restrafe mid-strafe
 let cachedPathType = -1;            // nearest cell PE_Type
 let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
+let cachedNextPathLevel = -1;       // forward-neighbor cell PE_Level (readable, 16q-verified)
+let cachedNext2PathLevel = -1;      // 2-ahead cell PE_Level — direction = sign(next2_path_level - path_level) (10/10)
 let cachedNextGroundHigher = false; // forward cell is a ZONE CREVASSE (next_path_type 33-36) -> jump LATE
                                     // (§23). Uses path_type, NOT PE_Level (future cells' Level reads 0).
 // REGION-SAMPLED narrow band (perception, replaces the guessed NARROW_SIDE map): when the forward
@@ -717,6 +719,16 @@ function installHooks() {
               cachedNextMustJump = MUST_JUMP_TYPES.indexOf(nobs) !== -1;
               cachedNextMustSlide = MUST_SLIDE_TYPES.indexOf(nobs) !== -1;
               cachedNextPathType = nxt.add(OFF.PE_Type).readS32();
+              // UPCOMING altitude 2-cell lookahead (16q device-verified: future PE_Level IS readable, the
+              // old "reads 0" assumption was wrong). The cap/ledge cells carry the NEW zone, so
+              // sign(next2_path_level - path_level) = the crevasse direction (up/down) — feeds obs so the NN
+              // stops blindly jumping every cap. next_path_level = +1 cell, next2_path_level = +2 cells.
+              cachedNextPathLevel = nxt.add(OFF.PE_Level).readS32();
+              cachedNext2PathLevel = -1;
+              try {
+                const nxt2 = noff ? nxt.add(noff).readPointer() : NULL;
+                if (nxt2 && !nxt2.isNull()) cachedNext2PathLevel = nxt2.add(OFF.PE_Level).readS32();
+              } catch (_) {}
               if (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(cachedNextPathType) !== -1) cachedNextMustJump = true;
               cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE)
                 || WIDE_GAP_TYPES.indexOf(cachedNextPathType) !== -1;
@@ -761,6 +773,7 @@ function installHooks() {
               cachedNextGroundHigher = false;
               cachedNextHasCoins = false; cachedNextCoinStart = 0; cachedNextCoinEnd = 0;
               cachedNextPathType = -1;
+              cachedNextPathLevel = cachedNext2PathLevel = -1;
               cachedNarrowBandLo = cachedNarrowBandHi = null;
             }
             // Fire one well-timed jump for an upcoming crevasse (after lane/prog are known this frame).
@@ -775,6 +788,7 @@ function installHooks() {
             cachedNextMustJump = cachedNextMustSlide = false;
             cachedIsLevelChange = cachedNextIsLevelChange = false;
             cachedPathType = cachedNextPathType = -1;
+            cachedNextPathLevel = cachedNext2PathLevel = -1;
             cachedMustJump = cachedMustSlide = false; cachedObst = 0;
           }
         } catch (_) {}
@@ -1094,6 +1108,8 @@ function snapshot() {
   s.next_wide_gap = cachedNextIsLevelChange;  // forward cell is a 2-cell gap (long hole / level change)
   s.next_ground_change_higher = cachedNextGroundHigher;  // forward cell is a ZONE CREVASSE (jump LATE)
   s.next_path_type = cachedNextPathType;      // forward cell PE_Type (for narrow detection / mapping)
+  s.next_path_level = cachedNextPathLevel;    // forward cell PE_Level (upcoming altitude, +1)
+  s.next2_path_level = cachedNext2PathLevel;  // 2-ahead cell PE_Level (+2) — direction = sign(next2 - path_level)
   // narrow_target_lane: PERCEPTION for the NN — which lane (-1 L/0 C/+1 R, runner-relative) the upcoming
   // narrow's strip is in (best-guess map via narrowStrafeDirFor; verify/refine from on-device deaths),
   // null if no narrow ahead. The NN reads it and decides the strafe (no hook action).

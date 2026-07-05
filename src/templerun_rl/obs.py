@@ -38,9 +38,15 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # fire a turn at cell-center instead of too early), lane = which of the 3 lanes (L/C/R) the runner is in
 # (for narrow strips). Both come from the hook (CharacterPlayer.GetPosition2D + PathElement.Rectangle)
 # and from the sim's own state — they are OBSERVATIONS, not actions.
-OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing", "predicted_jump")
+# next_path_level / next2_path_level: the altitude Level (PathLevel 1/2/3 = low/mid/high) of the cell 1 and
+# 2 ahead. DEVICE-VERIFIED READABLE (probe 16q, 10/10): sign(next2_path_level - path_level) = the true
+# crevasse direction (up/down), which `next_ground_change_higher` (non-directional) could NOT convey. Gives
+# the NN the SIGNED transition (low->mid vs high->mid etc.) + magnitude, so it stops blindly jumping every
+# cap. The old "future Level reads 0" assumption was wrong for this build.
+OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing", "predicted_jump",
+                    "next_path_level", "next2_path_level")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 19 bool/lookahead + 4 scalar + 5 extra = 28 (keep derived from OBS_FIELDS)
+OBS_LEN = len(OBS_FIELDS)  # 19 bool/lookahead + 4 scalar + 7 extra = 30 (keep derived from OBS_FIELDS)
 
 # Lane geometry (real device units, 2026-07-01 tilt-controlled model): the lateral position is
 # CONTINUOUS and centered on 0 — center 0, one strafe ~ 3.7 -> lanes at -3.7 / 0 / +3.7, side walls
@@ -192,6 +198,10 @@ def state_to_obs(state: dict) -> np.ndarray:
     # predicted_jump: velocity-invariant step-up crevasse takeoff cue (see predicted_jump_obs). Gated on
     # next_ground_change_higher (the zone-crevasse-ahead flag, set by the sim snapshot / device hook).
     out[base + 8] = predicted_jump_obs(cp0, v, g("next_ground_change_higher"))
+    # next_path_level / next2_path_level: upcoming altitude 2-cell lookahead (device-verified readable).
+    # direction of a crevasse = sign(next2_path_level - path_level). Same enum normalization as path_level.
+    out[base + 9] = _norm_enum(int(g("next_path_level")), PATH_LEVEL_MAX)
+    out[base + 10] = _norm_enum(int(g("next2_path_level")), PATH_LEVEL_MAX)
     return out
 
 
