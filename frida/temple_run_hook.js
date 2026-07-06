@@ -146,8 +146,15 @@ const PLAYER_ID = 1; // confirmed: PlayerManager.GetActivePlayer() returns 1
 
 const STATE_PORT = 9999;
 const ACTION_PORT = 9998;
-const POLL_MS = 100;  // 10 Hz broadcast. (Tried 20 Hz to cut turn-lag — the 20 Hz-retrained model was
-                      // WORSE on device, median 180 vs 607; reverted. The turn-barrier is not the rate.)
+const POLL_MS = 33;   // [16t, 2026-07-06] 30 Hz broadcast — OBS freshness only; the host env drains to
+                      // the NEWEST line and still CONTROLS at 10 Hz (env.step_dt 0.1), so the policy
+                      // cadence is unchanged. 16s diag measured the obs->write pipeline at med 0.21cp /
+                      // tail 0.40cp @v180, ~50ms of it = the old 10 Hz sampling age; the game's swipe-
+                      // queue consume deadline is live-cp ~0.67 (writes <=0.64 consumed 91/91, >=0.70
+                      // dead-letter 3/3, GI flag stays set unconsumed) -> late junction onsets + jitter
+                      // tail = the residual ~3% junction deaths. 30 Hz cuts the sampling age to ~17ms.
+                      // (The OLD "20 Hz was WORSE" verdict was a 20 Hz-CONTROL retrain — different thing;
+                      // median 180 vs 607 came from retraining the policy at 20 Hz, not fresher obs.)
 
 // ObstacleType -> required reaction
 // TreeStumble (3) is lane-dependent on the phone (left lane = jump-or-die, middle = stumble/2nd-hit
@@ -156,6 +163,11 @@ const POLL_MS = 100;  // 10 Hz broadcast. (Tried 20 Hz to cut turn-lag — the 2
 // LevelChange (7) marks a ZONE/ALTITUDE TRANSITION (path_level changes, e.g. 2->3 mid->high) which is
 // a CREVASSE that must be jumped — captured live: obstacle=7 + path_level 2->3 + no jump => fell+died.
 const MUST_JUMP_TYPES = [1, 3, 4, 7]; // Hole, TreeStumble, TreeJump, LevelChange(zone-transition crevasse)
+// SMALL NARROW (path_type 17/18) -> report as must_jump so the policy JUMPS it (human data 2026-07-04:
+// jumps 82% of small-narrow frames). Uses v14's existing jump-on-must_jump behavior (no retrain; the NN
+// still decides). Was modeled "center-safe" -> policy did nothing and barely survived by speed.
+const SMALL_NARROW_JUMP = true;
+const SMALL_NARROW_TYPES = [17, 18];
 const MUST_SLIDE_TYPES = [5, 6];      // kObstacleTreeSlide, kObstacleFlameTower
 
 // ---------------------------------------------------------------------------
@@ -177,7 +189,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'nativeturn-16l'; // 16l = native delayed-turn + anti-double-turn debounce + valid-dir guard
+const HOOK_VERSION = 'clean-16w'; // 16t = 30 Hz state broadcast (obs freshness; control stays 10 Hz host-side) + 16s turn-write diag
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -220,11 +232,16 @@ const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress c
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
 let giPtr = null;                  // GameController.GameInput* cached each Update (native delayed-turn write)
 let nativeTurnCd = 0;              // Update-frame cooldown after a native turn (anti double-turn debounce)
+let lastTurnWrite = null;          // 16s: last turn-byte verdict {r, cp, ...} — streamed ONCE then cleared
+let heldTurnDir = 0;              // 4/5: a turn intent HELD across the junction window (re-writes the game's
+let heldTurnFrames = 0;          // ShouldTurn flag each Update so a borderline-late command still catches the corner)
 // NATIVE DELAYED-TURN (2026-07-04): route the policy's turn byte through the game's OWN HandleDelayedTurning
 // buffer (set GI_ShouldTurnLeft/Right + TimeSinceShouldTurn=0) — the game then fires the turn at the corner
 // with its native timing, exactly like a real swipe. Handles late/early sends gracefully (unlike the
 // hook's immediate fn.TurnLeft, which overshoots on a late byte). Mutually exclusive with TURN_BUFFER.
-const TURN_NATIVE_BUFFER = true;
+const TURN_NATIVE_BUFFER = true;   // CLEAN version (2026-07-04, user choice): queue the turn ONCE via the
+                                   // game's own swipe buffer (ShouldTurnLeft) — exactly what a real early
+                                   // swipe does. The buggy every-frame flag-HOLD is removed (see handler).
 let pendingTurn = 0;                // 0 none, 4 TurnLeft, 5 TurnRight (buffered, fires at cell center)
 let pendingTurnAge = 0;
 let pendingSawTurnCell = false;     // became true once we were on the turn cell while a turn is pending
@@ -283,6 +300,8 @@ function narrowStrafeDirFor(subtype, facing) {   // -1 strafe left, +1 strafe ri
 const STRAFE_COOLDOWN_TICKS = 14;   // ~0.25 s strafe settle @ 60 Hz Update — don't restrafe mid-strafe
 let cachedPathType = -1;            // nearest cell PE_Type
 let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
+let cachedNextPathLevel = -1;       // forward-neighbor cell PE_Level (readable, 16q-verified)
+let cachedNext2PathLevel = -1;      // 2-ahead cell PE_Level — direction = sign(next2_path_level - path_level) (10/10)
 let cachedNextGroundHigher = false; // forward cell is a ZONE CREVASSE (next_path_type 33-36) -> jump LATE
                                     // (§23). Uses path_type, NOT PE_Level (future cells' Level reads 0).
 // REGION-SAMPLED narrow band (perception, replaces the guessed NARROW_SIDE map): when the forward
@@ -496,6 +515,9 @@ function resolve() {
   fn.OnPlayClicked = new NativeFunction(base.add(RVA.OnPlayClicked), 'void', ['pointer', 'pointer']);     // (MainMenu*, mi) — start a run from the menu
   fn.GetRunVelocity = new NativeFunction(base.add(RVA.GetRunVelocity), 'float', ['pointer', 'pointer']);   // (CharacterPlayer*, mi) -> float
   fn.CanTurnLeft = new NativeFunction(base.add(RVA.CanTurnLeft), 'bool', ['pointer', 'int', 'pointer']);   // (PathElement*, origin, mi) -> bool
+  // [16w] Track-seed probe REMOVED (concluded 2026-07-06: device runs not seedable). The interceptor on
+  // the generation function GetRandomPathElementForSide is GONE — nothing the hook does touches the
+  // game's track generation or RNG. The hook is now strictly READ-state + INJECT-action-bytes.
   fn.CanTurnRight = new NativeFunction(base.add(RVA.CanTurnRight), 'bool', ['pointer', 'int', 'pointer']); // (PathElement*, origin, mi) -> bool
   fn.IsTurn = new NativeFunction(base.add(RVA.IsTurn), 'bool', ['pointer', 'pointer']);                    // (PathElement*, mi) -> bool
   // Struct-by-value (arm64 HFA): Vector2 = {float,float} returned/passed in s0,s1 (libffi handles it).
@@ -575,6 +597,20 @@ function installHooks() {
         const gi = gcInstance.add(OFF.GameInput).readPointer();
         giPtr = gi;   // cache the GameInput* for the action dispatch (native delayed-turn write)
         if (nativeTurnCd > 0) nativeTurnCd--;   // tick down the anti-double-turn debounce
+        // HOLD the turn intent across the junction window: re-write the game's ShouldTurn flag each Update
+        // (60Hz) so a command that arrived a hair late still fires when the runner hits the corner. Clears
+        // once the game turned (JustTurned) or the window elapses. Safe: past the junction the flag no-ops.
+        if (heldTurnFrames > 0 && !gi.isNull()) {
+          if (cachedJustTurned) { heldTurnFrames = 0; heldTurnDir = 0; }
+          else {
+            try {
+              if (heldTurnDir === 4) gi.add(OFF.GI_ShouldTurnLeft).writeU8(1);
+              else                   gi.add(OFF.GI_ShouldTurnRight).writeU8(1);
+              gi.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
+            } catch (_) {}
+            heldTurnFrames--;
+          }
+        }
         if (!gi.isNull()) {
           cachedShouldTurnL = readBool(gi, OFF.GI_ShouldTurnLeft);
           cachedShouldTurnR = readBool(gi, OFF.GI_ShouldTurnRight);
@@ -671,7 +707,8 @@ function installHooks() {
             cachedObst = pe.add(OFF.PE_Obstacles).readS32();
             cachedIsLevelChange = (cachedObst === OBST_LEVEL_CHANGE)
               || WIDE_GAP_TYPES.indexOf(cachedPathType) !== -1;  // wide gap (long hole / level change)
-            cachedMustJump = !cachedIsLevelChange && MUST_JUMP_TYPES.indexOf(cachedObst) !== -1;
+            cachedMustJump = (!cachedIsLevelChange && MUST_JUMP_TYPES.indexOf(cachedObst) !== -1)
+              || (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(cachedPathType) !== -1);
             cachedMustSlide = MUST_SLIDE_TYPES.indexOf(cachedObst) !== -1;
             // DEBUG: absolute neighbor existence + the query, to verify direction logic at junctions.
             const OPP = { 1: 3, 2: 4, 3: 1, 4: 2 }[facing] || facing;   // incoming dir = opposite of facing
@@ -693,6 +730,17 @@ function installHooks() {
               cachedNextMustJump = MUST_JUMP_TYPES.indexOf(nobs) !== -1;
               cachedNextMustSlide = MUST_SLIDE_TYPES.indexOf(nobs) !== -1;
               cachedNextPathType = nxt.add(OFF.PE_Type).readS32();
+              // UPCOMING altitude 2-cell lookahead (16q device-verified: future PE_Level IS readable, the
+              // old "reads 0" assumption was wrong). The cap/ledge cells carry the NEW zone, so
+              // sign(next2_path_level - path_level) = the crevasse direction (up/down) — feeds obs so the NN
+              // stops blindly jumping every cap. next_path_level = +1 cell, next2_path_level = +2 cells.
+              cachedNextPathLevel = nxt.add(OFF.PE_Level).readS32();
+              cachedNext2PathLevel = -1;
+              try {
+                const nxt2 = noff ? nxt.add(noff).readPointer() : NULL;
+                if (nxt2 && !nxt2.isNull()) cachedNext2PathLevel = nxt2.add(OFF.PE_Level).readS32();
+              } catch (_) {}
+              if (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(cachedNextPathType) !== -1) cachedNextMustJump = true;
               cachedNextIsLevelChange = (nobs === OBST_LEVEL_CHANGE)
                 || WIDE_GAP_TYPES.indexOf(cachedNextPathType) !== -1;
               // STEP-UP lookahead: the altitude Level RISES within the next 2 cells -> a raised ledge
@@ -736,6 +784,7 @@ function installHooks() {
               cachedNextGroundHigher = false;
               cachedNextHasCoins = false; cachedNextCoinStart = 0; cachedNextCoinEnd = 0;
               cachedNextPathType = -1;
+              cachedNextPathLevel = cachedNext2PathLevel = -1;
               cachedNarrowBandLo = cachedNarrowBandHi = null;
             }
             // Fire one well-timed jump for an upcoming crevasse (after lane/prog are known this frame).
@@ -750,6 +799,7 @@ function installHooks() {
             cachedNextMustJump = cachedNextMustSlide = false;
             cachedIsLevelChange = cachedNextIsLevelChange = false;
             cachedPathType = cachedNextPathType = -1;
+            cachedNextPathLevel = cachedNext2PathLevel = -1;
             cachedMustJump = cachedMustSlide = false; cachedObst = 0;
           }
         } catch (_) {}
@@ -915,18 +965,35 @@ function dispatchAction(a, gc, cp) {
             // native turn, ignore further turn bytes for ~0.3s so the policy's double/opposite-turn spam
             // (v14 wasn't trained that one byte suffices) can't over-rotate off the path (the pt-1 Falls).
             const valid = wantL ? (cachedCanLeft || cachedNextCanLeft) : (cachedCanRight || cachedNextCanRight);
-            if (nativeTurnCd > 0) { dbg('turn_debounce', a); }
-            else if (!valid) { dbg('turn_invalid_dir', a); }
+            // 16s DIAGNOSTIC: record every turn-byte VERDICT (streamed once as s.turn_write) so device
+            // evals explain their own junction misses — written / debounce / invalid(+can flags) /
+            // straight, with the live cp at the write moment. Perception/logging only, no decisions.
+            if (nativeTurnCd > 0) {
+              lastTurnWrite = { r: 'debounce', cp: cachedCellProg, cd: nativeTurnCd, a: a };
+              dbg('turn_debounce', a);
+            }
+            else if (!valid) {
+              lastTurnWrite = { r: 'invalid', cp: cachedCellProg, a: a,
+                                cl: cachedCanLeft ? 1 : 0, cr: cachedCanRight ? 1 : 0,
+                                ncl: cachedNextCanLeft ? 1 : 0, ncr: cachedNextCanRight ? 1 : 0 };
+              dbg('turn_invalid_dir', a);
+            }
             else {
               try {
                 if (wantL) giPtr.add(OFF.GI_ShouldTurnLeft).writeU8(1);
                 else       giPtr.add(OFF.GI_ShouldTurnRight).writeU8(1);
                 giPtr.add(OFF.GI_TimeSinceShouldTurn).writeFloat(0.0);
-                nativeTurnCd = 18;   // ~0.3s @60Hz Update — anti double-turn
+                // (flag-HOLD removed — single write only, like a real swipe. The game's own buffer window
+                //  handles the corner timing; re-writing every frame was the buggy "exploit" look.)
+                nativeTurnCd = 18;   // ~0.3s @60Hz Update — anti double-turn (ignore a redundant 2nd byte)
+                lastTurnWrite = { r: 'written', cp: cachedCellProg, a: a };
                 dbg('turn_native', a, 'prog', Math.round(cachedCellProg * 100) / 100);
-              } catch (_) { if (wantL) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR); }
+              } catch (_) {
+                lastTurnWrite = { r: 'native_fallback', cp: cachedCellProg, a: a };
+                if (wantL) fn.TurnLeft(cp, NULLPTR); else fn.TurnRight(cp, NULLPTR);
+              }
             }
-          } else { dbg('turn_ignore_straight', a); }
+          } else { lastTurnWrite = { r: 'straight', cp: cachedCellProg, a: a }; dbg('turn_ignore_straight', a); }
         } else if (TURN_BUFFER_LEGACY) {
           if (cachedRawIsTurn || cachedNextIsTurn) {
             pendingTurn = a; pendingTurnAge = 0; pendingSawTurnCell = cachedRawIsTurn;
@@ -1041,7 +1108,8 @@ function snapshot() {
     s.path_type = readI32(pe, OFF.PE_Type);
     s.path_level = readI32(pe, OFF.PE_Level);
     const obs = readI32(pe, OFF.PE_Obstacles);
-    s.must_jump = MUST_JUMP_TYPES.indexOf(obs) !== -1;
+    s.must_jump = (MUST_JUMP_TYPES.indexOf(obs) !== -1)
+      || (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(s.path_type) !== -1);   // small narrow -> jump
     s.must_slide = MUST_SLIDE_TYPES.indexOf(obs) !== -1;
     s.obstacle = obs;   // raw ObstacleType enum (diagnose crevasse / tree-root)
     // COINS on the nearest cell (CoinRunLocation: 0 None, 1 Center, 2 Left, 3 Right)
@@ -1066,6 +1134,10 @@ function snapshot() {
   s.next_wide_gap = cachedNextIsLevelChange;  // forward cell is a 2-cell gap (long hole / level change)
   s.next_ground_change_higher = cachedNextGroundHigher;  // forward cell is a ZONE CREVASSE (jump LATE)
   s.next_path_type = cachedNextPathType;      // forward cell PE_Type (for narrow detection / mapping)
+  s.next_path_level = cachedNextPathLevel;    // forward cell PE_Level (upcoming altitude, +1)
+  s.next2_path_level = cachedNext2PathLevel;  // 2-ahead cell PE_Level (+2) — direction = sign(next2 - path_level)
+  s.turn_write = lastTurnWrite;               // 16s: one-shot turn-byte verdict (null when none since last poll)
+  lastTurnWrite = null;
   // narrow_target_lane: PERCEPTION for the NN — which lane (-1 L/0 C/+1 R, runner-relative) the upcoming
   // narrow's strip is in (best-guess map via narrowStrafeDirFor; verify/refine from on-device deaths),
   // null if no narrow ahead. The NN reads it and decides the strafe (no hook action).

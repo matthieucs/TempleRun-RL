@@ -45,6 +45,8 @@ LOG_FIELDS = (
     "dist_to_turn", "dist_to_turn_end", "dist_since_turn",
     "dist_to_change_temple", "dist_to_change_other", "dist_since_level_change", "dist_remainder",
     "ground_height", "is_over_ground", "ground_change_higher", "next_ground_change_higher",
+    "next_path_level", "next2_path_level",   # [PROBE 16q] upcoming-cell Level readability (direction fix)
+    "turn_write", "should_turn_left", "should_turn_right",  # [16s] turn-byte verdict + GI readback
     "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
     # --- Region2D narrow-band probe (hook 15c): game-polygon safe band of the upcoming narrow ---
     "narrow_band_lo", "narrow_band_hi", "on_region", "_hv",

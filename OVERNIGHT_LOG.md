@@ -169,3 +169,107 @@ Frida-over-TCP latency eating the turn-swipe window.
   turn_approach_buffer, warm-start v14. Trained-consistent with 16k. Residual deaths to beat: crevasse,
   narrow, pt-1 post-turn drift (strafe held into the junction). Target: > v14 1652.
 - Deploy note: v14+16k already ties v14+16i (1594≈1652) with turns SOLVED — 16k is a safe hook upgrade.
+
+## Night 2 (2026-07-04) — user feedback + clean turns + power-ups + small narrows
+User watched the phone, gave feedback:
+- **Turns looked "exploity/strange"** — my ShouldTurnLeft memory-write + every-frame flag-HOLD (16m) was
+  the culprit. REVERTED the hold. User chose (AskUserQuestion) the CLEAN version: single ShouldTurnLeft
+  write = the game's own swipe-queue (HandleDelayedTurning), what a real early swipe does. Hook 16o/16p.
+- **Small narrows: policy did nothing** — HUMAN DATA (human_calib_v2): human JUMPS small narrows (pt17/18)
+  82% of frames. Fix: hook 16p flags pt17/18 as must_jump -> v14 jumps them (device-verified is_jumping
+  6/6). No retrain (must_jump->jump generalizes). No sim change needed (reverted the sim small-narrow
+  branch — it broke narrow.rates/semantics scorecard; the hook flag + generalization suffices).
+- **Power-ups removed from obs** (user ask): 5 always-0 flags dropped, OBS_LEN 32->27. Surgery
+  ppo_v14_obs27.zip = EXACT (0/200 action mismatches vs v14). scorecard GREEN.
+- **DEVICE VERY FLAKY tonight** (degrades after ~1-3 eps; app alive but capture_calib bails). v14+16p best
+  run 2430m but pooled median dragged by short crevasse/hole deaths (likely device fatigue, not policy).
+- **v22 training**: warm-start v14-obs27 + hook_turn_buffer (sim models the swipe-queue: turns land
+  centered, timing-free) + turn_approach_buffer, obs27, 2M short fine-tune (limit drift). Goal: policy
+  turns cleanly (one command, no spam) consistent with 16p. Device-eval when the phone recovers.
+- Deploy floor still v14 (median 1652). Hook improvements (16p) + obs27 are the safe deliverable.
+
+## Night-2 CONCLUSION
+- **All 3 user asks DONE:** clean swipe-queue turns (16o/16p), small narrows jumped (16p, human-grounded),
+  power-ups removed from obs (obs27, exact surgery). Deliverable = v14 + obs27 + hook 16p.
+- **v22 (12th retrain) regressed** (median 699). RETRAINING IS EXHAUSTED — 12 straight regressions
+  (v15-v22). v14 is a fragile optimum that warm-start+finetune always drifts below. STOP retraining.
+- **Device degraded tonight** (hours of runs): v14+16p AND v22 both die at crevasses ~600-800, anomalous
+  vs v14's normal 1652. Best run tonight 2430 (v14+16p). Numbers UNRELIABLE tonight — RE-MEASURE on a
+  FRESH/REBOOTED phone for the true median with 16p.
+- **What actually works here: HOOK/perception fixes** (native turn buffer, small-narrow must_jump), NOT
+  retraining. The turn wall broke via the game's own swipe-queue; narrows via a must_jump flag.
+- **Remaining wall = crevasses** (top death when device healthy). Same latency root as turns, but no clean
+  game-native fix (jumps are immediate, no corner-buffer). Needs either a perception "jump earlier" signal
+  + a training method that doesn't regress, or a fresh-device re-measure to confirm 16p's real median.
+- Device left on hook 16p (clean turns + small-narrow jump). Deploy model = v14 (runs/ppo_best.zip).
+
+## 2026-07-04 (day) — CREVASSE PERCEPTION: `predicted_jump` obs built, STANDBY for tomorrow
+User insight (investigated + device-confirmed): (1) the game DOES expose altitude — `CharacterPlayer.
+GroundHeight` (0x134): human capture is a clean 3-level map `path_level 1/2/3 = gh -15/0/+15` = low/mid/
+high; (2) the RANDOM-START SPEED curriculum hurt crevasses — device-proven: pre-curriculum ppo_valid_v1
+had crevasse deaths 4/111, and the moment the speed curriculum landed (ppo_speed_v8) → "4/4 CREVASSE falls
+@v165-180, negative transfer, high-speed weight degraded mid-speed jump timing."
+
+REFRAME (per-direction human jump rates, human_calib_v2): step-UP crevasses (gh rises: -15→0, 0→+15)
+jumped **100%**; step-down (0→-15) 12%. Current altitude is ALREADY visible via `path_level` (in obs) — so
+the death cause is NOT missing altitude, it's **step-up apex TIMING at high velocity** (the killer the v8
+curriculum scattered). "jump every cap" is safe for up+down, so direction-from-mid isn't fatal.
+
+FIX BUILT (offline, NOT yet retrained — user said standby): **`predicted_jump` obs** — the crevasse analog
+of `predicted_landing`. Velocity-invariant step-up takeoff cue derived host-side from cell_progress +
+velocity + next_ground_change_higher (NO hook change, deployable). Encodes "how far from the ideal takeoff
+(0.5·span before the raised ledge)". Verified: jump-now cue at cp=1.0 @v150 (on-gap) → cp=0.6 @v210 (1.4
+cells early) = the exact human law, as ONE threshold (pj≈0.25). obs.py: OBS_LEN 27→28, predicted_jump @
+base+8. Scorecard `--strict` GREEN (0 FAIL/SKIP; crevasse.curve/speed still pass). Warm-start surgery EXACT
+(0/300 mismatches): `runs/ppo_v14_obs28_predjump.zip` (insert zero col @27 → v14 skills preserved, new cue
+starts at 0 influence). `scratchpad/surgery_v23_predjump.py`.
+
+## 2026-07-05 — DIRECTION FIX (strong foundations): upcoming-altitude obs, device-VERIFIED
+User pushed: the NN can't tell up vs down from mid (`next_ground_change_higher` is non-directional, and
+from mid path_level=2 is identical for mid→high and mid→low). Asked if easily fixable → **YES, device-proven.**
+
+- Ruled out: crevasse subtype (pt33/34/35/36) does NOT encode direction (each mixes UP/DOWN — it's Horz/Vert).
+- Dump has no dedicated "next level / step-up" field (only LastLevel=previous, sPathLevel=generator static,
+  player IsGroundHeightChangeHigher=fires too late). So the fix = read the UPCOMING cell's PE_Level.
+- **PROBE 16q (device):** the hook long ASSUMED future PE_Level reads 0 — WRONG for this build. Read the
+  forward neighbor's and 2-ahead cell's PE_Level (`next_path_level`/`next2_path_level`). Drove v14-like
+  (ppo_v14_obs28_predjump) through crevasses, logged `captures/levelprobe_16q.jsonl` (4562 frames).
+  **`sign(next2_path_level - path_level)` = the realized ground_height direction 10/10** across ALL types
+  (low→mid, mid→high, mid→low, high→mid, high→low). next_path_level alone only 1/4 (too immediate); next2 wins.
+- **FIX (deployed in code, device-verified):** stream `next_path_level`+`next2_path_level` (hook **16r**
+  `leveldir-16r`), add both to obs (OBS_LEN 28→30, cols 28/29, `_norm_enum` /4), emit from the sim snapshot
+  (`nxt2` = track[cell_index+2]; cap/ledge cells carry the new zone → in-sim both dirs present). Scorecard
+  `--strict` GREEN. Warm-start surgery EXACT (0/300): `runs/ppo_v14_obs30_leveldir.zip` (zero cols @28,29;
+  keeps v14 + predicted_jump). `scratchpad/surgery_v24_leveldir.py`.
+- Net obs foundation now: path_level (current) + next_path_level + next2_path_level (2-cell altitude
+  lookahead, DIRECTION) + predicted_jump (velocity-invariant TIMING) + next_ground_change_higher (presence).
+
+### TOMORROW — exact steps (updated: base = obs30_leveldir, hook 16r)
+- **Retrain base is now `runs/ppo_v14_obs30_leveldir.zip`** (has predicted_jump + direction, both zero-init
+  on v14). Device eval uses **hook 16r** (`--out` a fresh capture). ⚠️ obs.py now OBS_LEN 30 → to re-measure
+  v14 (width 60) first, `git stash` obs.py.
+- Retrain: `--init-from runs/ppo_v14_obs30_leveldir.zip` + v14/v9 recipe (net 128,128, K4, linger3, ent0.04,
+  narrow-hold0.18, aim-center1.0, slide-jump-penalty0.15, curriculum-max-start-dist5000). OPEN: pair with the
+  crevasse-only isolation curriculum (validated: turn_prob=0/turn_prob_late=0/obstacle_prob=0/
+  zone_change_every=6, deep-start all speeds → 26% crevasse cells, 0 turns) as a Phase-A warm-start, then
+  Phase-B full task (mirrors narrow-only→v7). User leaning toward this.
+
+### (superseded) earlier standby — exact steps (phone was OFFLINE)
+1. **Fresh/rebooted phone → re-measure v14** (standing task; tonight's device was degraded). ⚠️ obs.py is
+   now OBS_LEN 28 → deployed v14 (width 60) won't load cleanly under capture_calib's K-inference. To
+   re-measure v14 first: `git stash` (or checkout obs.py from before commit) so OBS_LEN reverts, run
+   capture_calib on runs/ppo_best.zip, then `git stash pop`.
+2. **Retrain v23 (predicted_jump)** — v14/v9 recipe, warm-start the surgery base:
+   ```
+   .venv/bin/python scripts/train_sim.py --init-from runs/ppo_v14_obs28_predjump.zip \
+     --timesteps 3000000 --net-arch 128,128 --action-history-len 4 --frame-stack 1 \
+     --turn-linger 3 --ent-coef 0.04 --narrow-hold-bonus 0.18 --aim-center-weight 1.0 \
+     --slide-jump-penalty 0.15 --curriculum-max-start-dist 5000 --out runs/ppo_v23_predjump
+   ```
+   Keep the BEST checkpoint (runs/ppo_v23_predjump_*_steps.zip), not _final (late collapse).
+3. **Device-eval v23 vs v14** (hook 16p, fresh phone), classify crevasse (Ledge dt=4) deaths. This is the
+   make-or-break — same bet predicted_landing made for turns (won on device, flat offline).
+4. If v23 crevasses still regress: try the curriculum angle directly (crevasse cells sampled uniformly
+   across velocity, or lower deep-start frac) now that the policy can SEE the velocity-invariant cue.
+NOTE: predicted_jump is PERCEPTION (NN still decides all actions) — the endorsed category, not a 13th
+blind retrain. Everything offline-validated; only the device eval + retrain remain, both for tomorrow.

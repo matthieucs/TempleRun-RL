@@ -39,7 +39,13 @@ _TURN_AIM = 0.28                     # swipe at first frame in the survival wind
 
 def _base(st):
     if st.get("next_wide_gap"):
-        thresh = 0.5 if st.get("next_ground_change_higher") else 0.5   # crevasse EARLY (apex) / long-hole later
+        if st.get("next_ground_change_higher"):
+            # ZONE crevasse APEX-AIM [DEVICE-FIT 2026-07-05]: meet the ledge (2 cells ahead) at the arc
+            # apex -> cp* = 2 - 0.5*span, half-frame pre-fire (mirrors train_sim._oracle / predicted_jump).
+            v = float(st.get("velocity") or 150.0)
+            thresh = min(0.95, 2.0 - 0.5 * (0.8 * v / 60.0)) - 0.5 * v * 0.1 / 60.0
+        else:
+            thresh = 0.5   # 2-cell long hole: jump >=0.5 so the airtime spans both cells
         return C.Action.JUMP if float(st.get("cell_progress", 1)) >= thresh else C.Action.NOOP
     if st["must_jump"] or st.get("next_must_jump"):
         return C.Action.JUMP

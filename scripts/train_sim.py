@@ -108,11 +108,19 @@ def _oracle(st: dict) -> int:
     # measured sweep optimum at crevasse speed (lower wastes airtime early; >0.65 skips the window at
     # the ~0.38-cprog/step top-speed stepping). See sim_env wide_gap_extra_cells / sim-calibration memory.
     if st.get("next_wide_gap"):
-        # ZONE crevasse (next_ground_change_higher): jump EARLY — the velocity-dependent APEX model needs
-        # the jump to reach the raised ledge near apex; at speed you must launch earlier (human v210:
-        # ~2 cells early). Jump the instant the crevasse is in view. A 2-cell LONG HOLE -> a bit later
-        # (>=0.5) so the airtime spans both cells. Different mechanics -> the obs distinguishes.
-        thresh = 0.5 if st.get("next_ground_change_higher") else 0.5
+        # ZONE crevasse (next_ground_change_higher): APEX-AIM [DEVICE-FIT 2026-07-05, v26 post-mortem +
+        # levelprobe survivors]: takeoff so the raised ledge (2 cells ahead) is met AT the arc apex ->
+        # cp* = 2 - 0.5*span, span = jump_dur*v/cell (matches obs.predicted_jump). Early takeoffs
+        # (cp<=0.57 @v175) are device-FATAL (dt4 Ledge) — "jump the instant in view" was refuted.
+        # A 2-cell LONG HOLE -> >=0.5 so the airtime spans both cells.
+        if st.get("next_ground_change_higher"):
+            v = float(st.get("velocity") or 150.0)
+            # half-frame PRE-FIRE: at 10Hz cp advances v*0.1/60 per step — aiming at the raw threshold can
+            # skip past it onto the gap cell (grounded entry = death). Fire half a frame early so the
+            # takeoff lands centered on the threshold (the same trick predicted_jump encodes for the NN).
+            thresh = min(0.95, 2.0 - 0.5 * (0.8 * v / 60.0)) - 0.5 * v * 0.1 / 60.0
+        else:
+            thresh = 0.5
         return int(C.Action.JUMP) if float(st.get("cell_progress", 1.0)) >= thresh else int(C.Action.NOOP)
     # Anticipate: jump/slide on the LOOKAHEAD (obstacle is the NEXT cell) so the action is active
     # when entering the obstacle cell (the sim resolves obstacles on entry).
@@ -354,6 +362,9 @@ def main() -> None:
                    help="control tick seconds. 0.05 = 20 Hz (halves the on-device turn lag). MUST match "
                         "the hook POLL_MS and eval --step-dt. Pair with turn_linger ~4 at 20 Hz.")
     p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--learning-rate", type=float, default=3e-4,
+                   help="PPO LR. LOWER (e.g. 5e-5) for a GENTLE warm-start refinement that adopts new obs "
+                        "without knocking v14 off its fragile peak (the warm-start-collapse fix).")
     p.add_argument("--action-delay", type=int, default=0,
                    help="steps to buffer the action before applying. EXPERIMENTAL/off: delay=1 "
                         "over-models the phone lag and breaks the missed-turn death (a buffered turn "
@@ -387,7 +398,7 @@ def main() -> None:
     model = PPO(
         "MlpPolicy", venv,
         n_steps=512, batch_size=64, n_epochs=10, gamma=0.99, gae_lambda=0.95,
-        ent_coef=args.ent_coef, learning_rate=3e-4, clip_range=0.2,
+        ent_coef=args.ent_coef, learning_rate=args.learning_rate, clip_range=0.2,
         policy_kwargs=dict(net_arch=net_arch),
         tensorboard_log="runs/tb_sim", verbose=0,
     )

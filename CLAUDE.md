@@ -4,6 +4,15 @@ Goal: an RL policy that reaches **10,000 m** on real **Temple Run** (`com.imangi
 trained in a headless sim, deployed on a physical Android phone via **Frida** (read game state + inject
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
+## 🎯 GOAL REACHED — 2026-07-06: device run **10,545 m** (v36, hook 16w; `captures/best_run_10545m_v36_hook16u.jsonl`)
+Died Burnt on a flame tower at the end after 180 turns / 34 crevasses / 56 narrows / 54 holes / 92 jumps,
+117 s at the v210 cap. **NEXT PHASE = RELIABILITY: a 10 k MEDIAN, not just best** (same session runs were
+2320/1872/2368/**10545**/589 — high variance). Edge cases still to model in the SIM: (1) FLAME-TOWER
+slide-under at speed (the 10545 death), (2) multi-hole jump RHYTHM (4-cell must-jump chains — jump-spam
+fails, needs staggered land-then-rejump), (3) narrows-at-speed strict [3,7] band (the 256-net v39 breaks
+the narrow↔crevasse interference but drifts — needs a stable from-scratch train, see `scratchpad/
+train_gpu_256.sh`), (4) stumble→rejump recovery.
+
 ## Setup
 - **Engine** Unity 2022.3 IL2CPP, arm64 only → needs a REAL arm64 phone (no emulator: Frida can't hook
   the ARM lib under x86 translation). Device **3f80a3a** (Redmi, Android 15, NOT rooted).
@@ -14,7 +23,10 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 
 ## Run it
 `python scripts/setup_device.py` forwards 27042 + state **9999** + action **9998**, then injects.
-Inject one-liner (run EXACTLY ONE; it exits → in-phone agent unloads):
+Inject one-liner (run EXACTLY ONE; the host process must STAY alive — if it exits the in-phone agent
+unloads. ⚠️ Before re-injecting: `pkill` is forbidden — `kill <PID>` the OLD injector first (`ps -eo
+pid,cmd | grep gadget_inject`); stale injectors RE-INJECT after a force-stop+restart → multiple agents,
+port contention, corrupted evals [2026-07-06: 3 stale injectors stalled a capture at ep1]):
 `setsid nohup .venv/bin/python frida/gadget_inject.py frida/temple_run_hook.js 127.0.0.1:27042 &`
 Recover a flaky/crash-looped phone: `adb -s 3f80a3a shell am force-stop com.imangi.templerun` →
 `am start -n com.imangi.templerun/com.imangi.unityactivity.ImangiUnityActivity` → wait 12 s → re-forward
@@ -22,19 +34,43 @@ Recover a flaky/crash-looped phone: `adb -s 3f80a3a shell am force-stop com.iman
 android:write_settings allow` + `settings put system screen_off_timeout 2147483647`.
 
 ## Protocol
-- **State (9999)**: newline JSON @ **10 Hz** (`POLL_MS=100`; game Updates @60Hz, so faster IS possible).
+- **State (9999)**: newline JSON @ **30 Hz** (`POLL_MS=33`, hook 16t+ — OBS freshness only; the host env
+  drains to the NEWEST line and CONTROLS at 10 Hz. The old "20 Hz was WORSE" verdict was a 20 Hz-CONTROL
+  retrain, unrelated). Game Updates @60Hz.
 - **Actions (9998)**: 1 byte over ONE persistent socket. `0`=StrafeLeft `1`=StrafeRight `2`=Jump
   `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp; reset-only `8`=RunAgainClicked `9`=OnPlayClicked
   (`reset()` sends 8 then 9). **Lateral = analog tilt** (hook replaces `GetAccelerometerForceX`):
-  byte0/1 = hold ±, byte6 = level→game recenters. **Turn = swipe** (bytes 4/5), separate mechanic.
+  byte0/1 = hold ±, byte6 = level→game recenters.
+- **Turn = the game's own swipe-queue (2026-07-04, hook 16o+):** the turn byte writes `GI_ShouldTurnLeft/
+  Right`+`TimeSinceShouldTurn=0` on GameInput (HandleDelayedTurning) → the GAME fires the turn AT THE
+  CORNER with native timing, exactly like a real early swipe. This SIDESTEPS the ~2-frame control latency
+  that made plain immediate `fn.TurnLeft` overshoot (see STATUS). NN still decides WHEN to turn; the hook
+  only queues it (like the analog-tilt translation). `TURN_NATIVE_BUFFER=true`; anti-double-turn debounce +
+  valid-dir guard. (The every-frame flag-HOLD variant looked "exploity" — removed; single write only.)
+- **Small narrows (pt17/18) → `must_jump`** (hook 16p): human data = jumps them 82%. The policy's existing
+  must_jump→jump generalizes → v14 jumps them, no retrain. Set on both `cachedMustJump` and streamed `s.must_jump`.
 - **Hook** `frida/temple_run_hook.js`, version in `HOOK_VERSION` (`_hv` on the stream). Current
-  **16i**. Streams the raw state + derived obs fields; executes the policy's action bytes (NO action
-  rules — the NN decides; hook only senses + dispatches).
+  **16u** (`seedprobe-16u`) = 16r (next/next2_path_level, device-verified 10/10 direction) + **16s**
+  (one-shot `s.turn_write` verdict: written/debounce/invalid — junction misses self-explain) + **16t**
+  (30 Hz broadcast) + 16u seed probe (OFF). Streams raw state + derived obs; executes action bytes. NO
+  action-DECISION rules (NN decides); swipe-queue + must_jump-flag = perception/execution translations.
+- **TRACK SEEDS (probe 16u, CONCLUDED 2026-07-06): device runs are NOT seedable.** Generation
+  (`PathElement.AddRandomPath → GetRandomPathElementForSide`) draws from Unity's GLOBAL RNG;
+  `Random.InitState(seed)` (RVA 0x24B3E6C) re-seeded at the first path draw of a run gives only a
+  ~6-cell identical prefix — mid-run generation interleaves with other consumers (coins/effects) and
+  desyncs. Full determinism would need a private RNG stream (not worth it). **Reproducibility tools:
+  SIM `reset(seed=N)` (exact); device runs are fully RECORDED in `captures/*.jsonl` (the 6399 m record
+  = `captures/v14_16t.jsonl` ep5) — replayable through replay_diff/analysis, not live.** `SEED_RUNS=-1`
+  keeps the capability OFF. Side find: `PathElement` statics `sAllowTurns/sAllowPathHoles/
+  sAllowPathNarrows/…` (0x4-0xC) = writable feature toggles (future isolation diagnostics).
 
 ## Key offsets (this build; from dump.cs)
 - **CharacterPlayer**: IsDead 0xD8, IsJumping 0xF8, IsSliding 0x100, Score 0x138, Velocity(Vec3) 0x34,
   Facing 0x78, JumpVelocity 0x80, GroundHeight 0x88 (=raised ledge height), IsGroundHeightChangeHigher.
 - **PathElement**: Type 0x30, Level 0x34, Obstacles 0x38, neighbors 0x50/58/60/68, Rectangle 0xA0.
+- **GameController.GameInput @0x78** (HandleDelayedTurning buffer — the turn swipe-queue): GI_JustTurned
+  0x20, GI_ShouldTurnLeft **0x21**, GI_ShouldTurnRight **0x22**, GI_TimeSinceShouldTurn 0x24,
+  GI_TimeSinceLastTurn 0x28, GI_ShouldJump 0x2C, GI_TimeSinceShouldJump 0x30. (Hook writes ShouldTurnL/R.)
 - **Enums**: ObstacleType {Hole1, Narrow2, TreeStumble3, TreeJump4, TreeSlide5, FlameTower6,
   LevelChange7}. PathType: 1-2 straight, 3-10 turns, 11-16 holes (12/13/15/16=HoleLong=2-cell),
   17-30 narrows, 31-32 flame, **33-36 = SingleLevelStepDownCap (zone crevasse, both up/down)**, 37 temple.
@@ -43,10 +79,31 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   `docs/CLAUDE_FULL_HISTORY.md` §5 / `docs/OFFSETS.md`.
 
 ## Sim + training
-- `src/templerun_rl/sim_env.py` = fast headless model (`TempleRunSim-v0`); obs `obs.py` (**OBS_LEN 32**,
+- `src/templerun_rl/sim_env.py` = fast headless model (`TempleRunSim-v0`); obs `obs.py` (**OBS_LEN 30**,
   bools + scalars + cell_progress/lane/narrow_target_lane/**predicted_landing**/next_ground_change_higher
-  + K=4 action history → 60-wide); reward `reward.py`; PPO `scripts/train_sim.py` (net 128,128, linger 3,
-  ent 0.04). Deploy = same obs on the phone via the hook.
+  + **predicted_jump** (velocity-invariant step-up takeoff cue, host-derived) + **next_path_level/
+  next2_path_level** (upcoming-altitude direction, hook 16r) + K=4 action history → 58-wide; power-ups
+  REMOVED 2026-07-04); reward `reward.py`; PPO `scripts/train_sim.py` (net 128,128, linger 3).
+  Deploy = same obs on the phone via the hook.
+- Sim turn-buffer config: `hook_turn_buffer=true` models the device swipe-queue (turn near a junction lands
+  CENTERED, timing-free, `from_buffer` offset 0) + **late gate `turn_buffer_late_cp=0.56`** (swipe past it =
+  silent MISS; device-measured CanTurn window end, velocity-INDEPENDENT — v14 turned 46/46 up to v207).
+  Warm-start base **`runs/ppo_v14_obs30_leveldir.zip`** (EXACT surgical equivalent of v14, new obs cols
+  zero-init; `scratchpad/surgery_v24_leveldir.py`).
+- **JUNCTION LEVEL DROPOUT (2026-07-05 night, device-measured):** the hook's PE neighbor walk BREAKS through
+  turns → on-junction frames stream `next_path_level=next2_path_level=-1` (178/202), approach frames
+  `(lvl,-1)`. Sim `_snapshot` reproduces it (commit f8d7eff). Obs30 finetunes trained pre-fix saw a
+  junction-frame input spike on device they never met in training. v14 immune (zero-init cols).
+- **Capture-log alignment (capture_calib):** logged `action(i)` = policy's response to `state(i-1)` (predict
+  runs BEFORE env.step; the record holds the POST-step state). And a FIRED turn resets cell_progress → the
+  swipe record's cp is POST-turn — don't read "swipe cp" stats off fired turns (artifact; burned us twice).
+- **Jump exec latency (sim, 2026-07-05):** `jump_exec_lat_frames`/`jump_exec_lat_jitter` buffer the JUMP
+  firing. DEVICE-MEASURED (`scripts/probe_jump_exec.py`, 25/25): **exactly 1 frame @10Hz, zero jitter**
+  (uniform with the turn-side 1-frame exec). Constant latency is ABSORBED by policies (window shifts);
+  only JITTER creates training pressure (v14 hiMed 2246→130 under 2±1; a predicted_jump pre-aim oracle
+  survives). Train at **1±1** (measured mean + TCP obs-staleness variance); harness/replay at 0.
+- **Warm-start recipe that does NOT collapse: `--learning-rate 5e-5`** (new knob; default 3e-4 ALWAYS
+  collapses a v14 warm-start regardless of ent). Keep the BEST checkpoint — drift resumes past ~500k-1M.
 - **THE FEEDBACK LOOPS (use before any retrain/deploy):**
   - `scripts/fidelity_scorecard.py --strict` — ~13 phone-free checks vs `captures/device_reference.json`.
     GREEN required before retrain. (Blind for un-checked mechanics — green ≠ complete.)
@@ -58,11 +115,16 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 ## STATUS — what worked / what failed / where we are
 
 **WORKED (device-verified):**
-- **Turns FIXED** — the structural wall that beat 40+ policies. Fix = `predicted_landing` obs
-  (`cell_progress + Δ·velocity` = "where a swipe-now lands"; the turn executes ~1 frame late, so the
-  policy must aim the LANDING at cprog 0.44, not the swipe). v10 device: turn landings |lane| ~4 (was
-  10-17 fatal), turn deaths ~0. Pure perception input, no hook rule.
-- **Narrows** — side-strip lanes; cracked via a NARROW-ONLY isolation curriculum → warm-start full task.
+- **Turns FIXED — via the game's own swipe-queue (2026-07-04, the real fix).** ROOT CAUSE of the turn wall
+  = **~2-frame control latency** over Frida-TCP (obs is ~1 frame stale: policy acts at device-cp ~0.50 vs
+  sim-cp 0.30; + the turn executes ~1 frame late → device-cp ~0.73), which EATS the tight survivable swipe
+  window. `predicted_landing` obs (v10) helped but did NOT close it; retrains kept overshooting (lane
+  15-22). THE FIX: route the turn byte through the game's native HandleDelayedTurning (`GI_ShouldTurnLeft`
+  write) → the GAME times the turn at the corner, immune to the lag. v14+hook-16k device: **turn-overshoots
+  0/8** (was the dominant death). See Protocol.
+- **Small narrows JUMPED (hook 16p)** — human jumps them 82%; hook flags pt17/18 `must_jump` → v14 jumps
+  (device-verified), no retrain.
+- **Narrows (long side-strips)** — cracked via a NARROW-ONLY isolation curriculum → warm-start full task.
 - **Jump-into-slide death**, **turn-direction** (native CanTurn opposite-origin, hook 16f), **lateral =
   analog tilt** (alpha 0.446/0.1s), **stumble** 2-strike — all modeled + scorecard-guarded.
 
@@ -74,16 +136,72 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   deaths 2/8** (down from 5/8). `next_ground_change_higher` obs (pt 33-36, hook 16i) **verified firing on
   device** (7/7 crevasse-approach frames) — prior "0 fires" was a capture-logging artifact, not a bug.
 
-**OPEN / RESIDUAL:**
-- Velocity capped 210 (human's 14,956 m run confirms; speed plateaus ~4000 m). The **deep v210 crevasse**
-  is the residual death (v14 ep7 died Ledge @2908 m) — takeoff is velocity-dependent and the apex
-  threshold isn't yet calibrated to the exact ledge at top speed. **v210 takeoff not cleanly measured**
-  (chicken-and-egg: must survive to ~4000 m to reach v210 on device). Next levers: read
-  `GroundHeight`/`JumpVelocity` live to nail the apex, or a crevasse-only isolation curriculum swept
-  across velocities (the trick that cracked narrows).
-- In-sim dominant death is now TURNS again (~22/110 offline) — the next frontier after crevasses.
+**FAILED / LESSONS (2026-07-03/05):**
+- **12 retrain regressions (v15→v22) at LR 3e-4.** Every warm-start+finetune from v14 drifted BELOW it on
+  device (high-speed curriculum, off_center_penalty [device-TOXIC], turn_lane_carry "fidelity" [it's a
+  load-bearing REGULARIZER, keep 3.0], tail-risk, action_delay, low-ent, buffer models). Offline metrics do
+  NOT predict device turns. **AMENDED 2026-07-05: the collapse mechanism was the LR** — 3e-4 knocks the
+  policy off v14's sharp optimum; **5e-5 fine-tunes stably** (v25c/v26 verified: no collapse, skills adopt).
+- **v25 (2-phase: crevasse-only isolation → full) DEVICE-REGRESSED (median ~650): 6/8 deaths = MISSED
+  TURNS.** Crevasse-ONLY training ATROPHIES device turns even after a full-task Phase B restores them
+  in-sim. **Isolation curricula: OK for narrows, WRONG for turns — keep turns practiced in every phase.**
+  Also 2/8 crevasse jumped too EARLY = the guessed lat 2±1 over-modeled (real = 1). Both fixed in v26.
+- Ruled out (device-measured): over-strafe lateral gap (device caps lane ±7, same as sim); 20Hz sampling
+  (WORSE); crevasse apex miscalibration (sim clears the human's v210 0.58 takeoff).
 
-**WHERE WE ARE:**
-- **NEW BEST = v14** (`runs/ppo_v14_best.zip`, device **median 1652, best 2908**) — beats the old deploy
-  floor v1 (1173) and v10 (615). Deploy candidate; not yet promoted to `runs/ppo_best.zip`.
-- 2-cell crevasse model TRANSFERRED to device. NN decides all actions — no hook action rules.
+**2026-07-05 NIGHT (autonomous session) — the retrain curse + turn mechanics fully decoded:**
+- **v14 FRESH-PHONE: median 2010, best 5462, 0 missed turns in 212 junctions** (`captures/
+  v14_freshphone.jsonl`). The old 1652 was the DEGRADED phone. ⚠️ ALL cross-model comparisons must be
+  same-session fresh-phone (v26/v27's "missed turns" were measured on the tired phone).
+- **Turn mechanics (205+ junctions, frame-level):** every policy decides the swipe on the junction's FIRST
+  frame; byte goes out 1 control-tick later. Early-phase onsets (cp<0.2) ALWAYS survive; late-phase onsets
+  (cp≥0.3) = a latency-jitter COIN FLIP (write lands 0.5-1.5 frames after the onset sample vs the CanTurn
+  window end ~0.56). Fresh phone = low jitter = coin lands good (v14 50/50 late onsets); degraded = misses
+  (v26/v27: 5/9+ late-onset deaths). Wrong models tried + discarded: v29 constant-0.50 gate (never binds
+  in-sim), v30 velocity-arrival lag-2 (refuted: v14 turns fine @v207). Hook drop paths (turn byte):
+  debounce 0.3s / invalid-dir(CanTurn false) / not-near-junction — pre-onset turn bytes: 0 in all captures.
+- **JUNCTION LEVEL DROPOUT found + fixed** (see Sim section) = why obs30 retrains looked worse on device.
+  v31 (v27 recipe + dropout + 0.56 gate) trained; in-sim clean turns WITH dropout. NOTE: in-training
+  EvalCallback env ≠ training env (no buffer flags) → its curve says "collapse" when device-true eval says
+  healthy. Judge checkpoints with `scratchpad/eval_swipe_deaths.py` (device-true cfg, deaths by mechanic).
+- **NEXT WALL @v200+ (both v14 long runs died on it): chained-jump blindness** — a jump spans ~2.75 cells,
+  obs lookahead = 1 cell → lands blind into TreeJump (3738m, 5462m deaths). Lever: next2-obstacle obs
+  (hook 2-ahead walk device-verified readable on straights; breaks only through turns = dropout above).
+- **USER (live, 2026-07-06): low-speed dumb deaths (missed transition/turn) are the MEDIAN killer** —
+  high speed works; prioritize low-speed reliability.
+
+**2026-07-06 EARLY — fresh-phone round 2 + JUMP-BYTE RULES (the low-speed dumb deaths):**
+- **v31 fresh: median 1331 best 2442 — turn hesitation CURED (1 junction death/91; dropout fix VERIFIED
+  on device).** v27 fresh: 1266/3864, still 5/8 missed turns (predates the dropout fix — kills the
+  "phone-state explains v27 turns" theory). v14 floor 2010/5462 stands.
+- **The game EATS Jump() bytes — 3 device-measured rules (131 grounded attempts):** (1) 56% refused while
+  the lane glides >0.8/frame vs 4% settled → sim `jump_refuse_strafing_prob 0.6` DEFAULT (gate
+  |target−lane|>1.8, settled narrow-riders unaffected); (2) refused on wide-gap/crevasse cells past the
+  lip cp~0.2 → `gap_jump_lip_cp 0.2` DEFAULT (takeoff = APPROACH cell; ALL grounded-at-gap crevasse
+  deaths were act-2 spam refused there); (3) "landing lock" = airborne rule + 10Hz phase, already covered
+  by jump_exec_lat 1±1. Refusals PERMANENT in context — the lesson is avoid-the-state, not retry-spam.
+  These explain v31's 3/8 crevasse deaths (its learned strafe-LEFT-before-crevasse habit — crevasse-zone
+  lane −2.56 vs v14 −0.46 — was free in the old sim, lethal on device) and the user-flagged low-speed
+  dumb deaths. Crevasse LATERAL sensitivity refuted (n=108: 13% vs 12% death rate).
+
+**WHERE WE ARE (2026-07-06 dawn) — FLOOR SMASHED via obs freshness (hook 16t):**
+- **16s diag (turn-write verdicts) closed the junction case:** misses = DEAD-LETTER writes (flag written,
+  game's consume deadline live-cp ~0.67, pipeline med 0.21cp/tail 0.40) — policy decisions were perfect
+  all along. **16t = 30 Hz state broadcast (control stays 10 Hz, env drains to newest)** → sampling age
+  50→17ms → dead letters gone for EVERY model, no retrain.
+- **Fresh-phone @16t: v34@2M median 2863 best 4525, junctions 1/254 | v14 median 2833 best 6399
+  (ALL-TIME), junctions 3/255, crevasses 44/46.** Obs freshness = the dominant lift (+40% median both);
+  v34's trained rules = cleaner junctions.
+- **DEPLOY (2026-07-06 latest) = v36@2M + hook 16u/16t** (`runs/ppo_best.zip`, obs30, 30Hz): device
+  **median 2642, BEST 7040 m — NEW ALL-TIME RECORD** (beats v14's 6399), junctions 1/303, crevasses
+  45/46. v36 = v34 self-warm-start + the USER-OBSERVED STACKED-obstacle blindspot (`compound_prob 0.12`:
+  narrow-A → jump-barrier → narrow-B-opposite, needs a mid-air/pre-swing). Offline: compound v210 7/50
+  vs v34 28/50, standard cfg 4/40 = v34 (ZERO regression). First strict improvement of the session —
+  new skill, no cost. Record run archived `captures/best_run_7040m_v36_hook16u.jsonl`. v34@2863 = prior.
+- **Remaining walls to 10k (v36 death mix): LOW-SPEED holes 600-1000m (multi-hole jump RHYTHM — v34/v36
+  survive 4-cell chains @v205 with staggered jumps but the low-speed rhythm is fragile), NARROWS-AT-SPEED
+  (the policy RELEASES the strafe-hold on the LAST strip cell when narrow_target_lane→None → drifts off
+  the inner edge @v205; next lever = current-narrow-lane obs / hold-through-last-cell), trees.** Settled:
+  single 2-cell FLAT holes are FORGIVING on device (probe 10/10, no sim change). Sim recalib note: gate
+  0.56 ≈ deadline 0.67 − 30Hz pipeline 0.10; jump_exec_lat 1±1 slightly over-modeled (fresher obs).
+- NN decides all actions. Branch `sim-calibration` (safe to merge; `runs/*.zip`+MODELS.md gitignored).

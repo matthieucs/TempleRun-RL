@@ -97,6 +97,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "stumble_kill_window": 2.0,       # [MEASURED] a 2nd stumble within this many seconds of the last -> death
     # --- B. Track generation (PathElement statics) — values READ off the device (Frida, baseline
     # Temple/level-2 section; the game ramps these by distance via section/level changes). -------
+    "compound_prob": 0.0,               # [2026-07-06 USER-OBSERVED blindspot] P(a narrow placement becomes
+                                        # a STACKED compound: narrow(side A) -> jump-barrier -> narrow(side
+                                        # B, OPPOSITE). Survivable only by a MID-AIR STRAFE (jump the
+                                        # barrier while sliding A->B). The sim never stacked obstacles
+                                        # (min_space 6) so the policy never learned it. 0 default (scorecard
+                                        # / existing behaviour unchanged); train ~0.15. Device: real + "not
+                                        # uncommon" (user). Bypasses min_space for the sequence's own cells.
+    "compound_after_distance": 300.0,   # only compound past this (early run stays simple)
+    "compound_land_cells": 2,           # clear cells after the barrier before narrow B (best oracle
+                                        # survival 16-17/40 vs 12 @1 / 11 @3 — 2 gives room for the
+                                        # A->B mid-air/pre-swing to land on strip B)
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
@@ -128,6 +139,10 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "turn_exec_late": 0.60,            # ...until this cprog (past it = ran too far, swipe misses)
     "turn_center_cprog": 0.44,         # swipe here -> land centered (measured offset minimum)
     "turn_offset_scale": 45.0,         # landed |lane| = |swipe_cprog - center| * this (measured slope)
+    "turn_lane_carry_buffered": 1.0,   # [2026-07-06 DEVICE-MEASURED] carry for BUFFERED (swipe-queue)
+                                       # turns: native corner landing is forgiving (v14: lane<=4.6 swipes,
+                                       # 0 landing deaths in 212). Keeps a mild centering preference
+                                       # without teaching the fatal recenter-then-swipe hesitation.
     "turn_lane_carry": 3.0,            # [MEASURED 2026-07-02] pre-turn lane AMPLIFICATION through a turn
                                        # (device: strafe-into-turn lane 5 -> lands ~18). Punishes leaning
                                        # into turns -> the policy must center (NoOp) before swiping.
@@ -166,6 +181,16 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "hook_turn_buffer": False,         # models hook 16j TURN_BUFFER=true: junction-cell turn fires
                                        # CENTERED (timing-free) — removes the 10Hz turn latency. v20 on.
     "turn_buffer_ttl": 3,              # cells a latched approach-swipe persists before timing out
+    "turn_buffer_late_cp": 0.56,       # [2026-07-05 v3, DEVICE-MEASURED on 205 first-swipes across
+                                       # v26/v27/v14_freshphone captures] junction FIRST swipe fires iff
+                                       # observed cp <= ~0.56 at ALL velocities (fired max 0.55-0.56 in
+                                       # every band incl v207; missed min 0.59 @v180+). This is the game's
+                                       # CanTurn window end (hook guard drops the GI_ShouldTurn write when
+                                       # native CanTurn is false), NOT a corner-arrival race: the earlier
+                                       # velocity-dependent lag-2 arrival model predicted v210 junction
+                                       # swipes ~impossible, but v14 turned 46/46 up to v207 on device
+                                       # (5462m fresh-phone run). Second-frame swipes (~0.6 at v>150)
+                                       # MISS -> v27's device hesitation deaths; first-frame swipes safe.
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
     # longer reads these; turning at any cprog in the window (or buffered early) is clean.
@@ -185,6 +210,11 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # [DEVICE-MEASURED 2026-06-26] crevasse frame-rate ~3.5% vs the old sim's 1.85% (2x too sparse);
     # first crevasse at dist 587. Halve the spacing to match the real density (audit-tuned).
     "zone_change_every_cells": 32,     # [MEASURED] cells between zone transitions (~2x denser to match real 3.5%)
+    # [DEVICE-MEASURED] first crevasse at ~587 m (v≈145). Gating the sim to the same onset matters MORE now
+    # that the apex check is device-tight (mh 0.95): below v≈140 the short arc physically cannot reach
+    # near-apex at the ledge from the approach cell, so early low-speed sim crevasses would be unsurvivable
+    # phantoms the device never poses (they were masked when mh was a lenient 0.45).
+    "zone_after_distance": 550.0,      # zone crevasses only past this distance (device onset)
     # WIDE GAPS (2-cell): on device, long holes (path_type 12/13/15/16) and zone LevelChange caps
     # (33-36) span TWO cells — a single jump must be timed at the gap EDGE to span both; jumping a cell
     # early (the single-obstacle reflex) lands in the far half -> Fall. Modeled as 2 consecutive
@@ -245,7 +275,12 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # An early takeoff (the 1-cell-lookahead reflex, or a jump 2 cells before the gap) => Fall; taking
     # off near the gap edge (as the oracle does, cprog>=0.62) clears. Level-DOWN + same-level long holes
     # are UNAFFECTED (only cells flagged stepup are checked). Keep below the oracle's 0.62 jump so it's fair.
-    "stepup_min_height": 0.45,         # [VELOCITY-DEP APEX model 2026-07-03, human_calib_v2 v210 probe] a
+    # [DEVICE-FIT 2026-07-05, v26 post-mortem] 0.45 was FAR too lenient on the EARLY side: device takeoffs
+    # at v165-190 SURVIVE only at approach-cp 0.61-0.98 (14 clears, levelprobe_16q) and DIE at cp<=0.57
+    # (5 v26 Ledge deaths) -> the device demands ~apex (within ~10% of peak) at the ledge. mh=0.95 is the
+    # unique fit (covers all survivors, excludes all deaths; @v210 window = 1.8 frames -> the late-game
+    # wall). The old 0.45 let the sim reward cp~0.4 takeoffs that the device kills -> v26 learned them.
+    "stepup_min_height": 0.95,         # [VELOCITY-DEP APEX model 2026-07-03, human_calib_v2 v210 probe] a
                                        # step-UP crevasse survives only if the jump HEIGHT (parabola, 1 at
                                        # apex) at the raised ledge >= this — auto velocity-dependent (span
                                        # = jump_dur*vel/cell_len). 0.45 -> survive ~[0.13,0.87] of the span.
@@ -300,6 +335,41 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # is_sliding median 7 = 0.70s. The old 0.6 made the runner airborne ~2x too little vs real (14% vs
     # 22-32%) AND made the 2-cell crevasse too harsh — a real 0.8s jump spans ~2.8 cells at top speed.
     "jump_duration": 0.8,             # [MEASURED] airtime — IsJumping true ~0.80s
+    # JUMP EXECUTION LATENCY (2026-07-05): the device fires a jump ~1-2 frames after the command (TCP +
+    # obs-staleness + frame lag), the SAME control latency that kills turns — but the sim fired jumps
+    # INSTANTLY, giving a too-forgiving ~6-frame survival window at ALL speeds (measured). So v14 learned a
+    # lazy "jump anywhere in the window" that works in-sim but the device latency pushes off the real
+    # (narrower, speed-shifted) window -> Ledge deaths at high speed. Model it: buffer the jump firing by
+    # jump_exec_lat_frames (+/- jump_exec_lat_jitter frames of noise so the landing isn't perfectly
+    # predictable -> narrows the RELIABLE window). This forces the policy to PRE-AIM using predicted_jump
+    # (the velocity-invariant takeoff cue), which is exactly what should transfer to the phone. TRAINING
+    # only; the fidelity harness/replay run at 0 (instant, for one-step device-transition tests).
+    "jump_drop_prob": 0.0,            # [2026-07-05] P(a JUMP byte is silently eaten) — device-observed (game
+                                      # refuses Jump() in some zones, e.g. right after a turn cell). Train
+                                      # ~0.10 to teach the closed-loop retry; keep 0 for harness/replay.
+    "jump_refuse_strafing_prob": 0.6, # [2026-07-06 DEVICE-MEASURED, 3 fresh captures, deconfounded] the
+                                      # game REFUSES Jump() during a lateral glide: lane-moving refusal
+                                      # 5/9 (56%) vs 2/54 (4%) baseline once landing-phase and gap-cell
+                                      # cases are excluded. Faithful DEFAULT ON -> level (NoOp) first,
+                                      # then jump. (The apparent "landing lock" was the airborne rule +
+                                      # 10Hz phase — already modeled by jump_exec_lat; no extra knob.)
+    "gap_jump_lip_cp": 0.2,           # [2026-07-06 DEVICE-MEASURED] on a wide-gap/crevasse cell the game
+                                      # refuses Jump() past the solid lip (fired takeoffs on-gap only at
+                                      # cp<=0.18; 8 refusals at cp 0.15-0.95 incl ALL grounded-at-gap
+                                      # crevasse deaths). Matches gap_entry_grace (same lip). Jump from
+                                      # the APPROACH cell — predicted_jump already cues that takeoff.
+    "strafe_exec_lat_frames": 0,      # [2026-07-06] CONTROL LATENCY on the STRAFE/level tilt command (the
+                                      # commanded lat_target reaches the lane-lag N frames late). Device
+                                      # control latency is ~1 frame uniform (turn+jump both measured 1);
+                                      # strafe was UNMODELED (instant) -> the sim never reproduced the
+                                      # narrows-AT-SPEED death (v36 device ep0@7040/ep4: reached lane only
+                                      # +-1.8-2.8, short of the [3,7] band, fell off the inner edge — at
+                                      # v210 the 1-cell narrow lookahead + strafe lag = tilt starts too
+                                      # late to reach the band). Default 0 (harness/replay unchanged);
+                                      # train at 1. Absorbed constant (policy strafes earlier) — the
+                                      # POINT is to teach the earlier strafe.
+    "jump_exec_lat_frames": 0,        # mean frames the JUMP action is buffered before it fires (0 = instant)
+    "jump_exec_lat_jitter": 0,        # +/- uniform frame jitter on the above (models latency variance)
     "slide_duration": 0.7,            # [MEASURED] SlideDuration ~0.70s
     "strafe_duration": 0.25,          # [INFERRED] strafe lane-shift dur@0x12C
     # [DEVICE-MEASURED 2026-06-26] a strafe is a GRADUAL lateral glide, not an instant lane jump: one
@@ -505,7 +575,9 @@ class TempleRunSimEnv(gym.Env):
         self._facing = DIR_N
         self._lane = 0.0                     # CONTINUOUS lateral tilt offset, center 0 (recenters when idle)
         self._tilt_dir = 0                   # current tilt direction while strafing (-1 left / +1 right)
-        self._lat_target = 0.0               # commanded tilt target (hold -> +/-edge, level -> 0)
+        self._lat_target = 0.0               # ACTIVE tilt target driving the lane lag (post-latency)
+        self._lat_cmd = 0.0                  # COMMANDED tilt target (this frame's strafe/level byte)
+        self._lat_target_buf: list[float] = []   # strafe_exec_lat_frames delay buffer (cmd -> active)
         self._distance = 0.0
         self._distance_real = float(self.cfg["start_distance"])  # real-scale DistanceTraveled (reward signal)
         # high-speed curriculum: jump-start a fraction of episodes deep into the run (fast + dense).
@@ -529,6 +601,8 @@ class TempleRunSimEnv(gym.Env):
         # off, so a level-UP crevasse can check the runner jumped late enough (near the gap edge). None
         # until the first jump; refreshed each fresh takeoff (a new jump only starts once airborne ends).
         self._jump_takeoff_pos: Optional[float] = None
+        self._pending_jump_frames = 0     # >0 = a JUMP command buffered by jump_exec_lat_frames, fires at 0
+        self._cliff_edge_frames = 0       # consecutive frames riding |lane|>=cliff_edge_lane on level>=3
         self._slide_t = 0.0
         self._strafe_t = 0.0
         self._stumble_t = 0.0
@@ -567,6 +641,7 @@ class TempleRunSimEnv(gym.Env):
         # policy strafe back too early and fall off the 2nd/3rd cell on the phone).
         self._pending_narrow = 0
         self._pending_narrow_lane = 0
+        self._pending_sequence: list[dict] = []   # compound stacked-obstacle queue (user blindspot)
         self._pending_narrow_type = 17
         # replay cursor (which injected element feeds the next generated cell)
         self._replay_cursor = 0
@@ -614,6 +689,40 @@ class TempleRunSimEnv(gym.Env):
         d = self._distance_real - float(self.cfg["start_distance"])
         return float(np.clip(d / max(1.0, float(self.cfg["ramp_distance"])), 0.0, 1.0))
 
+    def _queue_compound(self, lane_a: int, level: int, strip_a: int) -> int:
+        """Build a STACKED compound sequence (user-observed blindspot) into _pending_sequence: the
+        REST of narrow A (same lane) -> a jump-barrier -> a clear landing -> narrow B on the OPPOSITE
+        side. Survivable only by strafing A->B MID-AIR over the barrier. Returns lane_a (the current
+        cell = narrow A cell 1). The barrier + narrow B bypass min_space (that's the point)."""
+        cfg = self.cfg
+        seq: list[dict] = []
+        # rest of narrow A
+        for _ in range(max(0, strip_a - 1)):
+            e = _element(type=self._narrow_ptype(lane_a), level=level, is_turn=False)
+            e["narrow_lane"] = lane_a
+            seq.append(e)
+        # the jump-barrier (TreeJump: must-jump, has solid ground so you LAND after) — centered
+        seq.append(_element(type=2, level=level, obstacles=OBST_TREE_JUMP, is_turn=False))
+        # clear landing cell(s) after the barrier (where the mid-air strafe touches down toward B)
+        for _ in range(max(1, int(cfg.get("compound_land_cells", 1)))):
+            seq.append(_element(type=2, level=level, is_turn=False))
+        # narrow B on the OPPOSITE side
+        lane_b = -lane_a
+        lw = cfg["narrow_len_weights"]
+        lens = list(lw.keys())
+        probs = np.array([lw[k] for k in lens], dtype=float)
+        strip_b = int(self._rng.choice(lens, p=probs / probs.sum()))
+        for _ in range(max(1, strip_b)):
+            e = _element(type=self._narrow_ptype(lane_b), level=level, is_turn=False)
+            e["narrow_lane"] = lane_b
+            seq.append(e)
+        self._pending_sequence.extend(seq)
+        return lane_a
+
+    @staticmethod
+    def _narrow_ptype(lane: int) -> int:
+        return 19 if lane == -1 else 22
+
     def _next_cell_procedural(self) -> dict:
         cfg = self.cfg
         level = int(self._zone_level)
@@ -621,6 +730,13 @@ class TempleRunSimEnv(gym.Env):
         self._cells_since_turn += 1
         self._cells_since_bonus += 1
         self._cells_since_zone += 1
+
+        # COMPOUND-SEQUENCE emit (user-observed stacked blindspot): a pre-built list of cells
+        # (narrow A -> barrier -> narrow B-opposite) that bypasses the normal spacing so the policy must
+        # MID-AIR STRAFE across the barrier. Takes priority over all normal generation while non-empty.
+        if self._pending_sequence:
+            self._cells_since_obstacle = 0
+            return self._pending_sequence.pop(0)
 
         # WIDE-GAP continuation: the 2nd+ cell of a 2-cell gap (long hole / zone change). A single
         # well-timed jump must span both -> jumping a cell early lands in this far half and falls.
@@ -681,7 +797,8 @@ class TempleRunSimEnv(gym.Env):
         if (not is_turn
                 and self._cells_since_turn >= int(cfg["min_clear_after_turn"])
                 and self._cells_since_obstacle >= int(cfg["min_space_between_obstacles"])
-                and self._cells_since_zone >= int(cfg["zone_change_every_cells"])):
+                and self._cells_since_zone >= int(cfg["zone_change_every_cells"])
+                and self._distance_real >= float(cfg.get("zone_after_distance", 0.0))):
             obstacle = OBST_LEVEL_CHANGE
             self._cells_since_zone = 0
             self._cells_since_obstacle = 0
@@ -740,9 +857,21 @@ class TempleRunSimEnv(gym.Env):
                     lens = list(lw.keys())
                     probs = np.array([lw[k] for k in lens], dtype=float)
                     strip = int(self._rng.choice(lens, p=probs / probs.sum()))
-                    self._pending_narrow = strip - 1
-                    self._pending_narrow_lane = narrow_lane
-                    self._pending_narrow_type = ptype
+                    # COMPOUND (user blindspot): with compound_prob turn this narrow into a stacked
+                    # narrow(A) -> barrier -> narrow(B opposite) that needs a MID-AIR strafe. The current
+                    # cell is narrow A cell 1 (narrow_lane set below); _queue_compound enqueues the REST
+                    # of the whole sequence into _pending_sequence (bypasses _pending_narrow entirely).
+                    # short-circuit on compound_prob>0 FIRST so the default (prob 0) path draws NO rng
+                    # here — else the extra random() shifts the whole track stream (scorecard velocity).
+                    if (float(cfg.get("compound_prob", 0.0)) > 0.0
+                            and self._distance_real >= float(cfg.get("compound_after_distance", 0.0))
+                            and self._rng.random() < float(cfg.get("compound_prob", 0.0))):
+                        narrow_lane = self._queue_compound(narrow_lane, level, strip)
+                        ptype = {-1: 19, 1: 22}[narrow_lane]
+                    else:
+                        self._pending_narrow = strip - 1
+                        self._pending_narrow_lane = narrow_lane
+                        self._pending_narrow_type = ptype
                 else:
                     obstacle = self._sample_obstacle_type()
                     # a HOLE is sometimes a 2-cell LONG hole (path_type 12/13/15/16 on device).
@@ -906,10 +1035,40 @@ class TempleRunSimEnv(gym.Env):
         if a == int(C.Action.JUMP):
             # only meaningful from the ground; sets IsJumping for jump_duration.
             if self._jump_t <= 0.0 and self._slide_t <= 0.0:
-                self._jump_t = float(cfg["jump_duration"])
-                # record WHERE this jump took off (longitudinal pos) — the step-up crevasse checks the
-                # runner jumped late enough (near the gap edge) so an early jump fails on the raised wall.
-                self._jump_takeoff_pos = self._long_pos()
+                # JUMP-BYTE DROP [2026-07-05, v14_freshphone ep6 @108m]: on device the game can silently
+                # REFUSE a Jump() (observed right after a turn cell: byte sent, is_jumping never fired,
+                # policy trusted its action history over the persisting must_jump -> died in the hole).
+                # Train with a small drop prob so the policy learns the CLOSED-LOOP retry (re-jump while
+                # must_jump and grounded). 0 by default (harness/replay fidelity unchanged).
+                if float(cfg.get("jump_drop_prob", 0.0)) > 0.0 and \
+                        self._rng.random() < float(cfg.get("jump_drop_prob", 0.0)):
+                    return
+                # JUMP-WHILE-STRAFING REFUSAL [2026-07-06, DEVICE-MEASURED 56% vs 4% — see config]:
+                # a jump commanded mid-glide is usually eaten by the game. The device criterion is the
+                # lane actually MOVING (>0.8/frame), i.e. |target-lane| > 0.8/alpha ~ 1.8 — a rider
+                # SETTLED on a narrow strip (small residual) jumps normally; a fresh strafe glide does not.
+                if abs(self._lat_target - self._lane) > 1.8 and \
+                        self._rng.random() < float(cfg.get("jump_refuse_strafing_prob", 0.6)):
+                    return
+                # GAP-LIP REFUSAL [2026-07-06, DEVICE-MEASURED — see gap_jump_lip_cp]: past the solid lip
+                # of a wide-gap/crevasse cell the runner is already over the void — Jump() is ignored.
+                # (ALL grounded-at-gap crevasse deaths: act=2 spam on pt34/35 at cp 0.15+, takeoff never
+                # fired.) The survivable takeoff is on the APPROACH cell (predicted_jump cues it).
+                _cell_now = self._track[self._cell_index]
+                if _cell_now.get("wide_gap") and \
+                        self._cell_progress() > float(cfg.get("gap_jump_lip_cp", 0.2)):
+                    return
+                lat = int(cfg.get("jump_exec_lat_frames", 0))
+                if lat > 0 and self._pending_jump_frames <= 0:
+                    # DEVICE JUMP LATENCY: don't fire now — schedule the takeoff `lat` (+/- jitter) frames
+                    # later (see jump_exec_lat_frames). The policy must PRE-AIM (predicted_jump).
+                    jit = int(cfg.get("jump_exec_lat_jitter", 0))
+                    self._pending_jump_frames = max(1, lat + (self._rng.integers(-jit, jit + 1) if jit > 0 else 0))
+                elif lat <= 0:
+                    self._jump_t = float(cfg["jump_duration"])
+                    # record WHERE this jump took off (longitudinal pos) — the step-up crevasse checks the
+                    # runner jumped late enough (near the gap edge) so an early jump fails on the raised wall.
+                    self._jump_takeoff_pos = self._long_pos()
         elif a == int(C.Action.SLIDE):
             if self._slide_t <= 0.0 and self._jump_t <= 0.0:
                 self._slide_t = float(cfg["slide_duration"])
@@ -917,16 +1076,16 @@ class TempleRunSimEnv(gym.Env):
             # ANALOG TILT (device-measured 2026-07-02, lateral-accel-15a): byte0 = HOLD LEFT — sets a
             # persistent lateral target -edge; the lane first-order-lags toward it in _advance. The
             # target STAYS until byte1/byte6 (level) — exactly the hook's tiltCmd semantics.
-            self._lat_target = -float(cfg["lane_edge"])
+            self._lat_cmd = -float(cfg["lane_edge"])
             self._tilt_dir = -1
         elif a == int(C.Action.STRAFE_RIGHT):
-            self._lat_target = +float(cfg["lane_edge"])
+            self._lat_cmd = +float(cfg["lane_edge"])
             self._tilt_dir = +1
         elif a in (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT)):
             self._attempt_turn(a)
         elif a == int(C.Action.NOOP):
             # NoOp = LEVEL the phone: target 0, the game recenters (measured alpha == hold alpha).
-            self._lat_target = 0.0
+            self._lat_cmd = 0.0
             self._tilt_dir = 0
         # jump/slide/turn leave the tilt target UNCHANGED (device: lateral drift continues mid-jump)
 
@@ -966,7 +1125,15 @@ class TempleRunSimEnv(gym.Env):
         # turn_approach_buffer (enable both together).
         if self.cfg.get("hook_turn_buffer") and bool(cell.get("is_turn")) and (
                 cell.get("can_turn_left") if want_left else cell.get("can_turn_right")):
-            self._execute_turn(cell, want_left, float(self.cfg["turn_center_cprog"]), from_buffer=True)
+            # LATE-QUEUE MISS [2026-07-05 v3, DEVICE-MEASURED — see turn_buffer_late_cp]: the hook's
+            # valid-dir guard checks native CanTurn at write time; past the CanTurn window end (~cp 0.56,
+            # velocity-INDEPENDENT: 205 first-swipes, fired max 0.55-0.56 in every velocity band incl
+            # v207, missed min 0.59) the GI_ShouldTurn write is dropped -> the turn NEVER FIRES -> off
+            # the edge. Punishes second-frame swipes (~0.6 at v>150, v27's device hesitation deaths)
+            # while first-frame swipes stay safe at all speeds (v14: 0 missed turns, 5462m fresh-phone).
+            if cp <= float(self.cfg.get("turn_buffer_late_cp", 0.56)):
+                self._execute_turn(cell, want_left, float(self.cfg["turn_center_cprog"]), from_buffer=True)
+            # else: queued too late -> silent miss (later frames are even later; junction missed).
             return
         early = float(self.cfg["turn_exec_early"])
         late = float(self.cfg["turn_exec_late"])
@@ -1006,6 +1173,14 @@ class TempleRunSimEnv(gym.Env):
         scale = float(self.cfg["turn_offset_scale"])
         kill = float(self.cfg["turn_land_kill"])
         carry = float(self.cfg["turn_lane_carry"])
+        # BUFFERED (swipe-queue) TURNS LAND NATIVELY [2026-07-06 DEVICE-MEASURED]: the game's own
+        # HandleDelayedTurning fires the turn at the corner with a forgiving native landing — v14 swiped
+        # off-center (lane up to 4.6) on 212/212 fresh-phone junctions with ZERO landing deaths. The
+        # carry=3.0 amplification was measured on the OLD immediate-turn path and, applied to buffered
+        # turns, teaches "recenter BEFORE swiping" -> the 2nd-frame swipe -> late-queue MISS (v27/v32
+        # device junction deaths at lane 2-3.4 onsets). Buffered turns use a mild carry instead.
+        if from_buffer:
+            carry = float(self.cfg.get("turn_lane_carry_buffered", 1.0))
         # CONTROL LATENCY [DEVICE-MEASURED 2026-07-04]: on the phone the Frida-over-TCP loop lags a
         # JUNCTION-CELL swipe by ~2 frames (obs staleness +~0.20cp + exec delay +~0.24cp), so it LANDS
         # LATE (execution cp ~ swipe_cp + velocity*lat_frames*dt/cell). At speed this pushes the landing
@@ -1083,10 +1258,30 @@ class TempleRunSimEnv(gym.Env):
         """
         cfg = self.cfg
 
+        # DEVICE JUMP LATENCY: a buffered JUMP command fires `jump_exec_lat_frames` steps after it was
+        # issued (see _apply_action). Count down and fire at the CURRENT position (so the takeoff is later
+        # than the policy's command -> it must pre-aim). Only fires if still grounded.
+        if self._pending_jump_frames > 0:
+            self._pending_jump_frames -= 1
+            if self._pending_jump_frames == 0 and self._jump_t <= 0.0 and self._slide_t <= 0.0:
+                self._jump_t = float(cfg["jump_duration"])
+                self._jump_takeoff_pos = self._long_pos()
+
         # tick down transient flags.
         self._jump_t = max(0.0, self._jump_t - dt)
         self._slide_t = max(0.0, self._slide_t - dt)
         self._strafe_t = max(0.0, self._strafe_t - dt)
+
+        # STRAFE-COMMAND LATENCY (strafe_exec_lat_frames): the commanded tilt (_lat_cmd) reaches the
+        # ACTIVE target (_lat_target, driving the lag below) N frames late — the device Frida-TCP control
+        # lag on the tilt byte. lat=0 -> immediate (harness/replay unchanged).
+        slat = int(cfg.get("strafe_exec_lat_frames", 0))
+        if slat > 0:
+            self._lat_target_buf.append(self._lat_cmd)
+            if len(self._lat_target_buf) > slat:
+                self._lat_target = self._lat_target_buf.pop(0)
+        else:
+            self._lat_target = self._lat_cmd
 
         # LATERAL model (device-MEASURED 2026-07-02, strafe_probe_tilt2 / lateral-accel-15a): the lane
         # is a FIRST-ORDER LAG toward the commanded target (hold -> +/-edge, level/NoOp -> 0):
@@ -1105,9 +1300,28 @@ class TempleRunSimEnv(gym.Env):
         if self._stumble_t > 0.0:
             self._stumble_t = max(0.0, self._stumble_t - dt)
         # WALL-HIT: over-tilted past the edge -> stumble (survivable once) and clamp back off the wall.
+        # (Reachable only via turn-landing overshoot — the tilt glide itself clamps at the edge.)
+        # HIGH GROUND (Cliff, zone level 3) [USER-OBSERVED on device 2026-07-05]: there is NO side wall up
+        # there — over-strafing past the edge falls off the cliff -> DEATH, not a stumble.
         if abs(self._lane) > edge:
+            if int(self._track[self._cell_index].get("level", 2)) >= 3:
+                self._kill(1)   # landed/pushed past the high-ground cliff edge -> Fall
+                return
             self._stumble()
             self._lane = max(-edge, min(edge, self._lane))
+        # CLIFF EDGE-RIDING [2026-07-06 DEVICE-MEASURED — the check above was DEAD CODE for strafing (the
+        # glide clamps at the edge, so |lane|>edge never fired) -> v31 rode |lane| 7.0 on plvl 3 and died
+        # on device]. Captures: SUSTAINED |lane|>=6.3 on level>=3 for 8-10 frames = Fall (dt1); short
+        # touches (1-4 frames) survive. Kill after cliff_edge_kill_frames consecutive frames -> policies
+        # must not HOLD full tilt at altitude (transient dodges stay legal).
+        if int(self._track[self._cell_index].get("level", 2)) >= 3 and \
+                abs(self._lane) >= float(cfg.get("cliff_edge_lane", 6.3)):
+            self._cliff_edge_frames += 1
+            if self._cliff_edge_frames >= int(cfg.get("cliff_edge_kill_frames", 6)):
+                self._kill(1)   # rode the high-ground cliff edge too long -> Fall
+                return
+        else:
+            self._cliff_edge_frames = 0
         if self._post_turn_linger > 0:          # post-turn is_turn linger (sim-to-real trap) counts down
             self._post_turn_linger -= 1
 
@@ -1244,7 +1458,10 @@ class TempleRunSimEnv(gym.Env):
                 self._kill(2)       # not airborne at the step-up ledge -> fell in the gap
                 return
             span = float(self.cfg["jump_duration"]) * self._velocity / float(self.cfg["cell_length"])
-            d = self._long_pos() - self._jump_takeoff_pos   # cells travelled since takeoff
+            # evaluate at the ledge cell's ENTRY (not the current mid-cell frame pos): at 10Hz the first
+            # frame on the cell is up to ~0.3 cells past the lip, which skewed frac by up to +0.13 and
+            # made the device-fit mh (entry-referenced, 2026-07-05) effectively stricter than measured.
+            d = float(self._cell_index) - self._jump_takeoff_pos   # cells from takeoff to the ledge lip
             frac = d / max(1e-6, span)                      # 0=takeoff, 0.5=apex, 1=landing
             height = 1.0 - (2.0 * frac - 1.0) ** 2          # parabola: 0 at ends, 1 at apex
             if height < float(self.cfg["stepup_min_height"]):
@@ -1347,6 +1564,7 @@ class TempleRunSimEnv(gym.Env):
         # 1-cell lookahead: the cell ahead of the nearest (raw, not window-gated -> anticipation).
         self._extend_track()
         nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
+        nxt2 = self._track[self._cell_index + 2] if self._cell_index + 2 < len(self._track) else {}
         nobst = int(nxt.get("obstacles", 0))
 
         on_ground = self._jump_t <= 0.0 and not self._is_dead
@@ -1386,6 +1604,17 @@ class TempleRunSimEnv(gym.Env):
             # device hook emits it from next_path_type ∈ 33-36 (the future PE_Level is unreadable=0, but
             # the SingleLevelStepDownCap path_type is reliable). Was `stepup` (step-up only, undeployable).
             "next_ground_change_higher": int(nxt.get("obstacles", 0)) == OBST_LEVEL_CHANGE,
+            # upcoming altitude 2-cell lookahead (device-verified readable, probe 16q): the cap/ledge cells
+            # carry the NEW zone level, so sign(next2_path_level - path_level) = the crevasse direction.
+            # JUNCTION DROPOUT [2026-07-05, DEVICE-MEASURED v27_deviceeval]: the hook walks the PE
+            # neighbor chain, which BREAKS through a turn — on a junction cell both reads return -1
+            # (178/202 on-junction frames), and on the approach cell next2 (past the junction) is -1.
+            # The sim MUST reproduce this: obs30 policies fine-tuned on always-valid sim levels got a
+            # junction-frame input spike on device -> 1-frame swipe hesitation (cp~0.6 > CanTurn end
+            # 0.56) -> the v26/v27/v30 missed-turn deaths v14 (zero-init cols) was immune to.
+            "next_path_level": -1 if cell.get("is_turn") else int(nxt.get("level", -1)),
+            "next2_path_level": -1 if (cell.get("is_turn") or nxt.get("is_turn"))
+                                else int(nxt2.get("level", -1)),
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).
@@ -1446,6 +1675,8 @@ class TempleRunSimEnv(gym.Env):
         self._strafe_t = self._timer_from(None, s.get("is_strafing"), self.cfg["strafe_duration"],
                                          explicit=hidden.get("strafe_t"))
         self._lat_target = float(hidden.get("lat_target") or 0.0)
+        self._lat_cmd = self._lat_target
+        self._lat_target_buf = []
         self._gap_grace_cell = None
         self._stumble_t = self._timer_from(None, s.get("is_stumbling"), self.cfg["stumble_duration"],
                                           explicit=hidden.get("stumble_t"))
