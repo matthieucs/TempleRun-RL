@@ -1,318 +1,207 @@
-# Temple Run RL — project memory
+# Temple Run RL — project memory (minimal)
 
-Goal: turn **Temple Run** (`com.imangi.templerun`, v1.39.0) into a reinforcement-learning
-environment by instrumenting the running game with **Frida** — read game state and inject
-actions through TCP sockets, no screen-scraping, no synthetic input.
+Goal: an RL policy that reaches **10,000 m** on real **Temple Run** (`com.imangi.templerun` v1.39.0),
+trained in a headless sim, deployed on a physical Android phone via **Frida** (read game state + inject
+actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
-This file is the durable record of how the pipeline was built and the non-obvious gotchas.
-Re-read it before changing the instrumentation.
+## 🎯 GOAL REACHED — 2026-07-06: device run **10,545 m** (v36, hook 16w; `captures/best_run_10545m_v36_hook16u.jsonl`)
+Died Burnt on a flame tower at the end after 180 turns / 34 crevasses / 56 narrows / 54 holes / 92 jumps,
+117 s at the v210 cap. **NEXT PHASE = RELIABILITY: a 10 k MEDIAN, not just best** (same session runs were
+2320/1872/2368/**10545**/589 — high variance). Edge cases still to model in the SIM: (1) FLAME-TOWER
+slide-under at speed (the 10545 death), (2) multi-hole jump RHYTHM (4-cell must-jump chains — jump-spam
+fails, needs staggered land-then-rejump), (3) narrows-at-speed strict [3,7] band (the 256-net v39 breaks
+the narrow↔crevasse interference but drifts — needs a stable from-scratch train, see `scratchpad/
+train_gpu_256.sh`), (4) stumble→rejump recovery.
 
----
+## Setup
+- **Engine** Unity 2022.3 IL2CPP, arm64 only → needs a REAL arm64 phone (no emulator: Frida can't hook
+  the ARM lib under x86 translation). Device **3f80a3a** (Redmi, Android 15, NOT rooted).
+- **Frida Gadget** (not frida-server — no root): `libgadget.so` injected via LIEF `DT_NEEDED` on
+  `libmain.so`; listens 127.0.0.1:**27042**. Build: `tools/build_gadget_apk.py` → `TempleRun-gadget.apk`.
+- **Reverse eng.**: Il2CppDumper → `il2cpp_work/output/dump.cs` (signatures + field offsets + RVAs;
+  bodies are native, not readable). All offsets/RVAs below are from it (re-dump if the APK changes).
 
-## 1. The game
+## Run it
+`python scripts/setup_device.py` forwards 27042 + state **9999** + action **9998**, then injects.
+Inject one-liner (run EXACTLY ONE; the host process must STAY alive — if it exits the in-phone agent
+unloads. ⚠️ Before re-injecting: `pkill` is forbidden — `kill <PID>` the OLD injector first (`ps -eo
+pid,cmd | grep gadget_inject`); stale injectors RE-INJECT after a force-stop+restart → multiple agents,
+port contention, corrupted evals [2026-07-06: 3 stale injectors stalled a capture at ep1]):
+`setsid nohup .venv/bin/python frida/gadget_inject.py frida/temple_run_hook.js 127.0.0.1:27042 &`
+Recover a flaky/crash-looped phone: `adb -s 3f80a3a shell am force-stop com.imangi.templerun` →
+`am start -n com.imangi.templerun/com.imangi.unityactivity.ImangiUnityActivity` → wait 12 s → re-forward
+→ re-inject. Verify `_hv` on :9999. Keep-awake (§HyperOS): `appops set com.android.shell
+android:write_settings allow` + `settings put system screen_off_timeout 2147483647`.
 
-| Fact | Value |
-|---|---|
-| Engine | **Unity 2022.3.62f2**, scripting backend **IL2CPP** |
-| Native code | `libil2cpp.so` (42 MB) + `libunity.so`, **arm64-v8a only** (also armeabi-v7a) — **no x86/x86_64** |
-| Package / launch activity | `com.imangi.templerun` / `com.imangi.unityactivity.ImangiUnityActivity` |
-| Distribution | split-APK bundle: base `com.imangi.templerun.apk` + `config.arm64_v8a.apk`. **No OBB** — data is in-APK (Addressables under `assets/aa`, `assets/bin/Data`). |
-| Local player id | `PlayerManager.GetActivePlayer()` is hard-coded **`1`** — every per-player record/upgrade call uses `playerId = 1`. |
+## Protocol
+- **State (9999)**: newline JSON @ **30 Hz** (`POLL_MS=33`, hook 16t+ — OBS freshness only; the host env
+  drains to the NEWEST line and CONTROLS at 10 Hz. The old "20 Hz was WORSE" verdict was a 20 Hz-CONTROL
+  retrain, unrelated). Game Updates @60Hz.
+- **Actions (9998)**: 1 byte over ONE persistent socket. `0`=StrafeLeft `1`=StrafeRight `2`=Jump
+  `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp; reset-only `8`=RunAgainClicked `9`=OnPlayClicked
+  (`reset()` sends 8 then 9). **Lateral = analog tilt** (hook replaces `GetAccelerometerForceX`):
+  byte0/1 = hold ±, byte6 = level→game recenters.
+- **Turn = the game's own swipe-queue (2026-07-04, hook 16o+):** the turn byte writes `GI_ShouldTurnLeft/
+  Right`+`TimeSinceShouldTurn=0` on GameInput (HandleDelayedTurning) → the GAME fires the turn AT THE
+  CORNER with native timing, exactly like a real early swipe. This SIDESTEPS the ~2-frame control latency
+  that made plain immediate `fn.TurnLeft` overshoot (see STATUS). NN still decides WHEN to turn; the hook
+  only queues it (like the analog-tilt translation). `TURN_NATIVE_BUFFER=true`; anti-double-turn debounce +
+  valid-dir guard. (The every-frame flag-HOLD variant looked "exploity" — removed; single write only.)
+- **Small narrows (pt17/18) → `must_jump`** (hook 16p): human data = jumps them 82%. The policy's existing
+  must_jump→jump generalizes → v14 jumps them, no retrain. Set on both `cachedMustJump` and streamed `s.must_jump`.
+- **Hook** `frida/temple_run_hook.js`, version in `HOOK_VERSION` (`_hv` on the stream). Current
+  **16u** (`seedprobe-16u`) = 16r (next/next2_path_level, device-verified 10/10 direction) + **16s**
+  (one-shot `s.turn_write` verdict: written/debounce/invalid — junction misses self-explain) + **16t**
+  (30 Hz broadcast) + 16u seed probe (OFF). Streams raw state + derived obs; executes action bytes. NO
+  action-DECISION rules (NN decides); swipe-queue + must_jump-flag = perception/execution translations.
+- **TRACK SEEDS (probe 16u, CONCLUDED 2026-07-06): device runs are NOT seedable.** Generation
+  (`PathElement.AddRandomPath → GetRandomPathElementForSide`) draws from Unity's GLOBAL RNG;
+  `Random.InitState(seed)` (RVA 0x24B3E6C) re-seeded at the first path draw of a run gives only a
+  ~6-cell identical prefix — mid-run generation interleaves with other consumers (coins/effects) and
+  desyncs. Full determinism would need a private RNG stream (not worth it). **Reproducibility tools:
+  SIM `reset(seed=N)` (exact); device runs are fully RECORDED in `captures/*.jsonl` (the 6399 m record
+  = `captures/v14_16t.jsonl` ep5) — replayable through replay_diff/analysis, not live.** `SEED_RUNS=-1`
+  keeps the capability OFF. Side find: `PathElement` statics `sAllowTurns/sAllowPathHoles/
+  sAllowPathNarrows/…` (0x4-0xC) = writable feature toggles (future isolation diagnostics).
 
-### Reverse engineering
-- Tool: **Il2CppDumper v6.7.46** (run via `dotnet`/its `.exe`) on `libil2cpp.so` + `global-metadata.dat`.
-- Output: `il2cpp_work/output/dump.cs` (17 MB, full C# signatures with field offsets + method RVAs) and
-  `il2cpp_work/output/DummyDll/Assembly-CSharp.dll` (browsable in dnSpy/ILSpy).
-- IL2CPP means **no readable C# source** — only signatures/offsets. Method bodies are native arm64.
-- Instance-method native ABI: first arg = `this`, **trailing arg = `MethodInfo*`** (pass `NULL`/`ptr(0)`).
-  Float args follow the arm64 convention (Frida `NativeFunction` handles it).
+## Key offsets (this build; from dump.cs)
+- **CharacterPlayer**: IsDead 0xD8, IsJumping 0xF8, IsSliding 0x100, Score 0x138, Velocity(Vec3) 0x34,
+  Facing 0x78, JumpVelocity 0x80, GroundHeight 0x88 (=raised ledge height), IsGroundHeightChangeHigher.
+- **PathElement**: Type 0x30, Level 0x34, Obstacles 0x38, neighbors 0x50/58/60/68, Rectangle 0xA0.
+- **GameController.GameInput @0x78** (HandleDelayedTurning buffer — the turn swipe-queue): GI_JustTurned
+  0x20, GI_ShouldTurnLeft **0x21**, GI_ShouldTurnRight **0x22**, GI_TimeSinceShouldTurn 0x24,
+  GI_TimeSinceLastTurn 0x28, GI_ShouldJump 0x2C, GI_TimeSinceShouldJump 0x30. (Hook writes ShouldTurnL/R.)
+- **Enums**: ObstacleType {Hole1, Narrow2, TreeStumble3, TreeJump4, TreeSlide5, FlameTower6,
+  LevelChange7}. PathType: 1-2 straight, 3-10 turns, 11-16 holes (12/13/15/16=HoleLong=2-cell),
+  17-30 narrows, 31-32 flame, **33-36 = SingleLevelStepDownCap (zone crevasse, both up/down)**, 37 temple.
+  DeathType {Fall1, Tree2, Slide3, **Ledge4**, Burnt5, ...}. MaxRunVelocity **210** (start 100).
+- RVAs (Start/Update/Turn/Jump/Slide/Strafe/CanTurn/IsTurn/GetPosition2D/RunAgain/OnPlay/…): see
+  `docs/CLAUDE_FULL_HISTORY.md` §5 / `docs/OFFSETS.md`.
 
----
+## Sim + training
+- `src/templerun_rl/sim_env.py` = fast headless model (`TempleRunSim-v0`); obs `obs.py` (**OBS_LEN 30**,
+  bools + scalars + cell_progress/lane/narrow_target_lane/**predicted_landing**/next_ground_change_higher
+  + **predicted_jump** (velocity-invariant step-up takeoff cue, host-derived) + **next_path_level/
+  next2_path_level** (upcoming-altitude direction, hook 16r) + K=4 action history → 58-wide; power-ups
+  REMOVED 2026-07-04); reward `reward.py`; PPO `scripts/train_sim.py` (net 128,128, linger 3).
+  Deploy = same obs on the phone via the hook.
+- Sim turn-buffer config: `hook_turn_buffer=true` models the device swipe-queue (turn near a junction lands
+  CENTERED, timing-free, `from_buffer` offset 0) + **late gate `turn_buffer_late_cp=0.56`** (swipe past it =
+  silent MISS; device-measured CanTurn window end, velocity-INDEPENDENT — v14 turned 46/46 up to v207).
+  Warm-start base **`runs/ppo_v14_obs30_leveldir.zip`** (EXACT surgical equivalent of v14, new obs cols
+  zero-init; `scratchpad/surgery_v24_leveldir.py`).
+- **JUNCTION LEVEL DROPOUT (2026-07-05 night, device-measured):** the hook's PE neighbor walk BREAKS through
+  turns → on-junction frames stream `next_path_level=next2_path_level=-1` (178/202), approach frames
+  `(lvl,-1)`. Sim `_snapshot` reproduces it (commit f8d7eff). Obs30 finetunes trained pre-fix saw a
+  junction-frame input spike on device they never met in training. v14 immune (zero-init cols).
+- **Capture-log alignment (capture_calib):** logged `action(i)` = policy's response to `state(i-1)` (predict
+  runs BEFORE env.step; the record holds the POST-step state). And a FIRED turn resets cell_progress → the
+  swipe record's cp is POST-turn — don't read "swipe cp" stats off fired turns (artifact; burned us twice).
+- **Jump exec latency (sim, 2026-07-05):** `jump_exec_lat_frames`/`jump_exec_lat_jitter` buffer the JUMP
+  firing. DEVICE-MEASURED (`scripts/probe_jump_exec.py`, 25/25): **exactly 1 frame @10Hz, zero jitter**
+  (uniform with the turn-side 1-frame exec). Constant latency is ABSORBED by policies (window shifts);
+  only JITTER creates training pressure (v14 hiMed 2246→130 under 2±1; a predicted_jump pre-aim oracle
+  survives). Train at **1±1** (measured mean + TCP obs-staleness variance); harness/replay at 0.
+- **Warm-start recipe that does NOT collapse: `--learning-rate 5e-5`** (new knob; default 3e-4 ALWAYS
+  collapses a v14 warm-start regardless of ent). Keep the BEST checkpoint — drift resumes past ~500k-1M.
+- **THE FEEDBACK LOOPS (use before any retrain/deploy):**
+  - `scripts/fidelity_scorecard.py --strict` — ~13 phone-free checks vs `captures/device_reference.json`.
+    GREEN required before retrain. (Blind for un-checked mechanics — green ≠ complete.)
+  - `scripts/replay_diff.py <capture>` — policy-free ONE-STEP sim-vs-device transition diff on a real
+    capture. Great for turns/obstacles; CANNOT test multi-frame mechanics (the crevasse jump arc).
+  - Device eval: `scripts/capture_calib.py <model> --episodes 8 --turn-cooldown 0`.
+- Checkpoints are noisy + late-collapse → **keep the BEST checkpoint, not `_final`**. Registry `runs/MODELS.md`.
 
-## 2. Why a real phone, not an emulator (important)
+## STATUS — what worked / what failed / where we are
 
-- **x86_64 emulator (android-34, google_apis):** runs the game via **ndk-translation** (ARM→x86).
-  Frida attaches but **cannot hook** — `Process.findModuleByName("libil2cpp.so")` returns `null`
-  because the arm64 lib is mapped by the translation guest linker (`libndk_translation*.so`), invisible
-  to Frida's host (x86_64) module API. Good for *playing/inspection*, useless for Frida.
-- **arm64 emulator on this x86_64 Windows host:** **impossible** — QEMU2 aborts:
-  `FATAL | Avd's CPU Architecture 'arm64' is not supported by the QEMU2 emulator on x86_64 host`.
-  (Modern Android Emulator only runs guest-arch == host-arch.)
-- **Conclusion:** Frida instrumentation requires **native arm64** — a real phone (used here) or an
-  arm64 cloud host (Ampere/Graviton) for parallel instances. Docker does **not** help
-  (`--platform linux/arm64` = qemu-user, no Android + Frida ptrace broken).
+**WORKED (device-verified):**
+- **Turns FIXED — via the game's own swipe-queue (2026-07-04, the real fix).** ROOT CAUSE of the turn wall
+  = **~2-frame control latency** over Frida-TCP (obs is ~1 frame stale: policy acts at device-cp ~0.50 vs
+  sim-cp 0.30; + the turn executes ~1 frame late → device-cp ~0.73), which EATS the tight survivable swipe
+  window. `predicted_landing` obs (v10) helped but did NOT close it; retrains kept overshooting (lane
+  15-22). THE FIX: route the turn byte through the game's native HandleDelayedTurning (`GI_ShouldTurnLeft`
+  write) → the GAME times the turn at the corner, immune to the lag. v14+hook-16k device: **turn-overshoots
+  0/8** (was the dominant death). See Protocol.
+- **Small narrows JUMPED (hook 16p)** — human jumps them 82%; hook flags pt17/18 `must_jump` → v14 jumps
+  (device-verified), no retrain.
+- **Narrows (long side-strips)** — cracked via a NARROW-ONLY isolation curriculum → warm-start full task.
+- **Jump-into-slide death**, **turn-direction** (native CanTurn opposite-origin, hook 16f), **lateral =
+  analog tilt** (alpha 0.446/0.1s), **stumble** 2-strike — all modeled + scorecard-guarded.
 
-The android-34 x86_64 AVD `TempleRunAVD` and an unusable `TempleRunARM0` AVD still exist in the SDK.
+- **Crevasses LARGELY FIXED (v14, device-verified 2026-07-03)** — was the top device death after turns
+  (v10: 5/8 @~600 m, DeathType 4 = Ledge). replay_diff proved it was the **SIM, not the reward** (reward
+  rewards jumping, never timing; the sim was too lenient). Fix = model the crevasse as a **2-cell step**:
+  gap on cell 1, raised ledge (`ground_height=15`) on cell 2 where a velocity-dependent APEX check fires
+  (clip = Ledge if not near jump apex there). Retrained (v14) → **device median 1652, best 2908, crevasse
+  deaths 2/8** (down from 5/8). `next_ground_change_higher` obs (pt 33-36, hook 16i) **verified firing on
+  device** (7/7 crevasse-approach frames) — prior "0 fires" was a capture-logging artifact, not a bug.
 
----
+**FAILED / LESSONS (2026-07-03/05):**
+- **12 retrain regressions (v15→v22) at LR 3e-4.** Every warm-start+finetune from v14 drifted BELOW it on
+  device (high-speed curriculum, off_center_penalty [device-TOXIC], turn_lane_carry "fidelity" [it's a
+  load-bearing REGULARIZER, keep 3.0], tail-risk, action_delay, low-ent, buffer models). Offline metrics do
+  NOT predict device turns. **AMENDED 2026-07-05: the collapse mechanism was the LR** — 3e-4 knocks the
+  policy off v14's sharp optimum; **5e-5 fine-tunes stably** (v25c/v26 verified: no collapse, skills adopt).
+- **v25 (2-phase: crevasse-only isolation → full) DEVICE-REGRESSED (median ~650): 6/8 deaths = MISSED
+  TURNS.** Crevasse-ONLY training ATROPHIES device turns even after a full-task Phase B restores them
+  in-sim. **Isolation curricula: OK for narrows, WRONG for turns — keep turns practiced in every phase.**
+  Also 2/8 crevasse jumped too EARLY = the guessed lat 2±1 over-modeled (real = 1). Both fixed in v26.
+- Ruled out (device-measured): over-strafe lateral gap (device caps lane ±7, same as sim); 20Hz sampling
+  (WORSE); crevasse apex miscalibration (sim clears the human's v210 0.58 takeoff).
 
-## 3. Target device & Frida transport
+**2026-07-05 NIGHT (autonomous session) — the retrain curse + turn mechanics fully decoded:**
+- **v14 FRESH-PHONE: median 2010, best 5462, 0 missed turns in 212 junctions** (`captures/
+  v14_freshphone.jsonl`). The old 1652 was the DEGRADED phone. ⚠️ ALL cross-model comparisons must be
+  same-session fresh-phone (v26/v27's "missed turns" were measured on the tired phone).
+- **Turn mechanics (205+ junctions, frame-level):** every policy decides the swipe on the junction's FIRST
+  frame; byte goes out 1 control-tick later. Early-phase onsets (cp<0.2) ALWAYS survive; late-phase onsets
+  (cp≥0.3) = a latency-jitter COIN FLIP (write lands 0.5-1.5 frames after the onset sample vs the CanTurn
+  window end ~0.56). Fresh phone = low jitter = coin lands good (v14 50/50 late onsets); degraded = misses
+  (v26/v27: 5/9+ late-onset deaths). Wrong models tried + discarded: v29 constant-0.50 gate (never binds
+  in-sim), v30 velocity-arrival lag-2 (refuted: v14 turns fine @v207). Hook drop paths (turn byte):
+  debounce 0.3s / invalid-dir(CanTurn false) / not-near-junction — pre-onset turn bytes: 0 in all captures.
+- **JUNCTION LEVEL DROPOUT found + fixed** (see Sim section) = why obs30 retrains looked worse on device.
+  v31 (v27 recipe + dropout + 0.56 gate) trained; in-sim clean turns WITH dropout. NOTE: in-training
+  EvalCallback env ≠ training env (no buffer flags) → its curve says "collapse" when device-true eval says
+  healthy. Judge checkpoints with `scratchpad/eval_swipe_deaths.py` (device-true cfg, deaths by mechanic).
+- **NEXT WALL @v200+ (both v14 long runs died on it): chained-jump blindness** — a jump spans ~2.75 cells,
+  obs lookahead = 1 cell → lands blind into TreeJump (3738m, 5462m deaths). Lever: next2-obstacle obs
+  (hook 2-ahead walk device-verified readable on straights; breaks only through turns = dropout above).
+- **USER (live, 2026-07-06): low-speed dumb deaths (missed transition/turn) are the MEDIAN killer** —
+  high speed works; prioritize low-speed reliability.
 
-- Device: **Redmi (model 23021RAA2Y), arm64-v8a, Android 15 (SDK 35)**, serial `e4de25a1`. **NOT rooted.**
-- No root ⇒ **`frida-server` can't attach** to another app. Use **Frida Gadget** (loads inside the app).
-- Frida version pinned everywhere: **17.14.0** (host `frida-tools`; gadget; server binaries).
+**2026-07-06 EARLY — fresh-phone round 2 + JUMP-BYTE RULES (the low-speed dumb deaths):**
+- **v31 fresh: median 1331 best 2442 — turn hesitation CURED (1 junction death/91; dropout fix VERIFIED
+  on device).** v27 fresh: 1266/3864, still 5/8 missed turns (predates the dropout fix — kills the
+  "phone-state explains v27 turns" theory). v14 floor 2010/5462 stands.
+- **The game EATS Jump() bytes — 3 device-measured rules (131 grounded attempts):** (1) 56% refused while
+  the lane glides >0.8/frame vs 4% settled → sim `jump_refuse_strafing_prob 0.6` DEFAULT (gate
+  |target−lane|>1.8, settled narrow-riders unaffected); (2) refused on wide-gap/crevasse cells past the
+  lip cp~0.2 → `gap_jump_lip_cp 0.2` DEFAULT (takeoff = APPROACH cell; ALL grounded-at-gap crevasse
+  deaths were act-2 spam refused there); (3) "landing lock" = airborne rule + 10Hz phase, already covered
+  by jump_exec_lat 1±1. Refusals PERMANENT in context — the lesson is avoid-the-state, not retry-spam.
+  These explain v31's 3/8 crevasse deaths (its learned strafe-LEFT-before-crevasse habit — crevasse-zone
+  lane −2.56 vs v14 −0.46 — was free in the old sim, lethal on device) and the user-flagged low-speed
+  dumb deaths. Crevasse LATERAL sensitivity refuted (n=108: 13% vs 12% death rate).
 
-### Gadget injection (no smali editing)
-Built by `build_gadget_apk.py`:
-1. **Merge** the splits → one universal APK with `APKEditor.jar m` (sets `extractNativeLibs=true`).
-2. **LIEF**: add `DT_NEEDED "libgadget.so"` to `lib/arm64-v8a/libmain.so` (Unity loads `libmain` early,
-   so the linker auto-loads the gadget). Add `libgadget.so` + `libgadget.config.so`
-   (`{"interaction":{"type":"listen","address":"127.0.0.1","port":27042,"on_load":"resume"}}`).
-3. Drop the old signature, **zipalign + apksigner** (debug key `tr-debug.keystore`, alias `trkey`, pass `android`).
-4. Output: **`TempleRun-gadget.apk`**.
-
-Result: gadget listens on **127.0.0.1:27042** inside the phone; logcat shows `Frida: Listening on ... 27042`.
-
----
-
-## 4. Running it
-
-```bash
-# env for adb (Git Bash): device paths get mangled unless MSYS_NO_PATHCONV=1
-ADB="D:/Users/AppData/Local/platform-tools/adb.exe"; S="-s e4de25a1"
-# forward gadget + state + action ports to host
-"$ADB" $S forward tcp:27042 tcp:27042
-"$ADB" $S forward tcp:9999 tcp:9999      # state stream
-"$ADB" $S forward tcp:9998 tcp:9998      # action sink
-# launch game on the phone, then inject:
-python frida/gadget_inject.py frida/temple_run_hook.js 127.0.0.1:27042
-```
-(All of the above is automated by `python scripts/setup_device.py` — forwards the 3 ports + injects.)
-
-`gadget_inject.py` connects to the gadget (remote device) and loads `temple_run_hook.js`.
-The script: resolves `libil2cpp.so` base, installs hooks, maxes upgrades once, serves state on 9999,
-listens for actions on 9998.
-
-### Protocol
-- **State (port 9999):** newline-delimited JSON, broadcast every `POLL_MS=100` ms (**measured ~101 ms,
-  9.9 Hz**), **22 fields**: the 17 original — `is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling,
-  has_invincibility, has_angel_wings, has_vacuum, has_boost, is_mega_boost, score, velocity, path_type,
-  path_level, must_jump, must_slide, is_game_over` — plus `is_strafing`, `facing` (PathDirection N=1..W=4),
-  and the turn cues `can_turn_left`, `can_turn_right`, `is_turn`.
-  `velocity` = `CharacterPlayer.GetRunVelocity()` sampled on the main (Update) thread.
-  `must_jump/must_slide` are derived from `PathElement.Obstacles`. `can_turn_left/right` call the game's
-  own `PathElement.CanTurnLeft/CanTurnRight(facing)` on the nearest element, `is_turn` = `PathElement.IsTurn()`
-  — all cached on the main thread in the Update hook (verified flipping correctly at corners/T-junctions).
-- **Actions (port 9998):** one byte per action, **over a single PERSISTENT connection**.
-  `0`=StrafeLeft `1`=StrafeRight `2`=Jump `3`=Slide `4`=TurnLeft `5`=TurnRight `6`=NoOp
-  `7`=RestartGame (logic-only, leaves run in limbo) `8`=RunAgainClicked (start from the **game-over** screen)
-  `9`=OnPlayClicked (start from the **main menu**, "JOUER"). `reset()` sends **8 then 9** — each is gated
-  gadget-side to a no-op on the wrong screen, so a run starts from whichever screen the phone is on.
-- **Hooks:** `GameController.Start` (force IsTutorialMode=false @0x104, TutorialID=999 @0x48);
-  `PlayerPrefs.GetInt` (return 999 for key `"TR Tutorial"`); `GameController.Update` (capture instance,
-  sample run velocity, drain action queue on main thread, one-shot max-upgrades);
-  `DeserializeRecordManager` onLeave (max upgrades at load). All 6 actions + the full
-  read→act→respond→RestartGame→new-run loop are verified on the device.
-
----
-
-## 5. Key offsets / RVAs (this build only — re-dump if APK changes)
-
-All from `dump.cs`. Field = instance byte offset; RVA = offset added to `libil2cpp.so` base.
-
-**CharacterPlayer (instance):** IsDead `0xD8`, IsJumping `0xF8`, IsSliding `0x100`, IsOnGround `0x130`,
-IsStumbling `0x10C`, IsStrafing `0x125`, HasInvincibility `0x154`, HasAngelWings `0x161`, HasVacuum `0x16C`,
-HasBoost `0x174`, IsMegaBoost `0x175`, Score `0x138`, Velocity(Vec3) `0x34`, Facing(PathDirection, from
-CommonPlayer) `0x78`, GameOverInterface(EndGameUI*) `0x1A0`.
-
-**GameController (instance):** TutorialID `0x48`, GamePlayer `0x70`, IsGameOver `0xDE`,
-IsTutorialMode `0x104`, NearestElement(PathElement*) `0x88`, RecordManager `0xB0`.
-
-**PathElement (instance):** Type `0x30`, Level `0x34`, Obstacles(enum) `0x38`; directional neighbors
-PathNorth `0x50` / PathEast `0x58` / PathWest `0x60` / PathSouth `0x68`
-(must_jump = Obstacles∈{1 hole,4 treeJump}; must_slide = {5 treeSlide,6 flameTower}).
-**PathDirection enum:** None 0, North 1, East 2, South 3, West 4 (= `CharacterPlayer.Facing`).
-
-**RVAs:** Start `0x1269CE8`, Update `0x126C60C`, RestartGame `0x126B5B8`,
-EndGameUI.RunAgainClicked `0x12BCCF0`, MainMenu.Update `0x12C94C8`, MainMenu.OnPlayClicked `0x12CA204`
-(MainMenu is a singleton: static `Instance` @ field 0x0; we capture the instance in MainMenu.Update),
-GetRunVelocity `0x12982D8`, Jump `0x1297B80`, Slide `0x1298768`,
-StrafeLeft `0x1298874`, StrafeRight `0x1298908`, TurnLeft `0x129899C`, TurnRight `0x1298A14`,
-DeserializeRecordManager `0x128AF58`, SerializeRecordManager `0x128BDC8`,
-SetPlayerLevelForUpgradeType `0x128D7BC`, GetPlayerLevelForUpgradeType `0x128D568`,
-GetStoreItemMaxLevel `0x128E5D8`, PlayerPrefs.GetInt(string,int) `0x24B37B8`
-(Il2CppString: len@0x10, UTF-16 chars@0x14),
-PathElement.CanTurnLeft(dir) `0x12E2E88`, CanTurnRight(dir) `0x12E2F44`, IsTurn() `0x12E28B0`.
-
-**StoreItemType (upgrade indices):** AngelWings 0, HeadStart 1, HeadStartMega 2, Vacuum 5,
-Invincibility 6, CoinBonus 7, CoinValue 8, Boost 9. Leveled ones (have a max>0): 5,6,7,8,9.
-Maxed to: Vacuum/Invincibility/CoinBonus/Boost = 8, CoinValue = 5. (0/1/2 are consumable counts, max 0.)
-
----
-
-## 6. Gotchas (cost real debugging — keep these in mind)
-
-- **MIUI/HyperOS blocks `adb install`** (`INSTALL_FAILED_USER_RESTRICTED`) and **`adb input`**
-  (`SecurityException: INJECT_EVENTS`) unless "Install via USB" / "USB debugging (Security settings)"
-  are enabled (needs Mi-account sign-in). **Workarounds:** install the merged APK by tapping it in the
-  Files app; **never needs `adb input`** because actions are in-process Frida calls (this is the whole point).
-- **Screen sleep freezes everything → crashes training.** When the phone's display sleeps, Unity
-  pauses (`onApplicationPause`) → `GameController.Update` stops ticking → the state stream stops
-  broadcasting. The env's next `step()` times out on its ~3 s frame-wait and the `SubprocVecEnv` worker
-  dies, taking the whole run down (`EOFError` in the parent). Worse, HyperOS may then **kill+relaunch**
-  the app, which drops the injected JS agent (the embedded gadget reloads on 27042 but our
-  `temple_run_hook.js` is gone) — recover by re-running `setup_device.py` for that device.
-  **Fix (now automatic in `setup_device.py`, `keep_awake()`):** `svc power stayon true` works on
-  permissive ROMs (older MIUI/Android 9) but **silently no-ops on strict HyperOS**, which also denies the
-  secure `stay_on_while_plugged_in` write (`WRITE_SECURE_SETTINGS` revoked from shell). The path that
-  actually sticks there: `appops set com.android.shell android:write_settings allow` then
-  `settings put system screen_off_timeout 2147483647` (~25 days). `adb input keyevent WAKEUP` is blocked
-  (INJECT_EVENTS), so an already-asleep screen needs a physical tap; the timeout fix prevents recurrence.
-  **Resilience layer (so one phone's hiccup doesn't kill a multi-hour run):** `StateClient` auto-reconnects
-  + `ActionClient` retries through a gap + the env waits up to `freeze_timeout` (90 s) → a transient
-  freeze *pauses* the worker instead of crashing `SubprocVecEnv`. `scripts/watchdog.py` runs alongside
-  training and self-heals silent devices (keep-awake → `am start` → re-inject on app restart). A phone
-  parked on the **main menu** is now recovered by `reset()` itself — byte 9 (`MainMenu.OnPlayClicked`,
-  "JOUER") starts a run from the menu (the menu's background runner keeps `GameController.Update` ticking,
-  so the byte-9 action still dispatches; verified live). Still **not** auto-healable: a fully hung Unity
-  (no ticking `GameController` at all) — needs a physical tap / app relaunch.
-- **Actions need ONE persistent socket to 9998.** Per-action connect/close races the reader on close —
-  only the first byte arrives. The server accept loop must be `async while(true){ await accept() }`
-  (the recursive-accept pattern wedged after the first connection).
-- **Restart:** `RestartGame()` (byte 7) only resets game logic and leaves the run in **game-over LIMBO**
-  — the player is never placed on the track, so it never scores or dies (verified: a NoOp rollout stays
-  at score 0, `ground=0`, `path_type=-1`). The real restart is **`EndGameUI.RunAgainClicked()`** (byte 8),
-  reached via `CharacterPlayer.GameOverInterface` @ `0x1A0` — it starts a real, progressing run (~7-frame
-  UI-transition first). **`env.reset()` sends byte 8 then byte 9** (`MainMenu.OnPlayClicked`) so it starts
-  a run from the game-over screen OR the main menu — the latter recovers from the **interstitial ad** that
-  occasionally drops the game back to the menu after a run (this used to stall the reset; now self-heals,
-  verified live). A genuinely blocking full-screen ad with no menu underneath still can't be tapped via adb
-  on MIUI — future: suppress it at the source (`EndGameUI`/ads hook).
-- An **un-steered run dies in ~2 s** (hits the first obstacle). To demo/inject an action, keep the
-  character alive and inject reactively.
-- **Gadget `console.log` is flaky** over the remote channel — use Frida `send()` for diagnostics
-  (`gadget_inject.py` prints `type:'send'` as `DBG:`).
-- The upgrade-max only auto-ran via the `DeserializeRecordManager` startup hook; since we inject after
-  startup, it's now also triggered **once from the `Update` hook** (main thread) via `GameController.RecordManager`.
-- **Git Bash:** Windows Python doesn't share bash `/tmp` → use `cygpath -w`; quote device paths with
-  `MSYS_NO_PATHCONV=1`.
-
----
-
-## 7. Files & tool paths
-
-After the repo reorg, source lives in subfolders (the big artifacts below stay at root, git-ignored):
-
-| File | Purpose |
-|---|---|
-| `frida/temple_run_hook.js` | Frida agent: hooks, state server (9999), action server (9998), upgrade-max |
-| `frida/gadget_inject.py` | connect to gadget @27042 and load the agent |
-| `frida/inject.py` | same, but attach by pid (for a rooted/frida-server target) |
-| `frida/diag.js` | one-shot module/arch diagnostic |
-| `tools/build_gadget_apk.py` | merge splits + LIEF DT_NEEDED + add gadget → unsigned patched APK |
-| `src/templerun_rl/` | the Gymnasium env (`env.py`, `client.py`, `obs.py`, `constants.py`) |
-| `scripts/` | `setup_device.py`, `train.py`, `evaluate.py`, `smoke_test.py` |
-| `docs/` | `SETUP.md`, `GADGET.md`, `OFFSETS.md` |
-| `TempleRun-gadget.apk` | the installable gadget build (git-ignored) |
-| `il2cpp_work/output/dump.cs` | full IL2CPP signature dump, source of all offsets (git-ignored) |
-
-- **Android SDK:** `D:\Users\AppData\Local` (cmdline-tools installed manually under `cmdline-tools\latest`).
-- **JDK:** `D:\Logiciel\Android Studio\jbr` (no system Java). **Python:** `G:\python312\python.exe`.
-- **Frida:** 17.14.0. Build-tools: `D:\Users\AppData\Local\build-tools\37.0.0` (apksigner/zipalign).
-- arm64 `frida-server` and `frida-gadget` are pulled from `github.com/frida/frida/releases/<ver>`.
-
----
-
-## 8. Status
-
-**Fully validated end-to-end on the Redmi (zero `adb input` — all in-process Frida calls):**
-- 19-field state stream on 9999.
-- All 6 actions confirmed: Jump/Slide/StrafeLeft/StrafeRight via their state flags, TurnLeft/TurnRight
-  via `facing` change (note: forcing a turn mid-path kills the run — turns only make sense at junctions).
-- Full loop: read state → Jump (response) → reset → fresh run. NB: in the env, reset uses **byte 8
-  (RunAgainClicked)** — byte 7 (RestartGame) only resets logic and leaves the run in limbo (see §6/§9).
-- All leveled upgrades maxed (8/8/8/5/8) and persisted to disk.
-- Tutorial neutralized (Start patch + PlayerPrefs `"TR Tutorial"`→999).
-
-**Built (this repo):** the Gymnasium env `TempleRun-v0` (`src/templerun_rl/`) wrapping the two sockets
-(Box(18) obs, Discrete(7) actions, score-delta reward, **RunAgainClicked/byte-8 reset** — RestartGame
-alone leaves the run in limbo), plus SB3 PPO `scripts/train.py` / `scripts/evaluate.py` /
-`scripts/smoke_test.py`, packaging, and docs. Smoke-tested live (50 random steps → reward, deaths,
-fresh resets). See `README.md`.
-
-Possible next steps: robust reset that suppresses the occasional interstitial ad in `EndGameUI`;
-richer observation (one-hot enums, a `valid` flag for the -1 sentinels); off-policy algo (DQN/QR-DQN)
-or frame-stacking for sample efficiency; investigate device-0 (HyperOS) crashing under training load.
-
-### Multi-phone training + resume (current operational setup)
-- **Two phones** (USB serials — same on any host): `nzqwrkbyfeey89fa` (Redmi Note 11, HyperOS/Android 14,
-  device-index 0) and `3f80a3a` (Redmi Note 7, Android 9, device-index 1). Host ports per device =
-  base + index*100 (`device_ports(i)`): dev0 = 27042/9999/9998, dev1 = 27142/10099/10098.
-- **Bring up + train (each line its own terminal; leave running):**
-  ```bash
-  python scripts/setup_device.py --serial nzqwrkbyfeey89fa --device-index 0
-  python scripts/setup_device.py --serial 3f80a3a          --device-index 1
-  python scripts/watchdog.py --serials nzqwrkbyfeey89fa,3f80a3a     # self-heal crashes/sleep
-  python scripts/train.py --resume runs/ppo_templerun_final.zip --num-envs 2 \
-    --grow-episode-steps --no-progress-bar --checkpoint-freq 1000 \
-    --action-cost 0.03 --reaction-bonus 0.1                          # shaping: curb thrashing + reward correct reactions
-  ```
-- **Weights/logs live in `runs/` and are git-ignored** — copy that folder between machines to keep/resume a
-  model (`ppo_templerun_final.zip` is written on every exit incl. crashes). A clone has no weights until you do.
-- **CPU + phone-I/O bound** (GPU unused — torch is CPU-only here); a low-power host is fine. The phones are
-  the throughput ceiling (~10 Hz each).
-- Last known good: ~20–26k steps, `ep_len_mean` ~40–50 and rising, `ep_rew_mean` ~8–9 (pre-shaping).
-
----
-
-## 9. The RL environment (`TempleRun-v0`)
-
-`src/templerun_rl/` wraps the two sockets as a Gymnasium env (`gym.make("TempleRun-v0")`). **One physical
-phone = one env**, real-time ~10 Hz, no simulator. Parallelism = more phones (`--num-envs N` →
-`SubprocVecEnv`, see §8). Defaults live in `constants.py`;
-encoding in `obs.py`; the env in `env.py`.
-
-### Observation — `Box(0.0, 1.0, (21,), float32)`
-21 features, all normalized to [0,1] by `state_to_obs()`. The **raw 22-field state dict is always in
-`info["raw_state"]`**. Raw `score` is **excluded** from the obs (unbounded/accumulating → it drives the
-reward instead).
-
-| idx | feature | transform |
-|---|---|---|
-| 0–16 | the 17 bool flags | `float(bool)` → 0/1 — is_dead, is_jumping, is_sliding, is_on_ground, is_stumbling, has_invincibility, has_angel_wings, has_vacuum, has_boost, is_mega_boost, is_strafing, must_jump, must_slide, is_game_over, **can_turn_left, can_turn_right, is_turn** |
-| 17 | velocity | `clip((v-100)/120, 0, 1)`  (VEL_MIN 100, VEL_MAX 220) |
-| 18 | path_type | `0 if <0 else clip(pt,0,37)/37` |
-| 19 | path_level | `0 if <0 else clip(pl,0,4)/4` |
-| 20 | facing | `0 if <0 else clip(fc,0,4)/4`  (PathDirection N=1..W=4) |
-
-The `-1` "none" sentinel on the three enums maps to `0.0` (aliases real value 0 at junction edges —
-acceptable for v0; a `valid` companion flag is the documented future tweak).
-
-### Action — `Discrete(7)`
-Policy emits **0–6**: `0` StrafeLeft · `1` StrafeRight · `2` Jump · `3` Slide · `4` TurnLeft · `5` TurnRight ·
-`6` NoOp. Bytes `7`/`8`/`9` are **reset-only** (never sampled by the policy): `7` RestartGame (limbo),
-`8` RunAgainClicked (game-over restart), `9` OnPlayClicked (main-menu start). `reset()` sends 8 then 9.
-The env raises if asked to `step()` an action ≥ 7.
-
-### Reward
-```
-reward = (score - prev_score) * reward_scale          # per step
-if terminated (is_dead or is_game_over): reward -= death_penalty
-```
-Defaults `reward_scale = 0.01`, `death_penalty = 1.0`. Empirically: a typical alive step ≈ **+0.27**
-(~27 score/step at run start), coin/boost pickups give larger jumps (e.g. +0.5–1.6), and the terminal
-step is ≈ **−1**. `prev_score` is set from the reset frame (~162), so the first delta is well-behaved.
-
-### Episode / step mechanics
-- **`reset()`** — send byte 8 (RunAgainClicked, from game-over) **then** byte 9 (OnPlayClicked, from the
-  menu); only the one matching the current screen fires (each is gated gadget-side). Poll until the player
-  is actually on the track (`is_on_ground or path_type ≥ 0`) for `reset_settle_steps` (3) consecutive
-  frames within `reset_timeout` (5 s), with one retry; returns a *started* run (skips the UI-transition
-  limbo). This makes reset robust to the game landing on the main menu (e.g. after an interstitial ad).
-- **`step(a)`** — send the action byte on the persistent socket; wait one control tick (`step_dt` 0.1 s,
-  reading the newest frame *after* the action — never stale); `terminated = is_dead or is_game_over`;
-  `truncated` at `max_episode_steps` (1000).
-- **Adaptive episode cap (opt-in, default off):** `max_episode_steps` is a *ceiling*, not the usual run
-  end — almost every episode `terminated`s by death first, so the cap is unreached early on. With
-  `grow_episode_steps=True` the env **ratchets** the cap up — only on a *pure truncation* (alive at the
-  limit, `truncated and not terminated`), multiplying by `max_episode_steps_growth` (1.5) up to
-  `max_episode_steps_ceiling` (6000 ≈ 10 min). Never shrinks (incl. on death). Rationale: surviving the
-  cap proves the agent can play that long, so unlock more of the *faster* late game (the runner keeps
-  accelerating) instead of clipping the best runs. Growth is surfaced in `info["episode_cap_grew_to"]`;
-  `info["max_episode_steps"]` carries the current cap every step. `_grow_episode_cap()` does the bump.
-- **Tunable ctor args:** `step_dt, max_episode_steps, reward_scale, death_penalty, reset_settle_steps,
-  reset_timeout, connect_timeout, grow_episode_steps, max_episode_steps_growth,
-  max_episode_steps_ceiling, auto_connect` (+ `host`/ports). `train.py` exposes
-  `--grow-episode-steps`/`--max-episode-steps-growth`/`--max-episode-steps-ceiling`.
-- **Connection layer (`client.py`):** `StateClient` reader thread keeps only the latest frame (`seq`
-  counter); `ActionClient` holds one persistent `TCP_NODELAY` socket.
+**WHERE WE ARE (2026-07-06 dawn) — FLOOR SMASHED via obs freshness (hook 16t):**
+- **16s diag (turn-write verdicts) closed the junction case:** misses = DEAD-LETTER writes (flag written,
+  game's consume deadline live-cp ~0.67, pipeline med 0.21cp/tail 0.40) — policy decisions were perfect
+  all along. **16t = 30 Hz state broadcast (control stays 10 Hz, env drains to newest)** → sampling age
+  50→17ms → dead letters gone for EVERY model, no retrain.
+- **Fresh-phone @16t: v34@2M median 2863 best 4525, junctions 1/254 | v14 median 2833 best 6399
+  (ALL-TIME), junctions 3/255, crevasses 44/46.** Obs freshness = the dominant lift (+40% median both);
+  v34's trained rules = cleaner junctions.
+- **DEPLOY (2026-07-06 latest) = v36@2M + hook 16u/16t** (`runs/ppo_best.zip`, obs30, 30Hz): device
+  **median 2642, BEST 7040 m — NEW ALL-TIME RECORD** (beats v14's 6399), junctions 1/303, crevasses
+  45/46. v36 = v34 self-warm-start + the USER-OBSERVED STACKED-obstacle blindspot (`compound_prob 0.12`:
+  narrow-A → jump-barrier → narrow-B-opposite, needs a mid-air/pre-swing). Offline: compound v210 7/50
+  vs v34 28/50, standard cfg 4/40 = v34 (ZERO regression). First strict improvement of the session —
+  new skill, no cost. Record run archived `captures/best_run_7040m_v36_hook16u.jsonl`. v34@2863 = prior.
+- **Remaining walls to 10k (v36 death mix): LOW-SPEED holes 600-1000m (multi-hole jump RHYTHM — v34/v36
+  survive 4-cell chains @v205 with staggered jumps but the low-speed rhythm is fragile), NARROWS-AT-SPEED
+  (the policy RELEASES the strafe-hold on the LAST strip cell when narrow_target_lane→None → drifts off
+  the inner edge @v205; next lever = current-narrow-lane obs / hold-through-last-cell), trees.** Settled:
+  single 2-cell FLAT holes are FORGIVING on device (probe 10/10, no sim change). Sim recalib note: gate
+  0.56 ≈ deadline 0.67 − 30Hz pipeline 0.10; jump_exec_lat 1±1 slightly over-modeled (fresher obs).
+- NN decides all actions. Branch `sim-calibration` (safe to merge; `runs/*.zip`+MODELS.md gitignored).

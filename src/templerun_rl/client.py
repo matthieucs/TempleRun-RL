@@ -43,15 +43,18 @@ class StateClient:
         self._last_recv = 0.0
         self._running = False
 
-    def connect(self) -> "StateClient":
-        # Fail fast on the *first* connect (clear error if ports aren't forwarded); after
-        # that the reader thread reconnects on its own so a phone hiccup / app relaunch /
-        # gadget re-injection doesn't kill the stream — it just resumes when frames return.
+    def connect(self, required: bool = True) -> "StateClient":
+        # With required=True, fail fast on the first connect (clear error if ports aren't
+        # forwarded). With required=False (resilient training), tolerate a phone that's down
+        # at startup: start the reader thread with no socket — it reconnects on its own when
+        # frames return, so the env runs DEGRADED instead of crashing the SubprocVecEnv worker.
         try:
             self._sock = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
+            self._sock.settimeout(None)
         except OSError as e:
-            raise _conn_error(self.host, self.port, "state stream") from e
-        self._sock.settimeout(None)
+            if required:
+                raise _conn_error(self.host, self.port, "state stream") from e
+            self._sock = None
         self._running = True
         self._thread = threading.Thread(target=self._reader, name="StateReader", daemon=True)
         self._thread.start()
@@ -159,9 +162,29 @@ class ActionClient:
         self.retry_backoff = retry_backoff
         self._sock: Optional[socket.socket] = None
 
-    def connect(self) -> "ActionClient":
-        self._sock = self._open()
+    def connect(self, required: bool = True) -> "ActionClient":
+        # required=False tolerates a phone down at startup (send() reopens later); see StateClient.
+        try:
+            self._sock = self._open()
+        except (OSError, RuntimeError):
+            if required:
+                raise
+            self._sock = None
         return self
+
+    def try_send(self, action: int) -> bool:
+        """One non-blocking attempt to send (no 30s retry loop). Returns True on success.
+
+        For the degraded/recovery path where blocking would stall the lockstep vec-env.
+        """
+        try:
+            if self._sock is None:
+                self._sock = self._open()
+            self._sock.sendall(bytes([int(action)]))
+            return True
+        except (OSError, RuntimeError):
+            self._drop()
+            return False
 
     def _open(self) -> socket.socket:
         try:
