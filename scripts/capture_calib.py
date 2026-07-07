@@ -48,7 +48,12 @@ LOG_FIELDS = (
     "next_path_level", "next2_path_level",   # [PROBE 16q] upcoming-cell Level readability (direction fix)
     "turn_write", "should_turn_left", "should_turn_right",  # [16s] turn-byte verdict + GI readback
     "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
+    "is_stumbling",              # [16x] LIVE hit state (IsStumbling 0x10C) — precise hit/slowdown detect
     "vel_x", "vel_y", "vel_z",   # [16x] Velocity Vec3 arc ground-truth (vel_y = vertical jump arc)
+    # [16y] precise hit + arc ground-truth (source-verified). time_since_stumble==0 = exact clip frame;
+    # world_y - ground_height = jump height above track; is_falling = came-up-short before a Fall.
+    "time_since_stumble", "stumble_duration", "stumble_kill_vel_pct",
+    "is_falling", "time_since_fall", "death_run_velocity", "world_y",
     # --- Region2D narrow-band probe (hook 15c): game-polygon safe band of the upcoming narrow ---
     "narrow_band_lo", "narrow_band_hi", "on_region", "_hv",
 )

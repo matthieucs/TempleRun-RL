@@ -189,7 +189,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'clean-16x'; // 16x = + Velocity Vec3 (vel_x/y/z) arc ground-truth (pure read). 16t = 30 Hz state broadcast (obs freshness; control stays 10 Hz host-side) + 16s turn-write diag
+const HOOK_VERSION = 'clean-16y'; // 16y = + precise hit/arc ground-truth (time_since_stumble/stumble_duration/stumble_kill_vel_pct/is_falling/time_since_fall/death_run_velocity/world_y). 16x = + Velocity Vec3 (vel_x/y/z). 16t = 30 Hz state broadcast + 16s turn-write diag
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -1094,6 +1094,18 @@ function snapshot() {
     s.vel_x = readF32(cp, 0x34);
     s.vel_y = readF32(cp, 0x38);
     s.vel_z = readF32(cp, 0x3C);
+    // --- PRECISE HIT/ARC GROUND-TRUTH (16y, source-verified via dump.cs): the game surfaces every
+    // non-fatal clip as a STUMBLE (velocity *= StumbleSlowDownPercent 0.85 for StumbleDuration). We were
+    // inferring hits from velocity drops; these read the EXPLICIT state. world_y = CommonPlayer.
+    // PreviousLocation.y @0x80 (last-frame world-Y) -> world_y - ground_height = jump height above track
+    // = exact arc. is_falling/time_since_fall = the come-up-short phase BEFORE a Fall death. ---
+    s.time_since_stumble = readF32(cp, 0x114);   // ==0 on the exact clip frame (precise hit onset)
+    s.stumble_duration = readF32(cp, 0x118);     // how long the slow lasts (recovery window)
+    s.stumble_kill_vel_pct = readF32(cp, 0x120); // velocity fraction the stumble strips (ground-truth)
+    s.is_falling = readBool(cp, 0xF0);           // descending with no landing (fell short of far edge)
+    s.time_since_fall = readF32(cp, 0xF4);       // timer accumulating toward the fatal Fall
+    s.death_run_velocity = readF32(cp, 0xE8);    // velocity at the instant of death (forensics)
+    s.world_y = readF32(cp, 0x80);               // CommonPlayer.PreviousLocation.y = arc height source
     // --- PROBE: CharacterPlayer fields (pure reads) ---
     s.player_x_offset = readF32(cp, OFF.PlayerXOffset);   // the game's own lateral offset (candidate real lane)
     s.is_over_ground = readBool(cp, OFF.IsOverGround);

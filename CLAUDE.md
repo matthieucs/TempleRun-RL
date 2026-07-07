@@ -281,6 +281,34 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   train_fast.py, eval_ckpt_torch.py, trajectory_diff.py; modified: sim_env.py (stepup_clip_band),
   obs/constants unchanged. Weights runs/*.zip gitignored (v41-v46, v36_256, v43_512 all local-only).
 
+## ★ 2026-07-07 — SOURCE-DIG + PRECISE INSTRUMENTATION (hook 16y): the crevasse graze DECODED
+- **Method shift (user-directed): mine the game SOURCE (`il2cpp_work/output/dump.cs`) with parallel agents +
+  add the MISSING state variables to the hook, instead of the slow train→fail→guess loop.** Bodies are
+  native, but fields/signatures/enums/cross-refs are readable. 3 agents mapped: (1) the STUMBLE mechanic,
+  (2) crevasse/ledge collision, (3) missing hook vars.
+- **THE GAME HAS NO SEPARATE GRAZE — every non-fatal hit IS a Stumble** (`CharacterPlayer.Stumble`,
+  velocity ×= `StumbleSlowDownPercent` **0.85** for `StumbleDuration`, escalates to Kill via
+  `StumbleKillTimer`/`StumbleKillVelocityPercent` — device-read **stumble_kill_vel_pct = 0.65**). Matches
+  the sim's ×0.85. The crevasse "graze" reuses Stumble. `IsGroundHeightChangeHigher` = the step-UP flag.
+- **HOOK 16y adds the variables we lacked (the user's point — recordings missed key state):**
+  `time_since_stumble` (==0 at the exact clip frame — PRECISE hit onset), `stumble_duration`,
+  `stumble_kill_vel_pct`, `is_falling`+`time_since_fall` (came-up-short BEFORE a Fall), `death_run_velocity`,
+  and **`world_y`** = `CommonPlayer.PreviousLocation.y` @0x80 (last-frame world-Y — `world_y - ground_height`
+  = jump height above track = EXACT arc, cheap field read). capture_calib logs them all now.
+  (Doc-bug found: CLAUDE.md's old "JumpVelocity 0x80/GroundHeight 0x88 (CharacterPlayer)" are the ENEMY
+  class; the player has NO JumpVelocity, real GroundHeight=0x134, and 0x80=PreviousLocation.y.)
+- **★ THE VELOCITY-DROP HIT HEURISTIC WAS WRONG (over-counting).** Precise `is_stumbling` on v47 (16y,
+  42 crevasses / 6 clean eps): the "57% mid→high step-up graze" from the −5% velocity heuristic was
+  FALSE POSITIVES — step-up caps grazed 0/7 with 0 velocity drop. **The REAL grazes are on HIGH-GROUND
+  (path_level 3, raised cap ground_height 15) crevasse caps: 32% (6/19); mid (lvl2) caps 0% (0/23).**
+  Rule (device-exact): **graze fires iff `world_y < ground_height` at the cap entry** (arc DESCENDED below
+  the raised cap top) — grazes arc_h@entry median −0.6, cleans +3.1 (lvl3) / +4.2 (lvl2). The ×0.85
+  slowdown is CHRONIC (v47 grazes 32% of high-ground caps, recovers each time) — the sim keeps full speed
+  → sim optimistic on high ground. This is "high-high crevasses" the user saw; NOT a step-up problem, and
+  crevasse_apex_all's uniform apply was mis-aimed. **NEXT: model the high-ground cap graze as a Stumble
+  when the sim's arc height at the cap < cap top, calibrated to ~32% for a v47-like policy (level 3 caps
+  only); re-verify with a fresh-phone 16y capture; retrain ISOLATED (v47 + this one fix).**
+
 ## STATUS — what worked / what failed / where we are
 
 **WORKED (device-verified):**
