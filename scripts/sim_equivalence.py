@@ -78,6 +78,19 @@ def scenario_tracks() -> dict:
                                  cell(type=35, obstacles=7, wide_gap=True, level=1)] + S(8)
     t["narrow_r"] = S(4) + [cell(type=22, narrow_lane=1)] * 3 + S(4) \
                     + [cell(type=19, narrow_lane=-1)] * 2 + S(4)
+    # jump->slide compound (device death @4991/3916): crevasse -> 1 clear cell -> a slide obstacle within
+    # the jump airtime. Locks the airborne-at-slide death-resolution parity for the jump->slide layout.
+    t["jumpslide"] = S(6) + [cell(type=35, obstacles=7, wide_gap=True, level=3),
+                             cell(type=35, obstacles=7, wide_gap=True, stepup=True, level=3)] \
+                     + S(1) + [cell(type=1, obstacles=5)] + S(6)
+    t["jumpslide_flame"] = S(6) + [cell(type=12, obstacles=1, wide_gap=True),
+                                   cell(type=12, obstacles=1, wide_gap=True)] \
+                           + S(1) + [cell(type=31, obstacles=6)] + S(6)
+    # jump->strafe (device death @5148/3281/2793): long-hole -> 1 clear -> a side-narrow strip; the runner
+    # must strafe into the lane during/after the jump. Locks the narrow-fall death-resolution parity.
+    t["jumpnarrow"] = S(6) + [cell(type=12, obstacles=1, wide_gap=True),
+                              cell(type=12, obstacles=1, wide_gap=True)] \
+                      + S(1) + [cell(type=19, narrow_lane=-1)] * 2 + S(6)
     t["junction_l"] = S(5) + [cell(type=3, is_turn=True, can_turn_left=True)] + S(8)
     t["junction_r"] = S(5) + [cell(type=3, is_turn=True, can_turn_right=True)] + S(8)
     t["junction_t"] = S(5) + [cell(type=7, is_turn=True, can_turn_left=True,

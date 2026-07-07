@@ -108,6 +108,27 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "compound_land_cells": 2,           # clear cells after the barrier before narrow B (best oracle
                                         # survival 16-17/40 vs 12 @1 / 11 @3 — 2 gives room for the
                                         # A->B mid-air/pre-swing to land on strip B)
+    # JUMP->SLIDE compound [DEVICE DEATH 2026-07-07, v51 dt=3 @4991/3916]: a SLIDE obstacle placed a
+    # few clear cells after a WIDE-GAP (crevasse/long-hole), WITHIN the jump's ~0.8s airtime -> the
+    # crevasse jump lands the runner still AIRBORNE at the slide -> can't slide -> dt=3/5. The sim never
+    # stacked jump->slide (min_space forces a clear gap after every wide-gap) so v51 never learned the
+    # jump-early-land-then-slide timing (offline death mix = 0 dt=3). Model it as a post-gap tail that
+    # bypasses min_space. 0 default (rng gated on prob>0 FIRST -> track stream / equivalence unchanged);
+    # train ~0.15. The policy must jump the gap EARLY (land before the slide) + not re-jump.
+    "jumpslide_prob": 0.0,              # P(a wide-gap is followed by a close slide obstacle)
+    "jumpslide_after_distance": 300.0,  # only past this (slides need slides_after_distance anyway)
+    "jumpslide_gap_cells": 1,           # clear cells between the wide-gap end and the slide (tighter = harder)
+    "jumpslide_flame_frac": 0.5,        # fraction of jump->slide tails that are FlameTower(6) vs TreeSlide(5)
+    # JUMP->STRAFE compound [DEVICE DEATH 2026-07-07, USER-observed + v51/v53 narrow deaths @5148/3281/2793]:
+    # a SIDE-NARROW (needs lane +/-1) placed a few clear cells after a WIDE-GAP -> the runner must STRAFE
+    # into the narrow's lane DURING/right after the jump. The policy commits the strafe too LATE (cp~0.9)
+    # -> the analog-tilt lateral can't reach the lane before landing -> falls off the narrow. The sim never
+    # stacked jump->narrow (min_space) so the policy never learned to strafe EARLY after a jump. Same shape
+    # as jumpslide: place a narrow tail after the wide-gap (bypasses min_space). 0 default; train ~0.15.
+    "jumpnarrow_prob": 0.0,             # P(a wide-gap is followed by a close side-narrow strip)
+    "jumpnarrow_after_distance": 300.0, # only past this
+    "jumpnarrow_gap_cells": 1,          # clear cells between the wide-gap end and the narrow
+    "jumpnarrow_strip_cells": 2,        # narrow strip length (fixed, matched CPU<->torch for the tail)
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
@@ -700,6 +721,7 @@ class TempleRunSimEnv(gym.Env):
         self._pending_narrow = 0
         self._pending_narrow_lane = 0
         self._pending_sequence: list[dict] = []   # compound stacked-obstacle queue (user blindspot)
+        self._pending_post_gap: list[dict] = []    # jump->slide tail (slide obstacle after a wide-gap)
         self._pending_narrow_type = 17
         # replay cursor (which injected element feeds the next generated cell)
         self._replay_cursor = 0
@@ -777,6 +799,37 @@ class TempleRunSimEnv(gym.Env):
         self._pending_sequence.extend(seq)
         return lane_a
 
+    def _queue_jumpslide(self, level: int) -> None:
+        """Build a JUMP->SLIDE tail into _pending_post_gap: a few clear cells then a SLIDE obstacle,
+        placed after the current wide-gap so it lands WITHIN the jump's airtime -> the runner must jump
+        the gap EARLY (land before the slide) or die airborne (dt=3/5). Device death @4991/3916.
+        Bypasses min_space (that's the point). Only ever called when jumpslide_prob>0 (rng-gated)."""
+        cfg = self.cfg
+        seq: list[dict] = []
+        for _ in range(max(0, int(cfg.get("jumpslide_gap_cells", 1)))):
+            seq.append(_element(type=int(cfg["path_type_straight"]), level=level, is_turn=False))
+        is_flame = self._rng.random() < float(cfg.get("jumpslide_flame_frac", 0.5))
+        sob = OBST_FLAME_TOWER if is_flame else OBST_TREE_SLIDE
+        spt = 31 if is_flame else int(cfg["path_type_straight"])  # flame = pt31; tree-slide sits on a straight
+        seq.append(_element(type=spt, level=level, obstacles=sob, is_turn=False))
+        self._pending_post_gap.extend(seq)
+
+    def _queue_jumpnarrow(self, level: int) -> None:
+        """Build a JUMP->STRAFE tail into _pending_post_gap: a few clear cells then a SIDE-NARROW strip
+        (lane +/-1) -> the runner must strafe into the narrow's lane during/right after the jump, or fall
+        off (dt=1). Teaches EARLY strafe-after-jump. Device death @5148/3281/2793. Only when prob>0."""
+        cfg = self.cfg
+        seq: list[dict] = []
+        for _ in range(max(0, int(cfg.get("jumpnarrow_gap_cells", 1)))):
+            seq.append(_element(type=int(cfg["path_type_straight"]), level=level, is_turn=False))
+        lane = int(self._rng.choice([-1, 1]))
+        strip = max(1, int(cfg.get("jumpnarrow_strip_cells", 2)))
+        for _ in range(strip):
+            e = _element(type=self._narrow_ptype(lane), level=level, is_turn=False)
+            e["narrow_lane"] = lane
+            seq.append(e)
+        self._pending_post_gap.extend(seq)
+
     @staticmethod
     def _narrow_ptype(lane: int) -> int:
         return 19 if lane == -1 else 22
@@ -809,6 +862,11 @@ class TempleRunSimEnv(gym.Env):
                 e["stepup"] = True
                 self._pending_gap_stepup = False
             return e
+        # JUMP->SLIDE tail: a slide obstacle a few clear cells after a wide-gap (emits AFTER the gap
+        # continuation so the crevasse-jump airtime overlaps the slide -> airborne-at-slide death).
+        if self._pending_post_gap:
+            self._cells_since_obstacle = 0
+            return self._pending_post_gap.pop(0)
         # NARROW-strip continuation: the 2nd+ cell of a multi-cell narrow (same safe lane). Each cell
         # re-applies the off-lane Fall on entry, so the policy must HOLD the safe lane across the strip.
         if self._pending_narrow > 0:
@@ -944,6 +1002,22 @@ class TempleRunSimEnv(gym.Env):
                 self._b2b_obstacles = 0
         elif not is_turn:
             self._b2b_obstacles = 0
+
+        # JUMP->SLIDE / JUMP->STRAFE compounds: if this cell STARTED a wide-gap (crevasse/long-hole),
+        # sometimes place a SLIDE obstacle (jumpslide) OR a side-NARROW (jumpnarrow) a couple clear cells
+        # later -> airborne-at-slide death (@4991/3916) / strafe-too-late narrow fall (@5148/3281/2793). Each
+        # rng gated on its prob>0 FIRST so the default (0) draws NO rng -> stream/equivalence safe. A wide-gap
+        # gets AT MOST one tail (slide rolled first; narrow only if slide didn't fire).
+        queued_tail = False
+        if (wide and float(cfg.get("jumpslide_prob", 0.0)) > 0.0
+                and self._distance_real >= float(cfg.get("jumpslide_after_distance", 0.0))
+                and self._rng.random() < float(cfg.get("jumpslide_prob", 0.0))):
+            self._queue_jumpslide(level)
+            queued_tail = True
+        if (wide and not queued_tail and float(cfg.get("jumpnarrow_prob", 0.0)) > 0.0
+                and self._distance_real >= float(cfg.get("jumpnarrow_after_distance", 0.0))
+                and self._rng.random() < float(cfg.get("jumpnarrow_prob", 0.0))):
+            self._queue_jumpnarrow(level)
 
         # --- coin / bonus cell (gated) --------------------------------------
         is_coin = False

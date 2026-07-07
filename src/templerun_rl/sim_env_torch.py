@@ -201,6 +201,14 @@ class TorchTempleRunVecEnv(VecEnv):
         self.pend_nar = torch.zeros(B, **i64)
         self.pend_nar_lane = torch.zeros(B, **i64)
         self.pend_nar_type = torch.full((B,), 17, **i64)
+        # jump->slide / jump->narrow tail after a wide-gap: counter = clear cells then a PAYLOAD (slide
+        # cell OR a narrow strip). pay = payload length (1=slide, strip=narrow); nlane 0=slide, +/-1=narrow.
+        self.pend_postgap = torch.zeros(B, **i64)
+        self.pend_postgap_obst = torch.zeros(B, **i64)
+        self.pend_postgap_type = torch.ones(B, **i64)
+        self.pend_postgap_level = torch.full((B,), 2, **i64)
+        self.pend_postgap_pay = torch.zeros(B, **i64)
+        self.pend_postgap_nlane = torch.zeros(B, **i64)
 
         # ---- player state ----------------------------------------------------
         self.velocity = torch.full((B,), float(cfg["start_velocity"]), **f32)
@@ -416,6 +424,8 @@ class TorchTempleRunVecEnv(VecEnv):
         self.pend_gap[m] = 0
         self.pend_gap_stepup[m] = False
         self.pend_nar[m] = 0
+        self.pend_postgap[m] = 0
+        self.pend_postgap_pay[m] = 0
         self.q_len[m] = 0
         self.inj_cursor[m] = 0
 
@@ -527,8 +537,28 @@ class TorchTempleRunVecEnv(VecEnv):
             self.pend_gap_stepup = torch.where(last, torch.zeros_like(self.pend_gap_stepup),
                                                self.pend_gap_stepup)
 
+        # 2.5) jump->slide / jump->narrow tail: leading clear cells then a PAYLOAD (slide cell OR narrow
+        # strip), after the wide-gap continuation. counter > pay -> clear; counter <= pay -> payload.
+        srcP = m & ~srcQ & ~srcG & (self.pend_postgap > 0)
+        if bool(srcP.any()):
+            is_clear = srcP & (self.pend_postgap > self.pend_postgap_pay)
+            is_pay = srcP & ~is_clear
+            is_slide = is_pay & (self.pend_postgap_nlane == 0)
+            is_narrow = is_pay & (self.pend_postgap_nlane != 0)
+            o_type = torch.where(is_clear,
+                                 torch.full_like(o_type, int(cfg["path_type_straight"])), o_type)
+            o_type = torch.where(is_slide, self.pend_postgap_type, o_type)
+            o_obst = torch.where(is_slide, self.pend_postgap_obst, o_obst)
+            narrow_pt = torch.where(self.pend_postgap_nlane < 0,
+                                    torch.full_like(o_type, 19), torch.full_like(o_type, 22))
+            o_type = torch.where(is_narrow, narrow_pt, o_type)
+            o_nlane = torch.where(is_narrow, self.pend_postgap_nlane, o_nlane)
+            o_level = torch.where(srcP, self.pend_postgap_level, o_level)
+            self.pend_postgap = torch.where(srcP, self.pend_postgap - 1, self.pend_postgap)
+            self.since_obst = torch.where(srcP, torch.zeros_like(self.since_obst), self.since_obst)
+
         # 3) narrow-strip continuation
-        srcN = m & ~srcQ & ~srcG & (self.pend_nar > 0)
+        srcN = m & ~srcQ & ~srcG & ~srcP & (self.pend_nar > 0)
         if bool(srcN.any()):
             self.pend_nar = torch.where(srcN, self.pend_nar - 1, self.pend_nar)
             self.since_obst = torch.where(srcN, torch.zeros_like(self.since_obst), self.since_obst)
@@ -536,7 +566,7 @@ class TorchTempleRunVecEnv(VecEnv):
             o_level = torch.where(srcN, self.zone_level, o_level)
             o_nlane = torch.where(srcN, self.pend_nar_lane, o_nlane)
 
-        rem = m & ~srcQ & ~srcG & ~srcN
+        rem = m & ~srcQ & ~srcG & ~srcP & ~srcN
         if bool(rem.any()):
             diff = ((self.dist_real - float(cfg["start_distance"]))
                     / max(1.0, float(cfg["ramp_distance"]))).clamp(0.0, 1.0)
@@ -620,6 +650,7 @@ class TorchTempleRunVecEnv(VecEnv):
                 if bool(comp.any()):
                     self._queue_compound(comp, lane_a, o_level, strip)
 
+            holewide = torch.zeros(B, dtype=torch.bool, device=dev)   # long-hole wide-gap START mask
             obs_sel = place & ~nar
             if bool(obs_sel.any()):
                 w = self.obst_w.expand(B, -1).clone()
@@ -640,6 +671,51 @@ class TorchTempleRunVecEnv(VecEnv):
                     self.pend_gap_level = torch.where(holewide, o_level, self.pend_gap_level)
                     self.pend_gap_stepup = torch.where(holewide, torch.zeros_like(self.pend_gap_stepup),
                                                        self.pend_gap_stepup)
+
+            # JUMP->SLIDE / JUMP->STRAFE compounds: after a wide-gap START (crevasse z_ok / long-hole
+            # holewide), sometimes queue a SLIDE tail (jumpslide) or a side-NARROW tail (jumpnarrow) within
+            # the jump airtime -> airborne-at-slide death / strafe-too-late narrow fall. Each rng gated on
+            # its prob>0 FIRST (stream/equiv safe). A wide-gap gets AT MOST one tail (slide rolled first).
+            wide_start0 = (z_ok | holewide)
+            queued = torch.zeros(B, dtype=torch.bool, device=dev)
+            jsp = float(cfg.get("jumpslide_prob", 0.0))
+            if jsp > 0.0:
+                ws = wide_start0 & (self.dist_real >= float(cfg.get("jumpslide_after_distance", 0.0)))
+                js = ws & (self._rand() < jsp)
+                if bool(js.any()):
+                    gap = int(cfg.get("jumpslide_gap_cells", 1))
+                    is_flame = self._rand() < float(cfg.get("jumpslide_flame_frac", 0.5))
+                    sob = torch.where(is_flame, torch.full_like(self.pend_postgap, OBST_FLAME_TOWER),
+                                      torch.full_like(self.pend_postgap, OBST_TREE_SLIDE))
+                    spt = torch.where(is_flame, torch.full_like(self.pend_postgap, 31),
+                                      torch.full_like(self.pend_postgap, int(cfg["path_type_straight"])))
+                    self.pend_postgap = torch.where(js, torch.full_like(self.pend_postgap, gap + 1),
+                                                    self.pend_postgap)
+                    self.pend_postgap_pay = torch.where(js, torch.ones_like(self.pend_postgap_pay),
+                                                        self.pend_postgap_pay)
+                    self.pend_postgap_nlane = torch.where(js, torch.zeros_like(self.pend_postgap_nlane),
+                                                          self.pend_postgap_nlane)
+                    self.pend_postgap_obst = torch.where(js, sob, self.pend_postgap_obst)
+                    self.pend_postgap_type = torch.where(js, spt, self.pend_postgap_type)
+                    self.pend_postgap_level = torch.where(js, o_level, self.pend_postgap_level)
+                    queued = queued | js
+            jnp = float(cfg.get("jumpnarrow_prob", 0.0))
+            if jnp > 0.0:
+                ws = (wide_start0 & ~queued
+                      & (self.dist_real >= float(cfg.get("jumpnarrow_after_distance", 0.0))))
+                jn = ws & (self._rand() < jnp)
+                if bool(jn.any()):
+                    gap = int(cfg.get("jumpnarrow_gap_cells", 1))
+                    strip = max(1, int(cfg.get("jumpnarrow_strip_cells", 2)))
+                    lane = torch.where(self._rand() < 0.5,
+                                       torch.full_like(self.pend_postgap_nlane, -1),
+                                       torch.ones_like(self.pend_postgap_nlane))
+                    self.pend_postgap = torch.where(jn, torch.full_like(self.pend_postgap, gap + strip),
+                                                    self.pend_postgap)
+                    self.pend_postgap_pay = torch.where(jn, torch.full_like(self.pend_postgap_pay, strip),
+                                                        self.pend_postgap_pay)
+                    self.pend_postgap_nlane = torch.where(jn, lane, self.pend_postgap_nlane)
+                    self.pend_postgap_level = torch.where(jn, o_level, self.pend_postgap_level)
 
             # coin
             coin = rem & ~t_ok & (o_obst == OBST_NONE) \

@@ -5,6 +5,33 @@ trained in a headless sim, deployed on a physical Android phone via **Frida** (r
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
 ## ⚡ CURRENT STATE (2026-07-07) — read this first
+- **★ EDGE-CASE ACCUMULATION WAVE 2 (2026-07-07 late): the method is now "enumerate + model the edge cases
+  that kill early" (USER framing: device variance is RUN-GENERATION luck, not thermal — a run dies when it
+  hits an UNMODELLED edge case; the median is capped by how many remain). Edge-case forensic (26 device
+  deaths, `scratchpad/death_edge_cases.py`): CREVASSE strikes EARLIEST (median 610m = #1 median-killer),
+  then HOLE (2080m), NARROW (3037m), JUMP->SLIDE (3916m), TURN dead-letter LATEST (5880m, ends good runs).**
+  - **JUMP->SLIDE fix -> v53** (`ppo_v53_jumpslide_best.zip`, @1.7M): device forensic — a slide obstacle
+    right after a crevasse/long-hole traps the runner AIRBORNE (0.8s jump airtime) -> dt=3/5. Sim never
+    generated it (min_space). NEW `jumpslide_prob` compound (both sims, `_pending_post_gap` tail after the
+    wide-gap, equivalence GREEN). v53 = v51 + jumpslide (isolated). Offline: +30% on jumpslide cfg (dt3/5
+    ELIMINATED), +5.5% standard (NO regression — gap-closing adds don't regress, unlike v52 pressure).
+    Device A/B: v53 med 1764 ~= v51 1979 same-session (TIED, run-luck; no regression). CLEAN, kept.
+  - **JUMP->STRAFE fix -> v54** (`ppo_v54_jumpnarrow_best.zip`, @1.7M): USER-observed + forensic (narrow
+    deaths @5148/3281/2793) — a side-narrow right after a jump-obstacle needs a strafe-into-lane during the
+    jump; policy commits too LATE (cp~0.9) -> analog tilt can't reach the lane -> falls off. Sim never
+    generated jump->narrow. NEW `jumpnarrow_prob` compound (same `_pending_post_gap`, narrow payload;
+    equivalence GREEN 2873/2873; v51 median 2514->1494 with it on = bites). v54 = v53 + jumpnarrow
+    (ACCUMULATE). Offline: BEST on jumpnarrow (2623, +31% vs v51), keeps most jumpslide (2659 vs v53 3061 =
+    mild interference), ~parity standard (2538). v54 = most WELL-ROUNDED (covers both new edge cases).
+  - **NEXT = CREVASSE geometry fix (the #1 killer @610m).** Decoded: step-UP crevasse (lvl2->3) at LOW
+    speed (~v166, the FIRST crevasse ~587m), policy takes off cp0.7-0.9, apexes on the lvl-2 gap cell then
+    DESCENDS onto the lvl-3 raised cap (vel_y -33..-62 at cap entry) -> clips -> dt=4 Ledge. Sim too lenient
+    (lets v51 clear at apex; device cap sits ~0.5 cells LATER in the arc). Fix = shift the sim step-up cap
+    LATER in the arc so v51 clips in-sim like device -> retrain. Device cap arc-height dist measured
+    (median 17.2, tail 3.1-13 = the clips) but the ground_height REFERENCE FRAME is ambiguous (clip is vs
+    the ledge WALL not top) -> needs careful calibration. Config knobs `crevasse_graze_worldy`/`_jump_peak`
+    /`_cap_height_hi`/`_graze_band` already in both sims (fix-A foundation) but were a NO-OP (v51 over-
+    clears) -> the geometry offset is the missing piece.
 - **★★ DEVICE CHAMPION = v51** (`runs/ppo_v51_next2_best.zip`, 256-net **obs60**, hook **16z**): the
   CHAINED-OBSTACLE OBS FIX. Controlled same-session device A/B vs its OWN obs60 baseline (v47 surgery-
   widened, action-identical start — so the ONLY difference is v51's learned use of the 2-ahead obstacle):
