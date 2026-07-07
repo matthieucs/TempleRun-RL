@@ -5,10 +5,84 @@ trained in a headless sim, deployed on a physical Android phone via **Frida** (r
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
 ## ⚡ CURRENT STATE (2026-07-07) — read this first
-- **DEVICE CHAMPION = v47** (`runs/ppo_v47_land_1703936_steps.zip`, 256-net obs58): fresh-phone median
-  **3540 / best 6783** vs v36 3112/4307. First 256-net to beat v36 — the hole landing-model fix
-  (`wide_gap_landing_model`) TRANSFERRED, breaking the offline↔device inversion curse. `runs/ppo_best.zip`
-  (v36) is the safe fallback. Branch `sim-fidelity-holes-crevasse-turn` (committed 2309c7b, pushed).
+- **★★ DEVICE CHAMPION = v51** (`runs/ppo_v51_next2_best.zip`, 256-net **obs60**, hook **16z**): the
+  CHAINED-OBSTACLE OBS FIX. Controlled same-session device A/B vs its OWN obs60 baseline (v47 surgery-
+  widened, action-identical start — so the ONLY difference is v51's learned use of the 2-ahead obstacle):
+  **v51 median 4585 / mean 5214 / max 8763 (n=8) vs v47_obs60 median 2203 (n=6) = +108%, MORE THAN
+  DOUBLE.** Non-overlapping (v51 min 3422 > v47 max 2895); thermal-confound RULED OUT (v51's warmest batch
+  median 5830 > v47's coolest 2586). Death signature shifted as predicted: v47 died on flames+crevasses,
+  **v51 has ZERO flame/crevasse deaths** — now dies 4/8 on the TURN DEAD-LETTER (pt=−1, deliberately left
+  unaddressed). Biggest single-fix device gain of the project; offline→device correlation AMPLIFIED
+  (+11.8% offline → +108% device: the real track has far more chained scenarios than the offline eval).
+  Captures: `captures/ab_v51_r1.jsonl`,`ab_v51_r2.jsonl`,`ab_v47obs60_r1.jsonl`,`ab_v47obs60_r2.jsonl`.
+- **v47** (`runs/ppo_v47_land_1703936_steps.zip`, 256-net obs58) = PRIOR champion / obs58 fallback: fresh-
+  phone median 3540/6783. Now SUPERSEDED by v51 on device, BUT v47 stays the obs58-lineage deploy (needs
+  the PRE-fork obs.py — current code builds obs32/60). `runs/ppo_best.zip` (v36, obs30) = ultimate fallback.
+- **★ FIX (B) CHAINED-OBSTACLE OBS = SHIPPED + DEVICE-VALIDATED → v51 (obs60 FORK). 2026-07-07.** Added
+  `next2_must_jump`/`next2_must_slide` end-to-end (obs 30→32 / full 58→60): obs.py OBS_BOOL_FIELDS idx
+  19/20, both sims' `_snapshot` (nxt2 obst ∈ _MUST_JUMP/_MUST_SLIDE, junction-dropout `not (cell.is_turn
+  or nxt.is_turn)`), hook **16z** (`clean-16z`: reads nxt2 PE_Obstacles in the neighbor walk, same NULL-
+  through-turn dropout), capture_calib. **Equivalence GREEN 2184/2184.** Surgery v47→obs60
+  (`runs/ppo_v47_obs60_next2.zip`, zero cols @19,20, 0/400 action mism). Isolated retrain (ONE change,
+  v47's exact sim cfg, no dense profiles) → v51 best=1.70M. Offline: median 2485 vs baseline 2223 (+11.8%),
+  ablation-proven (zeroing next2 cols → reverts to 2233). Device: +108% (above). Scripts:
+  `scratchpad/surgery_v47_next2obst.py`, `train_v51_next2obs.sh`. UNCOMMITTED (per norm).
+- **TURN FIX v52 = DEVICE-DISPROVEN (2026-07-07).** v51 dies 4/8 on the TURN DEAD-LETTER (pt=−1, at
+  3422-8763m). Tried v51 + `turn_send_lat_frames=0.4` ONLY (isolated 2M warm-start, `ppo_v52_turnlat_best`
+  = @1.00M; parity GREEN at slat=0.4). Offline it looked +20% under matched latency BUT checkpoints were
+  NOISY (bounced 1315-2980, 1.7M collapsed to Tree/Ledge:101). Device (6ep): **median 2274 vs v51 4585 —
+  REGRESSED BY HALF.** Turn deaths DID fall (4/8→1/6) but obstacle deaths EXPLODED (5/6: narrows/holes/
+  straights), variance 1259-5906. **LESSON: v51 is a SHARP optimum; the turn-latency pressure knocked the
+  policy off its obstacle skill (a 5e-5 finetune still moved it too far). USER confirmed live: v52 does
+  redundant post-obstacle jumps + grazes mid→high crevasses almost every time.** Captures: `ab2_v52.jsonl`,
+  `ab2_v51_r1.jsonl` (2 valid: 5147,1930). **v51 REMAINS CHAMPION.** Turn dead-letter now needs a NON-
+  destabilizing fix: gentler lat (0.2), OR — better — a HOOK-SIDE pre-swipe (queue the turn on the approach
+  cell in the gadget, like the native turn-buffer, NO retrain → zero risk to v51's obstacle skill).
+- **★ NEXT DEATH-FIX (device-forensic 2026-07-07, v51 captures): JUMP→SLIDE AIRBORNE DEATH.** v51's 2
+  Slide deaths (dt=3, @4991 pt1 / @3916 pt2) decode to ONE mechanic: a jump-obstacle (crevasse pt35/36 OR
+  long-hole pt15/16) is immediately followed by a SLIDE obstacle — the crevasse jump's fixed ~0.8s airtime
+  (~2.8 cells @v210) overlaps the slide → the runner is STILL AIRBORNE (`is_jumping=1`) when `must_slide`
+  fires → can't slide → dt=3. (The user-observed redundant re-jump near the transition makes it worse.)
+  **SIM GAP CONFIRMED: v51's offline death mix is `{Fall,Tree}` — ZERO dt=3/dt=5. `min_space_between_
+  obstacles` forces a clear gap after every wide-gap, so the sim NEVER generates jump-obstacle→slide → the
+  policy never trains on it → dies on device.** FIX (config-gated, both sims, like the chained-obstacle
+  win = add the missing SCENARIO): a `jumpslide_prob` compound that places a TreeSlide/FlameTower ~1-2 clear
+  cells after a crevasse/long-hole (bypassing min_space), so the policy must learn to jump the gap EARLY
+  (land before the slide) + not re-jump. CPU sim: new `_pending_post_gap` list checked AFTER `_pending_gap`
+  (gap cells emit first, then the slide tail); gate the rng on `jumpslide_prob>0` FIRST (else the extra
+  random() shifts the whole track stream → scorecard/equivalence drift). Torch sim: harder (batched pending
+  sequences) — check `sim_env_torch` gen first. Then isolated retrain from v51 (ONE change) → device A/B.
+  NOTE the v52 lesson: gate HARD on device; v51 is a sharp optimum. (v51 next2_must_slide sees 2 ahead but
+  the slide sits 3-4 cells from the crevasse-jump DECISION → may also want next3 slide lookahead later.)
+- **FIX (A) MID→HIGH CREVASSE GRAZE = IMPLEMENTED but NEEDS GEOMETRY CALIBRATION (deferred 2026-07-07).**
+  `crevasse_graze_worldy` knob added to both sims (jump_peak 19.2, cap 15@lvl≥3/0@lvl<3, arc_y<cap→stumble,
+  <cap−band→kill), equivalence GREEN 2366/2366 (variant `crevasse_graze`). BUT calibration = NO-OP for v51:
+  it clears lvl-3 caps 100% in-sim (arc at full apex 19.2 >> cap 15) while grazing 32% on device (arc at
+  cap entry world_y~14-18, DESCENDING). The gap is the sim's crevasse ARC GEOMETRY (cap sits at v51's apex
+  in-sim, ~0.3-0.5 cells later on device). To make it bite: measure the exact cap-arc offset from
+  `captures/v47_16y_arcs.jsonl` + shift the sim cap so v51 grazes ~32% in-sim, THEN retrain. Deferred —
+  the graze is NON-FATAL (chronic slowdown, not death; user: "does not die") so lower-priority than the
+  jump→slide DEATH. Calib script: `scratchpad/calib_crevasse_graze.py`.
+- **(superseded) FIX (A) MID→HIGH CREVASSE GRAZE — original spec (now see the IMPLEMENTED entry above):** "Transition mid→
+  high is complicated, the policy does NOT die but takes a hit almost every time" = the chronic high-ground
+  cap Stumble (×0.85) I decoded via hook 16y (jump_peak 19.2, cap 15@lvl3, graze iff arc_y<cap_top). v51/
+  v52 share it (neither touched crevasse). Config-gated/safe (default off, equivalence stays green). Since
+  closing a REAL device gap = fuel (chained-obs proved it), this is the highest-value next line — but MIND
+  the v52 lesson: any retrain risks knocking v51 off its optimum, so keep it ONE isolated change + gate hard
+  on device. Also seen: redundant post-obstacle jump-spam (candidate: redundant_action_penalty, but reward-
+  shaping is destabilising — treat carefully).
+- **DEVICE-OPS (this session, 2 recoveries): (1) the injector `gadget_inject.py` self-exits after 3600s
+  (1h) → hook UNLOADS → captures go "device degraded". For long sessions re-inject before it lapses.
+  (2) `adb forward` rules keep getting DROPPED (scrcpy/Coolmuster adb-server thrash) → re-forward with
+  scrcpy's adb + re-inject (see [[device-adb-scrcpy-thrash]] memory). Always verify `_hv` on 9999 with a
+  `settimeout` socket after any device op.**
+- **DEVICE-BOX NOTE (this PC, 2026-07-07): phone 3f80a3a IS on this machine** (frida 17.14.0, app installed
+  + running). adb = **scrcpy's** `D:\téléchargements\scrcpy-win64-v3.3.4\adb.exe` (v1.0.41) — USE ONLY THIS
+  ONE. A stray Coolmuster adb v1.0.36 (`C:\Users\bartb\AppData\Roaming\Coolmuster\adb\1.0.36\adb.exe`)
+  causes a SERVER-VERSION THRASH: whoever starts a server kills the other's + DROPS ALL FORWARDS → severs
+  the frida session (injector process stays alive but hook stops streaming). RULE: keep scrcpy running,
+  don't restart it mid-capture; if forwards drop, re-forward with scrcpy's adb + re-inject (kill old
+  injector PID first). No repo `.venv` — use `python` (= G:/python312, has frida + torch cu126).
 - **Fidelity fixes SHIPPED (all config-gated, equivalence-green, in both sims):** `wide_gap_landing_model`
   (holes, device-verified via v47), `crevasse_apex_all` (device-verified via v48 19%→15%), `turn_send_lat_frames`
   (turn dead-letter, parity 16/16, NOT device-proven in isolation). Regressions: v48/v49/v50 all over-

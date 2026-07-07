@@ -40,6 +40,7 @@ LOG_FIELDS = (
     "is_jumping", "is_sliding", "is_strafing", "is_dead", "is_game_over",
     "is_turn", "next_is_turn", "can_turn_left", "can_turn_right", "must_jump", "must_slide",
     "next_must_jump", "next_must_slide", "next_wide_gap", "narrow_target_lane",
+    "next2_must_jump", "next2_must_slide",   # [16z] 2-ahead obstacle lookahead (chained-obstacle fix)
     # --- Phase-0 PROBE fields (hook obs-probe-12a) ---
     "player_x_offset", "over_turn_area",
     "dist_to_turn", "dist_to_turn_end", "dist_since_turn",

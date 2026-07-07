@@ -325,6 +325,21 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # True, the apex check (+ stepup_clip_band graze->stumble) fires on EVERY crevasse ledge cell. OFF
     # by default (no-op -> equivalence green); enabled in the device-true / training config.
     "crevasse_apex_all": False,
+    # HIGH-GROUND CAP GRAZE — WORLD-Y model [DEVICE-DECODED 2026-07-07, hook 16y source-dig + arcs;
+    # USER-confirmed live 2026-07-07: "mid->high transition, the policy does NOT die but takes a hit almost
+    # every time"]. The mh(0.95)-proxy above is a NORMALISED-height threshold that ignores the cap's actual
+    # world height. The real mechanic: jump peak is a VELOCITY-INDEPENDENT constant ~19.2 world-units
+    # (p25 19.1/p75 19.2, n=186); the raised cap top by level is ground_height = 15 @level-3, 0 @level-2.
+    # The graze (Stumble x0.85, non-fatal, CHRONIC) fires iff the arc height at the cap < cap top; a deep
+    # clip (arc well below the cap) Ledge-kills. Reproduces device 32% graze @lvl3 / 0% @lvl2: a lvl3 cap
+    # (15) sits just under the 19.2 peak so the DESCENDING arc drops below it ~1/3 of takeoff timings; lvl2
+    # caps (0) are always cleared (arc height >= 0 in flight). When ON, this SUPERSEDES the mh-proxy on the
+    # apex cell (and self-extends apex detection to all last-crevasse cells, like crevasse_apex_all). OFF by
+    # default (no-op -> equivalence stays green); enabled in the device-true / training config.
+    "crevasse_graze_worldy": False,
+    "crevasse_jump_peak": 19.2,        # world-units jump apex height (device-measured, velocity-independent)
+    "crevasse_cap_height_hi": 15.0,    # raised cap top (ground_height) at level>=3; level<2 caps = 0 (clear)
+    "crevasse_graze_band": 10.0,       # world-units below the cap that still GRAZES (stumble); deeper -> kill
     "wide_gap_land_grace": 0.35,       # far-lip landing grace: land within this cprog of the solid
                                        # cell and still clear. Calibrated (sweep_grace.py + calib_landing.py):
                                        # ~20% device clip rate, and leaves the GOOD jumper v36 almost
@@ -1495,8 +1510,9 @@ class TempleRunSimEnv(gym.Env):
         # apex check fires on the crevasse LEDGE cell: step-UP always; ALL crevasse last-cells when
         # crevasse_apex_all is on (step-DOWN/high-ground also demand near-apex timing — device-measured).
         apex_cell = bool(cell.get("stepup"))
-        if not apex_cell and self.cfg.get("crevasse_apex_all") and obst == OBST_LEVEL_CHANGE \
-                and cell.get("wide_gap"):
+        # crevasse_apex_all OR the world-Y graze model self-extend apex detection to ALL last-crevasse cells.
+        if not apex_cell and (self.cfg.get("crevasse_apex_all") or self.cfg.get("crevasse_graze_worldy")) \
+                and obst == OBST_LEVEL_CHANGE and cell.get("wide_gap"):
             nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
             apex_cell = not nxt.get("wide_gap")   # the LAST crevasse cell (next cell solid)
         if obst in _MUST_JUMP and apex_cell:
@@ -1519,6 +1535,18 @@ class TempleRunSimEnv(gym.Env):
             d = float(self._cell_index) - self._jump_takeoff_pos   # cells from takeoff to the ledge lip
             frac = d / max(1e-6, span)                      # 0=takeoff, 0.5=apex, 1=landing
             height = 1.0 - (2.0 * frac - 1.0) ** 2          # parabola: 0 at ends, 1 at apex
+            # WORLD-Y GRAZE model (device-decoded): arc height in WORLD units = jump_peak * parabola; the
+            # cap top by LEVEL (15 @lvl>=3, 0 @lvl<3). Graze (chronic stumble) iff arc < cap top; deep clip
+            # -> Ledge kill. Supersedes the normalised mh-proxy; reproduces device 32% graze @lvl3 / 0% @lvl2.
+            if self.cfg.get("crevasse_graze_worldy"):
+                arc_y = float(self.cfg["crevasse_jump_peak"]) * height   # world-units height at the cap
+                cap_h = float(self.cfg["crevasse_cap_height_hi"]) if int(cell.get("level", 2)) >= 3 else 0.0
+                band = float(self.cfg["crevasse_graze_band"])
+                if arc_y < cap_h - band:
+                    self._kill(2)    # arc well below the raised cap top -> deep clip -> Ledge
+                elif arc_y < cap_h:
+                    self._stumble()  # arc just below the cap top -> chronic graze slowdown (x0.85)
+                return
             mh = float(self.cfg["stepup_min_height"])
             if height < mh:
                 # marginal graze -> non-fatal STUMBLE slowdown (device-measured 2026-07-06); deep
@@ -1696,6 +1724,13 @@ class TempleRunSimEnv(gym.Env):
             "next_path_level": -1 if cell.get("is_turn") else int(nxt.get("level", -1)),
             "next2_path_level": -1 if (cell.get("is_turn") or nxt.get("is_turn"))
                                 else int(nxt2.get("level", -1)),
+            # 2-cell OBSTACLE lookahead (chained-obstacle fix): the obstacle class of cell+2 (the cell a
+            # jump over cell+1 LANDS the runner airborne into). SAME junction dropout as next2_path_level —
+            # the hook's PE neighbor walk breaks through turns, so both read False on/through a junction.
+            "next2_must_jump": False if (cell.get("is_turn") or nxt.get("is_turn"))
+                               else int(nxt2.get("obstacles", 0)) in _MUST_JUMP,
+            "next2_must_slide": False if (cell.get("is_turn") or nxt.get("is_turn"))
+                                else int(nxt2.get("obstacles", 0)) in _MUST_SLIDE,
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).

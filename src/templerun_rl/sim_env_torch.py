@@ -1041,7 +1041,7 @@ class TorchTempleRunVecEnv(VecEnv):
         # apex check fires on the crevasse LEDGE cell: step-UP always; ALL crevasse last-cells when
         # crevasse_apex_all (step-DOWN/high-ground also demand near-apex timing). Mirror of CPU ref.
         apex_mask = self.t_stepup[:, 0]
-        if cfg.get("crevasse_apex_all"):
+        if cfg.get("crevasse_apex_all") or cfg.get("crevasse_graze_worldy"):
             last_crev = (obst == OBST_LEVEL_CHANGE) & self.t_wide[:, 0] & ~self.t_wide[:, 1]
             apex_mask = apex_mask | last_crev
         # step-up crevasse: velocity-dependent apex check at the raised ledge
@@ -1054,14 +1054,27 @@ class TorchTempleRunVecEnv(VecEnv):
             d = self.cell_counter - self.takeoff_pos
             frac = d / span.clamp_min(1e-6)
             height = 1.0 - (2.0 * frac - 1.0) ** 2
-            mh = float(cfg["stepup_min_height"])
-            low = su_air & (height < mh)
-            band = float(cfg.get("stepup_clip_band", 0.0))
-            if band > 0.0:
-                clip = low & (height >= mh - band)
-                self._stumble(clip)      # marginal graze -> non-fatal slowdown (device 2026-07-06)
-                low = low & ~clip
-            self._kill(low, 2)
+            if cfg.get("crevasse_graze_worldy"):
+                # WORLD-Y graze (device-decoded): arc height = jump_peak*parabola; cap top 15 @lvl>=3,
+                # 0 @lvl<3. Graze (stumble) iff arc < cap; deep clip -> Ledge kill. Mirror of CPU ref.
+                arc_y = float(cfg["crevasse_jump_peak"]) * height
+                cap_hi = float(cfg["crevasse_cap_height_hi"])
+                cap_h = torch.where(self.t_level[:, 0] >= 3, torch.full_like(arc_y, cap_hi),
+                                    torch.zeros_like(arc_y))
+                band = float(cfg["crevasse_graze_band"])
+                kill = su_air & (arc_y < cap_h - band)
+                self._kill(kill, 2)
+                graze = su_air & ~kill & (arc_y < cap_h)
+                self._stumble(graze)     # chronic graze -> non-fatal x0.85 slowdown
+            else:
+                mh = float(cfg["stepup_min_height"])
+                low = su_air & (height < mh)
+                band = float(cfg.get("stepup_clip_band", 0.0))
+                if band > 0.0:
+                    clip = low & (height >= mh - band)
+                    self._stumble(clip)      # marginal graze -> non-fatal slowdown (device 2026-07-06)
+                    low = low & ~clip
+                self._kill(low, 2)
             m = m & ~self.is_dead
 
         # plain must-jump (1-cell hole / wide gap with lip grace) — exclude apex (crevasse ledge) cells
@@ -1143,6 +1156,9 @@ class TorchTempleRunVecEnv(VecEnv):
             "next_ground_change_higher": nobst == OBST_LEVEL_CHANGE,
             "next_path_level": torch.where(raw_turn, neg1, self.t_level[:, 1]),
             "next2_path_level": torch.where(raw_turn | self.t_turn[:, 1], neg1, self.t_level[:, 2]),
+            # 2-cell OBSTACLE lookahead (chained-obstacle fix) — same junction dropout as next2_path_level.
+            "next2_must_jump": self.must_jump_lut[self.t_obst[:, 2]] & ~(raw_turn | self.t_turn[:, 1]),
+            "next2_must_slide": self.must_slide_lut[self.t_obst[:, 2]] & ~(raw_turn | self.t_turn[:, 1]),
             "narrow_target_lane": self.t_nlane[:, 1].clone(),    # 0 == None
             "cell_progress": cp,
             "lane": self.lane.clone(),

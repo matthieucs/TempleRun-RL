@@ -292,6 +292,10 @@ def deterministic_suite() -> int:
         # both device-true fidelity fixes together (the v48 training regime).
         "land_and_apex": ({"wide_gap_landing_model": True, "wide_gap_land_grace": 0.35,
                            "crevasse_apex_all": True, "stepup_clip_band": 0.25}, {}),
+        # high-ground cap graze — WORLD-Y model (2026-07-07): arc height vs level-aware cap top; the
+        # crevasse ledge cells now graze (stumble) / deep-clip (kill) by world-Y instead of the mh-proxy.
+        "crevasse_graze": ({"crevasse_graze_worldy": True, "wide_gap_landing_model": True,
+                            "wide_gap_land_grace": 0.35}, {}),
     }
     policies = {
         "noop": pol_noop,

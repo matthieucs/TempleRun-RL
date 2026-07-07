@@ -31,6 +31,12 @@ OBS_BOOL_FIELDS = (
     # 1-cell step-UP crevasse (raised ledge, needs a LATE takeoff, device probe 2026-07-03) from a
     # 2-cell long hole (needs an EARLIER takeoff to span both cells) — different jump timings.
     "next_wide_gap", "next_ground_change_higher",
+    # 2-cell OBSTACLE lookahead (2026-07-07) — the chained-obstacle death fix. A jump spans ~2.75 cells,
+    # so a jump over cell+1 lands the runner airborne INTO cell+2; if cell+2 is a slide-obstacle
+    # (flame/tree-slide) the runner can't slide while airborne -> Burnt (device death @6216m: hole-jump ->
+    # flame tower right behind). Giving the policy the 2-ahead must-jump/slide lets it defer/re-time the
+    # jump. SAME junction-dropout as next2_path_level (False through a turn). BREAKING: obs 58->60.
+    "next2_must_jump", "next2_must_slide",
 )
 OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # Perception added 2026-06-19 so the NN can time turns + control its lane natively (replacing the
@@ -46,7 +52,7 @@ OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_landing", "predicted_jump",
                     "next_path_level", "next2_path_level")
 OBS_FIELDS = OBS_BOOL_FIELDS + OBS_SCALAR_FIELDS + OBS_EXTRA_FIELDS
-OBS_LEN = len(OBS_FIELDS)  # 19 bool/lookahead + 4 scalar + 7 extra = 30 (keep derived from OBS_FIELDS)
+OBS_LEN = len(OBS_FIELDS)  # 21 bool/lookahead + 4 scalar + 7 extra = 32 (keep derived from OBS_FIELDS)
 
 # Lane geometry (real device units, 2026-07-01 tilt-controlled model): the lateral position is
 # CONTINUOUS and centered on 0 — center 0, one strafe ~ 3.7 -> lanes at -3.7 / 0 / +3.7, side walls

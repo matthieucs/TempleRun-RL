@@ -125,7 +125,9 @@ INT_FIELDS = ("score", "path_type", "path_level", "facing")
 FLOAT_FIELDS = ("velocity", "distance")
 
 LOOKAHEAD_FIELDS = ("next_is_turn", "next_can_turn_left", "next_can_turn_right",
-                    "next_must_jump", "next_must_slide")
+                    "next_must_jump", "next_must_slide",
+                    # 2-cell obstacle lookahead (2026-07-07, chained-obstacle fix) — same junction dropout.
+                    "next2_must_jump", "next2_must_slide")
 
 # Default values used when a field is missing from a (possibly truncated) JSON line.
 STATE_DEFAULTS = {f: False for f in BOOL_FIELDS}
