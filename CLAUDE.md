@@ -5,6 +5,39 @@ trained in a headless sim, deployed on a physical Android phone via **Frida** (r
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
 ## ⚡ CURRENT STATE (2026-07-07) — read this first
+- **★ WAVE 3 (2026-07-07 late night): CURRICULUM + SCALE + the jump-spam wall.** New tooling all committed,
+  equivalence GREEN throughout. USER-driven.
+  - **v55 crevasse geometry fix (`crevasse_cap_arc_offset` + world-Y): DEVICE-DISPROVEN offline** — mild
+    regression (dynamics change, sharp threshold, no clean partial rate; needs takeoff-VARIANCE not just an
+    offset). Knob committed default-off. Crevasse still the #1 early killer (~600m); UNSOLVED.
+  - **★ USER INSIGHT (the big one): "modelled correctly but TRAINED incorrectly."** `max_back_to_back_
+    obstacles=2` CAPPED chains → the sim literally never made a GAUNTLET; training was sparse (min_space 6).
+    FIX = raise b2b to 6 + `episode_profiles` MIX (torch-only, per-reset sample): 45% standard / 15% dense-
+    gauntlet / 12% crevasse-field / 12% long-hole-rhythm / 10% compound-dense / 6% narrow-heavy. **v56 =
+    v54 + curriculum: best-of-session STANDARD median 2930 (+16% vs v54), NO collapse (45% anchor held).**
+    Gauntlet-training generalised to better all-around robustness. CURRICULUM VALIDATED.
+  - **LR SCHEDULE added to train_fast.py** (`--lr-schedule cosine|linear --lr-final`; tensor-LR in the
+    CUDA graph so it changes without re-capture). Constant-high collapses a warm-start, constant-low
+    undertrains; cosine 1.2e-4→1e-5 does both.
+  - **512-NET surgery** (`surgery_v56_512.py`, function-preserving top-left-block widen, 0/500 mism).
+  - **v57 = 512-net + curriculum + cosine LR + 4M = BEST OF SESSION OFFLINE: standard 3124 / challenge
+    1912 (@3.5M, `ppo_v57_512sched_best.zip`).** All 3 user levers (capacity+schedule+curriculum) paid off.
+    DEVICE (6ep): median 4111 / max 6813 ≈ v51 (user: close, don't retest v51).
+  - **★ JUMP-SPAM WALL (USER-observed on the v57 6813m run + forensic): the policy presses JUMP ~CONTINU-
+    OUSLY.** ROOT: the sim IGNORES jump-while-airborne (`_apply_action` `_jump_t<=0` guard) so spam is FREE
+    in-sim; the idle penalty checks OBSTACLE context not AIRBORNE STATE. On DEVICE each press queues a
+    re-jump on landing → perpetual airborne → mistimed hole takeoff → clip (dt4). (USER nailed the asymmetry:
+    the penalty works for STRAFE because random strafe self-punishes via lane/cliff death; jump-spam has no
+    in-sim cost.) FIX = `airborne_action_penalty` (dock JUMP-while-jumping / SLIDE-while-sliding; reward.py
+    + torch _shaping + train_fast; equivalence GREEN). **v58 = v57 + penalty 0.15: offline jump-spam 80%→
+    27% (PROVEN in-sim). BUT DEVICE spam UNCHANGED: v57 97% / v58 97% — the fix did NOT transfer.** Likely a
+    sim-to-real JUMP-TIMING gap: device jump lasts longer than sim's 0.8s AND/OR `is_jumping` obs is TCP-
+    stale (~1-2 frames) → the policy can't perceive its airborne state on device, so a state-based penalty
+    can't bite. **NEXT: measure device jump_duration + is_jumping obs latency (hook probe), calibrate the
+    sim's jump timing, THEN the airborne penalty (or an action-history-based one) can transfer.** v58 had 0
+    hole deaths in its 6ep batch (vs v57's 2) but n=6 = likely run-luck. Captures: `ab4_v57_r1`,`ab5_v58`.
+  - **DEPLOY: v51 (obs58, hook pre-fork obs.py) remains the safe device champion. v57/v58 (obs60, 512-net,
+    hook 16z) are the best offline but NOT device-proven > v51. All weights gitignored/local.**
 - **★ EDGE-CASE ACCUMULATION WAVE 2 (2026-07-07 late): the method is now "enumerate + model the edge cases
   that kill early" (USER framing: device variance is RUN-GENERATION luck, not thermal — a run dies when it
   hits an UNMODELLED edge case; the median is capped by how many remain). Edge-case forensic (26 device

@@ -361,6 +361,14 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "crevasse_jump_peak": 19.2,        # world-units jump apex height (device-measured, velocity-independent)
     "crevasse_cap_height_hi": 15.0,    # raised cap top (ground_height) at level>=3; level<2 caps = 0 (clear)
     "crevasse_graze_band": 10.0,       # world-units below the cap that still GRAZES (stumble); deeper -> kill
+    # STEP-UP CAP ARC OFFSET [DEVICE-DECODED 2026-07-07, v51/v53 first-crevasse deaths @598/609/1258]: the
+    # sim evaluates the raised lvl-3 cap at frac = d/span where d = cells(takeoff->ledge); a cp~0.9 takeoff
+    # puts the ledge at the jump APEX (height 1) so v51 CLEARS. But device vel_y shows the runner DESCENDING
+    # (vel_y -33..-62) at the cap -> it clips (dt=4 Ledge) at LOW speed (~v166, the FIRST crevasse ~587m).
+    # The device cap sits ~this many cells LATER in the arc than the sim models -> add to d so the cap falls
+    # in the DESCENDING arc (height drops) and v51 clips it in-sim like on device -> retrain learns the
+    # earlier takeoff. 0 default (no-op -> equivalence/scorecard unchanged); calibrate to the device rate.
+    "crevasse_cap_arc_offset": 0.0,    # cells added to the takeoff->cap distance (shifts the cap later in the arc)
     "wide_gap_land_grace": 0.35,       # far-lip landing grace: land within this cprog of the solid
                                        # cell and still clear. Calibrated (sweep_grace.py + calib_landing.py):
                                        # ~20% device clip rate, and leaves the GOOD jumper v36 almost
@@ -557,6 +565,7 @@ class TempleRunSimEnv(gym.Env):
         turn_spam_penalty: float = C.DEFAULT_TURN_SPAM_PENALTY,
         idle_action_penalty: float = C.DEFAULT_IDLE_ACTION_PENALTY,
         redundant_action_penalty: float = C.DEFAULT_REDUNDANT_ACTION_PENALTY,
+        airborne_action_penalty: float = 0.0,
         strafe_penalty: float = 0.0,
         narrow_hold_bonus: float = 0.0,
         aim_center_weight: float = 0.0,
@@ -604,6 +613,7 @@ class TempleRunSimEnv(gym.Env):
         self.turn_spam_penalty = float(turn_spam_penalty)
         self.idle_action_penalty = float(idle_action_penalty)
         self.redundant_action_penalty = float(redundant_action_penalty)
+        self.airborne_action_penalty = float(airborne_action_penalty)
         self.strafe_penalty = float(strafe_penalty)
         self.narrow_hold_bonus = float(narrow_hold_bonus)
         self.aim_center_weight = float(aim_center_weight)
@@ -1124,6 +1134,7 @@ class TempleRunSimEnv(gym.Env):
             action_cost=self.action_cost, reaction_bonus=self.reaction_bonus,
             turn_spam_penalty=self.turn_spam_penalty, idle_action_penalty=self.idle_action_penalty,
             redundant_action_penalty=self.redundant_action_penalty, strafe_penalty=self.strafe_penalty,
+            airborne_action_penalty=self.airborne_action_penalty,
             narrow_hold_bonus=self.narrow_hold_bonus,
             aim_center_weight=self.aim_center_weight,
             velocity_drop_penalty=self.velocity_drop_penalty,
@@ -1607,6 +1618,10 @@ class TempleRunSimEnv(gym.Env):
             # frame on the cell is up to ~0.3 cells past the lip, which skewed frac by up to +0.13 and
             # made the device-fit mh (entry-referenced, 2026-07-05) effectively stricter than measured.
             d = float(self._cell_index) - self._jump_takeoff_pos   # cells from takeoff to the ledge lip
+            # DEVICE geometry: the raised cap sits slightly LATER in the arc than the cell index implies
+            # (the runner is descending at it) -> shift d so a cp~0.9 takeoff lands the cap in the
+            # descending arc (clips) instead of at apex (clears). 0 = the old apex-at-ledge model.
+            d += float(self.cfg.get("crevasse_cap_arc_offset", 0.0))
             frac = d / max(1e-6, span)                      # 0=takeoff, 0.5=apex, 1=landing
             height = 1.0 - (2.0 * frac - 1.0) ** 2          # parabola: 0 at ends, 1 at apex
             # WORLD-Y GRAZE model (device-decoded): arc height in WORLD units = jump_peak * parabola; the

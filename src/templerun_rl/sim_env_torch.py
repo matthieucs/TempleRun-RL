@@ -89,6 +89,7 @@ class TorchTempleRunVecEnv(VecEnv):
         turn_spam_penalty: float = 0.0,
         idle_action_penalty: float = 0.0,
         redundant_action_penalty: float = 0.0,
+        airborne_action_penalty: float = 0.0,
         strafe_penalty: float = 0.0,
         narrow_hold_bonus: float = 0.0,
         aim_center_weight: float = 0.0,
@@ -112,6 +113,7 @@ class TorchTempleRunVecEnv(VecEnv):
         self.turn_spam_penalty = float(turn_spam_penalty)
         self.idle_action_penalty = float(idle_action_penalty)
         self.redundant_action_penalty = float(redundant_action_penalty)
+        self.airborne_action_penalty = float(airborne_action_penalty)
         self.strafe_penalty = float(strafe_penalty)
         self.narrow_hold_bonus = float(narrow_hold_bonus)
         self.aim_center_weight = float(aim_center_weight)
@@ -1127,7 +1129,9 @@ class TorchTempleRunVecEnv(VecEnv):
             self._kill(su_nair, 2)
             su_air = su & ~su_nair
             span = self.jump_dur * self.velocity / self.cell_len.clamp_min(1e-6)
-            d = self.cell_counter - self.takeoff_pos
+            # device geometry: the raised cap sits slightly LATER in the arc (runner descending at it) ->
+            # shift d so a cp~0.9 takeoff clips instead of clearing at apex. 0 = old apex-at-ledge model.
+            d = self.cell_counter - self.takeoff_pos + float(cfg.get("crevasse_cap_arc_offset", 0.0))
             frac = d / span.clamp_min(1e-6)
             height = 1.0 - (2.0 * frac - 1.0) ** 2
             if cfg.get("crevasse_graze_worldy"):
@@ -1291,7 +1295,7 @@ class TorchTempleRunVecEnv(VecEnv):
         if not any((self.action_cost, self.reaction_bonus, self.turn_spam_penalty,
                     self.idle_action_penalty, self.redundant_action_penalty, self.strafe_penalty,
                     self.narrow_hold_bonus, self.velocity_drop_penalty, self.off_center_penalty,
-                    self.slide_jump_penalty)):
+                    self.slide_jump_penalty, self.airborne_action_penalty)):
             return torch.zeros(self.B, dtype=torch.float64, device=self.dev)
         p = self.prev
         r = torch.zeros(self.B, dtype=torch.float64, device=self.dev)
@@ -1344,6 +1348,10 @@ class TorchTempleRunVecEnv(VecEnv):
             rj = is_j & p["must_jump"] & ~p["next_must_jump"]
             rs = ~rj & is_s & p["must_slide"] & ~p["next_must_slide"]
             r = r - self.redundant_action_penalty * (rj | rs).float()
+        if self.airborne_action_penalty:   # dock JUMP-while-jumping / SLIDE-while-sliding (jump-spam)
+            aj = is_j & p["is_jumping"]
+            asl = ~aj & is_s & p["is_sliding"]
+            r = r - self.airborne_action_penalty * (aj | asl).float()
         dock = self.strafe_penalty if self.strafe_penalty else self.idle_action_penalty
         if dock:
             r = r - dock * (is_strafe & (ntl == 0)).float()

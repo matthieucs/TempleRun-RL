@@ -30,6 +30,7 @@ def shaping_reward(
     turn_spam_penalty: float = 0.0,
     idle_action_penalty: float = 0.0,
     redundant_action_penalty: float = 0.0,
+    airborne_action_penalty: float = 0.0,
     strafe_penalty: float = 0.0,
     narrow_hold_bonus: float = 0.0,
     aim_center_weight: float = 0.0,
@@ -49,7 +50,7 @@ def shaping_reward(
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
             and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty
             and not narrow_hold_bonus and not velocity_drop_penalty and not off_center_penalty
-            and not slide_jump_penalty):
+            and not slide_jump_penalty and not airborne_action_penalty):
         return 0.0
     r = 0.0
     # JUMP into a slide-obstacle is FATAL on device [MEASURED 2026-07-03, ppo_speed_v8: 4/8 deaths] —
@@ -163,6 +164,17 @@ def shaping_reward(
         elif (action == int(C.Action.SLIDE)
                 and prev.get("must_slide") and not prev.get("next_must_slide")):
             r -= redundant_action_penalty
+    # AIRBORNE-action (jump-spam) penalty [USER-observed + device forensic 2026-07-07, v57 6813m death]:
+    # pressing JUMP while ALREADY airborne (is_jumping) does NOTHING useful in-sim (the takeoff is
+    # ignored — see sim_env _apply_action's `_jump_t <= 0` guard), but on DEVICE it QUEUES a re-jump on
+    # landing -> perpetual airborne -> the takeoff at the next hole is mistimed -> clip (dt=4 Ledge). The
+    # idle penalty checks the OBSTACLE context, not the airborne STATE, so it can't catch this spam. Dock
+    # a jump pressed while jumping (and a slide while sliding) so the policy stops the reflexive re-press.
+    if airborne_action_penalty and prev is not None:
+        if action == int(C.Action.JUMP) and prev.get("is_jumping"):
+            r -= airborne_action_penalty
+        elif action == int(C.Action.SLIDE) and prev.get("is_sliding"):
+            r -= airborne_action_penalty
     # STRAFE dock: curbs the strafe-spam (high ent_coef + action-history let it back). On the DEVICE an
     # off-track strafe drives the continuous lane far OOD (sim lane is 3 discrete values) -> the policy
     # never saw lane=-15 in training -> erratic -> walks off the edge (the 2026-06-26 device failure).

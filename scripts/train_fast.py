@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -45,6 +46,10 @@ def main() -> None:
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--learning-rate", type=float, default=3e-4)
+    p.add_argument("--lr-schedule", choices=["constant", "linear", "cosine"], default="constant",
+                   help="LR decay over training: constant | linear | cosine (to --lr-final)")
+    p.add_argument("--lr-final", type=float, default=None,
+                   help="end LR for the schedule (default = --learning-rate = constant)")
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-range", type=float, default=0.2)
@@ -62,6 +67,8 @@ def main() -> None:
     p.add_argument("--narrow-hold-bonus", type=float, default=0.0)
     p.add_argument("--aim-center-weight", type=float, default=0.0)
     p.add_argument("--slide-jump-penalty", type=float, default=0.0)
+    p.add_argument("--airborne-action-penalty", type=float, default=0.0,
+                   help="dock JUMP-while-jumping / SLIDE-while-sliding (jump-spam curb)")
     p.add_argument("--turn-approach-buffer", action="store_true", default=False)
     p.add_argument("--curriculum-max-start-dist", type=float, default=0.0)
     p.add_argument("--domain-rand", dest="domain_rand", action="store_true", default=True)
@@ -90,6 +97,7 @@ def main() -> None:
         turn_spam_penalty=args.turn_spam_penalty, idle_action_penalty=args.idle_action_penalty,
         strafe_penalty=args.strafe_penalty, narrow_hold_bonus=args.narrow_hold_bonus,
         aim_center_weight=args.aim_center_weight, slide_jump_penalty=args.slide_jump_penalty,
+        airborne_action_penalty=args.airborne_action_penalty,
         action_history_len=K, frame_stack=FS)
 
     net_arch = [int(x) for x in args.net_arch.split(",") if x.strip()]
@@ -105,6 +113,7 @@ def main() -> None:
 
     # ---- optional CUDA-graph capture of the minibatch step ----
     graph_step = None
+    lr_tensor = None   # device tensor holding the LR when graph-captured (set below)
     if args.cuda_graph:
         assert dev.type == "cuda", "--cuda-graph needs --device cuda"
         # Categorical's __init__ host-syncs on a validity check (`valid.all()`), which is
@@ -112,8 +121,11 @@ def main() -> None:
         torch.distributions.Distribution.set_default_validate_args(False)
         assert (args.n_steps * args.num_envs) % args.batch_size == 0, \
             "buffer must divide evenly by batch-size for graph capture"
-        # Adam must be 'capturable' (its step counter lives on-device inside a graph).
-        opt = torch.optim.Adam(policy.parameters(), lr=args.learning_rate,
+        # Adam must be 'capturable' (its step counter lives on-device inside a graph). The LR is a
+        # DEVICE TENSOR so an in-place update (lr_tensor.fill_) changes the effective LR the captured
+        # graph reads at replay -> supports --lr-schedule without re-capturing the graph.
+        lr_tensor = torch.tensor(float(args.learning_rate), device=dev)
+        opt = torch.optim.Adam(policy.parameters(), lr=lr_tensor,
                                capturable=True, **{k: v for k, v in
                                [("eps", 1e-5)]})
         policy.optimizer = opt
@@ -167,6 +179,23 @@ def main() -> None:
     rew_buf = torch.zeros(T, B, device=dev)
     done_buf = torch.zeros(T, B, dtype=torch.bool, device=dev)
 
+    # ---- LR schedule: decay learning_rate -> lr_final over training (constant if lr_final unset) ----
+    def _sched_lr(g: int) -> float:
+        if args.lr_schedule == "constant" or args.lr_final is None:
+            return float(args.learning_rate)
+        prog = min(1.0, g / max(1, args.timesteps))
+        if args.lr_schedule == "linear":
+            return float(args.learning_rate + (args.lr_final - args.learning_rate) * prog)
+        return float(args.lr_final + 0.5 * (args.learning_rate - args.lr_final)
+                     * (1.0 + math.cos(math.pi * prog)))   # cosine
+
+    def _set_lr(v: float) -> None:
+        if lr_tensor is not None:
+            lr_tensor.fill_(v)          # graph reads this tensor at replay
+        else:
+            for pg in opt.param_groups:
+                pg["lr"] = v
+
     obs = venv.reset_tensor().to(dev)
     gstep = 0
     next_ckpt = args.ckpt_every
@@ -175,6 +204,7 @@ def main() -> None:
     Path("runs").mkdir(exist_ok=True)
 
     while gstep < args.timesteps:
+        _set_lr(_sched_lr(gstep))     # schedule the LR for this iteration's minibatch updates
         # ---- rollout (no_grad, all tensors on device) ----
         with torch.no_grad():
             for t in range(T):

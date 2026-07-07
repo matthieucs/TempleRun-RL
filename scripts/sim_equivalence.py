@@ -283,7 +283,7 @@ def deterministic_suite() -> int:
                       idle_action_penalty=0.05, redundant_action_penalty=0.12,
                       strafe_penalty=0.3, narrow_hold_bonus=0.18, aim_center_weight=1.0,
                       velocity_drop_penalty=0.02, off_center_penalty=0.03,
-                      slide_jump_penalty=0.15)
+                      slide_jump_penalty=0.15, airborne_action_penalty=0.1)
     variants = {
         "base": ({}, {}),
         "hookbuf": ({"hook_turn_buffer": True}, {}),
