@@ -112,6 +112,175 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   - Device eval: `scripts/capture_calib.py <model> --episodes 8 --turn-cooldown 0`.
 - Checkpoints are noisy + late-collapse → **keep the BEST checkpoint, not `_final`**. Registry `runs/MODELS.md`.
 
+## GPU sim + training (2026-07-06, GPU box — torch port of the sim)
+- **`src/templerun_rl/sim_env_torch.py` = batched-tensor port of sim_env.py** (`TorchTempleRunVecEnv`,
+  B envs as [B] tensors, cuda/cpu). The CPU sim stays the REFERENCE — if they disagree, fix the port.
+  **Equivalence gates (run after ANY change to either sim): `scripts/sim_equivalence.py`** (1344
+  deterministic step-exact scenario×config×policy diffs + statistical tier), `scripts/scorecard_torch.py
+  --strict` (the unmodified scorecard via a registry alias; 12/13 PASS — turn.gates oracle-survival is
+  threshold-MARGINAL on BOTH sims: true rate 73%cpu/72%torch vs the 70% bar, n=80 seed-batch coin flip),
+  + v36 plays both sims to median ratio 1.002 (n=160). Sim steps ~40k/s at B=4096 (65x the SubprocVecEnv).
+- **Training**: `scripts/train_sim_gpu.py` (SB3 over the batched env; recipe-faithful geometry =
+  B=256 n_steps=16 batch=64 → ~900 steps/s end-to-end — the PPO optimizer loop is the wall, NOT the env;
+  batch=512 gives 5k steps/s but BROKE a from-scratch run — dynamics change, use only with curve
+  validation). `scripts/train_fast.py` = pure-torch GPU-resident PPO (SB3-exact losses, saves normal SB3
+  zips) — **VALIDATED 2026-07-06: 1.29x SB3 at recipe geometry + reproduces from-scratch turns-only
+  learning exactly (96/96, median 6238 = SB3's). Use it for new runs.** Quick verdict tool:
+  `scripts/eval_ckpt_torch.py <ckpts...>` (batched device-true-cfg eval).
+- **FROM-SCRATCH WALL (measured 2026-07-06): the full task is NOT from-scratch trainable** — flat ~100m
+  (the FIRST junction) for 3.4M steps (reference recipe, CPU trainer) AND 6M (torch). Cause: since the
+  2026-07-02 fatal-turn remodel, turn-on-straight=death makes turn exploration a needle; every good
+  policy is a warm-start descendant; train_gpu_256.sh was never actually validated. **FIX (user-designed,
+  verified): curriculum.** (a) turns-only phase A (obstacle_prob 0, turn dense) → from-scratch 256 masters
+  turns in <100k steps (96/96 to cap), then full-task phase B warm-start (climbing, 1173@1.3M); (b) BETTER:
+  **per-episode `episode_profiles` mix** (torch sim only: cfg list of {weight, overrides} sampled each
+  reset — e.g. 50% standard / 15% turns-only / 12% narrows-from-0 / 12% crevasse-dense / 6% hole-rhythm /
+  5% compound) = guaranteed rare-mechanic exposure with zero phase-atrophy. See runs/ppo_mix256 lineage.
+- **256-net path that works: v41 = v36 surgery-widened (scratchpad/surgery_v39_256.py, exact-equivalent
+  init) + 2M finetune @5e-5 on the v39 recipe → OFFLINE median 2200 vs v36's 1784 (+23%), max 8389, still
+  climbing at 2M, NO drift.** v42 = +2M extension. Stop-early workflow: eval checkpoints at 1-2M
+  (eval_ckpt_torch) and kill/extend on evidence — training is ~30 min, don't pre-commit to 6M.
+- **v41 DEVICE-REGRESSED (2026-07-06 evening, same-session fresh-phone): median 1174 / best 5956 vs v36
+  2382 / 4357 — offline +23% did NOT transfer (the v15-v22 lesson again). Death signature: 6/8 on
+  low-speed holes/gaps 580-1500m** (v36 same-session: diverse mix, 1-2 holes). Captures:
+  `captures/v41_device_16w.jsonl`, `captures/v36_samesession.jsonl`. **ROOT-CAUSE CANDIDATE FOUND
+  (USER-observed, device-measured): the NON-FATAL CLIP** — a marginal step-up graze STUMBLES (velocity
+  ×0.85 in one frame = StumbleSlowDown, recovery ~+1.4 u/s, 15/15 airborne, 14/15 on pt33-36/long-holes,
+  ~0.6/ep) instead of killing; the old binary clear-or-die sim rewarded gap timings that clip-and-slow on
+  device, re-timing the following holes → the death cluster. **Modeled: `stepup_clip_band`** (apex height
+  in [mh-band, mh) → _stumble; both sims, default 0 = unchanged, equivalence 1638/1638, band 0.25
+  calibrated ≈ device rate 0.46 vs 0.6/ep; residual: long-hole lip grazes un-modeled). v43 = clean
+  v36_256 + clip-band retrain. **v36 (`runs/ppo_best.zip`) remains the deploy champion.**
+- Screen-off play is IMPOSSIBLE (display sleep → onApplicationPause → Update stops, measured); the
+  equivalent for long sessions = keep-awake + `settings put system screen_brightness 0`.
+- **v43 = v36_256 + clip-band recipe (2M @5e-5): device SAME-SESSION median 1820 / best 3957 vs v36
+  1682 / 3420 — parity-leaning-v43, the first 256-net that does NOT device-regress.** n=8 too noisy to
+  crown; needs a bigger-n alternating eval. Long holes pt12-16 at 600-1600m = the universal killer now
+  (kills v36 too) → next mechanic hunt in captures/{v41,v43}_device_16w.jsonl + v36_session3.jsonl.
+  Offline w/ clip-band eval: v43 3889 vs v36 1989 (eval_ckpt_torch, clip band now in device-true cfg).
+  **HOLE-DEATH FORENSICS (scan_hole_deaths, 11 deaths / 3 captures): 10/11 long-hole deaths follow a
+  CLIP-SLOWDOWN within 3s** — clip → −15% vel → next gap mistimed at the reduced speed → Fall. Levers:
+  (1) train post-clip gap timing (clip band already in sim — check the sim reproduces the clip→next-gap
+  death chain rate), (2) next2-obstacle lookahead obs (chained-jump blindness: 2 v43 takeoffs weren't at
+  a gap; jump spans ~2.75 cells vs 1-cell obs lookahead → blind landings; hook 2-ahead read verified on
+  straights; obs 58→60 = retrain), (3) jump-spam persists (8-18 cmds/3s — avoid-state not retry).
+- **FLEET RESULTS (2026-07-06 late): OFFLINE gains do NOT transfer while the LONG-HOLE model is
+  lenient.** v44 (256+2M) offline 6270 / v45 (512-net) offline 7040 vs v43 3889 — but v45 DEVICE
+  median only 1313 (best 5139; 3/8 long-hole deaths; same session v43=1820). USER-OBSERVED live +
+  forensics-confirmed: policies jump EARLY at long holes (takeoff cp 0.05-0.4, correct is >=0.5) —
+  free in-sim because wide-gap survival = binary airborne-at-entry checks, NO landing-position arc
+  model (the step-up apex check has one; plain holes don't). **NEXT SIM FIX (highest value): device
+  takeoff-cp sweep via `capture_calib --gap-override '0.2,0.4,0.6,0.8'` on long holes → fit a
+  landing-position kill rule → equivalence-gate → retrain (v46).** 512-net verdict: more offline skill
+  at equal budget (real capacity signal) but pointless until the hole gap closes. **SWEEP VERDICT
+  (holesweep_takeoff.jsonl, 27 controlled jumps): FLAT LONG HOLES ARE FORGIVING (7/7 cleared, takeoff
+  cp 0.08-0.99, all speeds — RE-confirms the earlier 10/10 probe). The pt12-16 deaths are NOT takeoff
+  timing: killer = CHAINS (multi-hole rhythm) + post-clip reduced velocity + refusal-eaten jumps.
+  → v46 levers: hole-rhythm episode profile at post-clip velocities (stumble_vel starts), next2-obstacle
+  obs, NOT a landing rule.** Crevasse sweep falls at cp .68-.9 @v150-180 (n=5, apex-window edge, small n). **mixg (from-scratch
+  profile-mix, 6M in 17 min): offline median 1712** — from-scratch pipeline WORKS (was impossible);
+  hard wall ~1750 (93/96 Falls; profile weights under-serve late-track narrows — tune weights later).
+- **VERDICT (2026-07-06 night, decisive): STOP RETRAINING — fix SIM FIDELITY. All 256/512 candidates
+  device-REGRESS; v36 champion, v43 best challenger.** Same-session device medians: v45(512-net) 1313,
+  v46(hole-rhythm) 1346 vs v36 2504-2805. Offline↔device correlation is INVERTED (v45 offline +250% →
+  device −50%): bigger net + more training just EXPLOIT the sim's optimism harder. **CROSS-CHECK (both
+  sims score the SAME policies): torch sim is FAITHFUL to the CPU reference (v46 ratio 0.96; v43 0.74 =
+  yellow-flag, recheck bigger-n), and BOTH sims sit ~2-3x ABOVE device — the gap is a real sim-to-real
+  gap in the REFERENCE sim, not a torch-port defect.** Only v43 held (trained right after the clip gap
+  was closed) → closing a real gap converts optimization from poison to fuel; that is the ONLY lever now.
+- **★ CURSE BROKEN — WIDE-GAP LANDING MODEL (2026-07-06 late night, THE session that made offline↔device
+  correlate again). Forensics (`scratchpad/jump_arc.py`, 1600 jumps / 8 captures): 2-cell HoleLongs
+  (pt12/13/15/16) clip 20% on device, concentrated at LOW speed. ROOT CAUSE: the sim only checked
+  "airborne at cell entry" — a SHORT arc satisfies that while LANDING inside the far gap cell (device
+  clips the far wall → dt4 Ledge). Device jump span = `0.0204*v − 0.94` cells (NEGATIVE intercept; the
+  sim's `jump_dur*v/cell_len = v/75` has the wrong slope). FIX = `wide_gap_landing_model` (config knob,
+  default OFF): on the LAST gap cell, require `landing (takeoff_pos+span) ≥ far_edge − grace`. HOLES ONLY
+  (obst==OBST_HOLE) — must NOT bleed onto LevelChange crevasses. `wide_gap_land_grace=0.35` (calibrated:
+  ~20% clip, leaves the good jumper v36 ~untouched — grace-insensitive plateau — while punishing
+  jump-spam). Equivalence GREEN 1820/1820 with it ON; scorecard GREEN feature-off. Both sims edited.**
+- **v47 = v36_256 + landing model, 2M @5e-5 (train_fast bs512 cuda-graph): DEVICE median 3540 / best 6783
+  vs v36 3112/4307 SAME-SESSION (fresh→warm phone, 8ep, hook 16x). FIRST 256-net to BEAT v36 on device —
+  the hole fix TRANSFERRED (offline 4793 → device win, correlation RESTORED). `captures/v47_land_16x.jsonl`.**
+- **CREVASSE regression (USER-spotted live: "jumps too early on mid-high + high-ground crevasses, spot it
+  by the SLOWDOWN"): the landing model was bleeding onto LevelChange crevasses (they're in _MUST_JUMP +
+  wide_gap) → rewarded early crevasse jumps. FIXED two ways: (1) landing model HOLES-ONLY, (2) NEW
+  `crevasse_apex_all` (config knob, default OFF): the velocity-apex check (was step-UP only) now fires on
+  ALL crevasse ledge cells incl step-DOWN/high-ground. Device vel_y ARCS (hook 16x) confirm step-down
+  also needs near-apex at the far cell (pt35 cp0.96 vel_y~4=apex). Offline-validated: apex ON drops the
+  early-jumper v47 (4131→3440) but leaves good v36 untouched (1810→1825). v48 = v47 + both crevasse fixes:
+  device crevasse HIT-RATE (slowdown metric, `scratchpad/crevasse_clips.py`) 19%→15% (v36=16%) — the fix
+  WORKS. BUT v48 overall median 2587 (degradation-confounded — ran ~2.5h into session) and offline≈v47:
+  the stumble-penalty GRADIENT IS WEAK (crevasses too sparse in standard training). NEXT (v49): a
+  CREVASSE-DENSE episode_profile so the policy gets enough exposure to learn the fine timing + re-eval
+  v48/v49 vs v47 on a FRESH (cooled) phone. `captures/v48_land_16x.jsonl`.**
+- **HOOK 16x (`clean-16x`): + Velocity Vec3 `vel_x/y/z` (pure read, MovingObject.Velocity @0x34/38/3C) =
+  arc ground-truth. `vel_y` = vertical jump arc (takeoff ~75 → apex ~0 → negative). capture_calib now
+  logs vel_x/y/z (added to LOG_FIELDS). Device serial 3f80a3a; recover flaky phone = force-stop+restart+
+  re-inject (the injector host MUST stay alive — if it dies the agent unloads → capture reads "degraded").**
+- **METHOD that now works (the loop the user asked for): device capture → forensic mine the death
+  signature (death_type + velocity-slowdown = a survivable hit) → measure the real mechanic (span/arc/cp)
+  → add a config-gated sim knob calibrated to it → equivalence-gate (default off) → retrain (holes/apex
+  in device-true cfg) → SAME-SESSION phone eval. Each closed gap lifts the device median; offline now
+  predicts device again. Remaining death modes to close for a 10k MEDIAN: narrows-at-speed, multi-hole
+  rhythm, flame-tower slide-under, junction reliability @v200+.**
+- **★ TURN DEAD-LETTER (2026-07-06, USER-observed "the policy fires an action but it is never launched"):
+  v47 junction/off deaths (pt-1) = the policy DECIDES a turn on the junction (v47 ep3: TL @observed
+  cp0.36 @v210) but the byte arrives ~1 frame later, and at high speed 1 frame = ~0.47cp, so it PROCESSES
+  at cp~0.83 > the 0.56 consume deadline → DEAD-LETTER → runs off the track (fires R/R/L into the void,
+  dies). v14 survived by deciding @cp~0.1 (early). The gap: turn_buffer_late_cp (0.56) is measured on the
+  PROCESSING cp (velocity-independent), but the sim gated on the DECISION cp with NO latency → let v47
+  fire on-junction turns that dead-letter on device. FIX = `turn_send_lat_frames` (config knob, default 0):
+  proc_cp = decision_cp + velocity*lat*dt/cell; gate on proc_cp. lat 0.4 = v47 median 4189→2252 (pressure,
+  still trainable; lat 1.0 → 256, device-plausible but crushes the untrained base). Parity 16/16 on the
+  junction scenarios. The latency-robust play the policy must LEARN = PRE-SWIPE on the approach cell
+  (turn_approach_buffer, from_buffer → fires centered, IMMUNE). v50 = v47 warm-start + all 3 fidelity fixes
+  (holes+crevasse+turn_send_lat 0.4) + junction/crevasse/narrow-dense profile mix (`ppo_v50_turnlat`).
+  v50 DEVICE (8ep fresh phone): median 2044 / best 5314 — REGRESSED vs v47 3540/6783. Still 1 junction/off
+  death. LESSON: stacking 3 fidelity changes + a 4-way dense-profile mix OVER-SPECIALISED (same as v49) —
+  the dense grind hurt the standard distribution more than the turn fix helped. NEXT: isolate the turn fix
+  = v47 + turn_send_lat ONLY (mild, no dense profiles) to test it cleanly. v47 REMAINS the device champion.**
+- **GAP FORENSIC (death_mechanic.py, v47 device vs sim): the raw medians are CLOSE now (sim ~3344-4200 vs
+  device 3540 — the hole+crevasse fixes worked) but it's a COINCIDENTAL cancellation: sim kills v47 on
+  NARROWS 48% (~4x device 0.125/run — sim narrows likely too HARSH at v200+) but has ~0 FLAME deaths
+  (device kills on flame — the slide-under-at-speed timing is unmodelled). Next fidelity targets: measure
+  device narrows-at-speed (is [3,7] too strict at speed?) + flame slide-under. NEW config knobs this
+  session (all default-OFF, equivalence-gated): wide_gap_landing_model/_span_a/_span_b/_land_grace,
+  crevasse_apex_all, turn_send_lat_frames. Hook 16x = +vel_x/y/z. UNCOMMITTED (per norm).**
+- **`scripts/trajectory_diff.py` (NEW, multi-frame comparator — the cheap sim-vs-game tool replay_diff
+  couldn't be): reconstructs the track from a capture + replays recorded actions through the sim.
+  VELOCITY half WORKS (sim-vs-device vel MAE 0.5-1.4 = physics/curve/clip are FAITHFUL). Death-locator
+  half is BUGGY (reports constant "sim dies @~90" every ep = track-reconstruction alignment artifact,
+  the action(i)=resp-to-state(i-1) + fired-turn-resets-cp gotchas). DO NOT trust its death verdict until
+  the frame alignment is fixed. NEXT: hook player world-pos/height per-frame (pure read) → exact arc
+  ground-truth → fix the comparator → ground arc/chain mechanics in real physics vs statistical fits.
+- **FLEET IN FLIGHT AT SESSION END (2026-07-06 evening): v44 (v43+2M ext), v45 (v43 surgery-widened
+  256→512, `runs/ppo_v43_512.zip` init), mixg (from-scratch profile mix + clip band, 6M) — all
+  train_fast bs512 --cuda-graph. GATE each with eval_ckpt_torch (n>=96) then SAME-SESSION phone eval
+  vs v36 AND v43 (`captures/v43_device_16w.jsonl` = its 8-ep baseline, median 1820). A subagent (git
+  worktree) is making the torch-sim step branch-free + CUDA-graph-captured (equivalence-suite-gated) —
+  check/merge its worktree branch. Iteration loop: model gap → 3-min train → 1-min offline gate →
+  8-ep phone eval → capture forensics → repeat. Device serial on the GPU box = 3f80a3a (Redmi Note 7,
+  screen brightness 0 + keep-awake set; game restart drops the hook → kill old injector PID, re-run
+  scripts/setup_device.py).
+- **SPEED (2026-07-06 final): minibatch A/B PROVED bs512 quality == bs64** (same recipe/warm-start,
+  1M-step arms: medians 3675/3830/3498 within noise — the earlier "bs512 broke from-scratch" was the
+  from-scratch WALL confound, not bs). **+ CUDA-graph minibatch capture in train_fast.py (--cuda-graph;
+  needs Distribution.set_default_validate_args(False)) → 10.3k steps/s end-to-end = 2M finetune ~3 min**
+  (was 610/s = 55 min). Next lever: branch-free sim step → sim graph capture (equivalence-suite-gated).
+- **SIM CUDA-GRAPH (2026-07-06 night, subagent, VERIFIED-INDEPENDENTLY, NOT merged): branch-free
+  torch-sim step + opt-in `enable_step_graph()` / `train_fast --sim-graph`. Bit-identical — my OWN check:
+  eager-vs-graph reward+obs streams max|diff|=0.00e+00 @B512×200, + equivalence 1638/1638 GREEN re-run on
+  the branch. Per-seed RNG preserved via CUDAGraph.register_generator_state (torch 2.6). Speed only ~1.17x
+  @B1024/4096 BUT that's a FLOOR: random-action bench dies ~every step → eager reset fallback
+  (uncapturable) runs each step; under a TRAINED policy (long episodes) the win is larger — re-bench
+  before judging. Branch `worktree-agent-ad640dbebfa14fa05` commit `0083529` (8 files). MERGE CARE: main
+  working dir has UNCOMMITTED same-file edits (clip band, min_obst, new scripts, this CLAUDE.md) —
+  reconcile first; the subagent replicated min_obst so its sim_env_torch is ~a superset.
+- **UNCOMMITTED STATE (main working dir, 2026-07-06 night): NOT committed** (per norm: commit only when
+  asked). New tracked files: sim_env_torch.py, sim_equivalence.py, scorecard_torch.py, train_sim_gpu.py,
+  train_fast.py, eval_ckpt_torch.py, trajectory_diff.py; modified: sim_env.py (stepup_clip_band),
+  obs/constants unchanged. Weights runs/*.zip gitignored (v41-v46, v36_256, v43_512 all local-only).
+
 ## STATUS — what worked / what failed / where we are
 
 **WORKED (device-verified):**
@@ -192,7 +361,12 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 - **Fresh-phone @16t: v34@2M median 2863 best 4525, junctions 1/254 | v14 median 2833 best 6399
   (ALL-TIME), junctions 3/255, crevasses 44/46.** Obs freshness = the dominant lift (+40% median both);
   v34's trained rules = cleaner junctions.
-- **DEPLOY (2026-07-06 latest) = v36@2M + hook 16u/16t** (`runs/ppo_best.zip`, obs30, 30Hz): device
+- **NEW DEVICE CHAMPION (2026-07-06 late night) = v47** (`runs/ppo_v47_land_1703936_steps.zip`, 256-net,
+  obs58, + hook 16x): same-session device **median 3540 / best 6783** vs v36 3112/4307 — see the CURSE
+  BROKEN entry in the GPU section. v48 (`runs/ppo_v48_land_1703936_steps.zip`, + crevasse fix) improved
+  the crevasse hit-rate 19%→15% but its overall median (2587) was phone-degradation-confounded; re-eval
+  v48 vs v47 on a FRESH phone to crown. `runs/ppo_best.zip` (v36) stays the SAFE fallback.
+- **DEPLOY (2026-07-06 EARLIER, superseded by v47) = v36@2M + hook 16u/16t** (`runs/ppo_best.zip`, obs30, 30Hz): device
   **median 2642, BEST 7040 m — NEW ALL-TIME RECORD** (beats v14's 6399), junctions 1/303, crevasses
   45/46. v36 = v34 self-warm-start + the USER-OBSERVED STACKED-obstacle blindspot (`compound_prob 0.12`:
   narrow-A → jump-barrier → narrow-B-opposite, needs a mid-air/pre-swing). Offline: compound v210 7/50

@@ -189,7 +189,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'clean-16w'; // 16t = 30 Hz state broadcast (obs freshness; control stays 10 Hz host-side) + 16s turn-write diag
+const HOOK_VERSION = 'clean-16x'; // 16x = + Velocity Vec3 (vel_x/y/z) arc ground-truth (pure read). 16t = 30 Hz state broadcast (obs freshness; control stays 10 Hz host-side) + 16s turn-write diag
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -1088,6 +1088,12 @@ function snapshot() {
     s.is_strafing = readBool(cp, OFF.IsStrafing);
     s.facing = readI32(cp, OFF.Facing);
     s.velocity = cachedRunVel; // CharacterPlayer.GetRunVelocity() sampled on the main thread
+    // --- ARC GROUND-TRUTH (pure reads): MovingObject.Velocity Vector3 @0x34 (x,y,z). vel_y is the
+    // vertical jump-arc velocity (+rising / -falling) -> confirms the jump span + apex models vs the
+    // sim; vel_x/z the horizontal motion. Enables trajectory_diff to ground the arc in real physics. ---
+    s.vel_x = readF32(cp, 0x34);
+    s.vel_y = readF32(cp, 0x38);
+    s.vel_z = readF32(cp, 0x3C);
     // --- PROBE: CharacterPlayer fields (pure reads) ---
     s.player_x_offset = readF32(cp, OFF.PlayerXOffset);   // the game's own lateral offset (candidate real lane)
     s.is_over_ground = readBool(cp, OFF.IsOverGround);

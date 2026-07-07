@@ -48,6 +48,7 @@ LOG_FIELDS = (
     "next_path_level", "next2_path_level",   # [PROBE 16q] upcoming-cell Level readability (direction fix)
     "turn_write", "should_turn_left", "should_turn_right",  # [16s] turn-byte verdict + GI readback
     "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
+    "vel_x", "vel_y", "vel_z",   # [16x] Velocity Vec3 arc ground-truth (vel_y = vertical jump arc)
     # --- Region2D narrow-band probe (hook 15c): game-polygon safe band of the upcoming narrow ---
     "narrow_band_lo", "narrow_band_hi", "on_region", "_hv",
 )

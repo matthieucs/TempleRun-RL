@@ -191,6 +191,16 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
                                        # swipes ~impossible, but v14 turned 46/46 up to v207 on device
                                        # (5462m fresh-phone run). Second-frame swipes (~0.6 at v>150)
                                        # MISS -> v27's device hesitation deaths; first-frame swipes safe.
+    # TURN-SEND LATENCY [DEVICE-MEASURED 2026-07-06, v47 junction/off deaths + USER-observed "action fired
+    # but never launched"]: the turn_buffer_late_cp gate (0.56) is measured on the PROCESSING cp (the cp
+    # when the game consumes the swipe), which is velocity-INDEPENDENT. But the policy DECIDES on the
+    # OBSERVED cp, and the byte arrives ~this many frames LATER -> processing_cp = decision_cp +
+    # velocity*lat*dt/cell. At HIGH speed that pushes an on-junction decision (e.g. v47 decided TL @cp0.36
+    # @v210) past 0.56 -> DEAD-LETTER -> off-track death (v14 survived by deciding @cp~0.1). The sim gated
+    # on the decision cp (no latency) -> let v47 fire on-junction turns that dead-letter on device. lat=1
+    # (= the measured 1-frame control latency) reproduces it; the latency-robust play is a PRE-SWIPE on the
+    # approach cell (turn_approach_buffer, immune). Default 0 = off (equivalence/scorecard unchanged).
+    "turn_send_lat_frames": 0.0,
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
     # longer reads these; turning at any cprog in the window (or buffered early) is clean.
@@ -284,10 +294,43 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
                                        # step-UP crevasse survives only if the jump HEIGHT (parabola, 1 at
                                        # apex) at the raised ledge >= this — auto velocity-dependent (span
                                        # = jump_dur*vel/cell_len). 0.45 -> survive ~[0.13,0.87] of the span.
+    # NON-FATAL CLIP [USER-OBSERVED + DEVICE-MEASURED 2026-07-06, 15 events / 4 captures]: a MARGINAL
+    # step-up clip does NOT kill — the runner grazes the ledge and STUMBLES: velocity *= 0.85 in ONE
+    # frame (exactly StumbleSlowDown; 15/15 airborne, 14/15 on pt33-36/long-holes, recovery ~+1.4 u/s =
+    # stumble_recover_rate; ~5 events per 8 device eps). The binary clear-or-die model missed it, and the
+    # slowdown RE-TIMES everything after (the low-speed hole-death cluster follows it). Model: apex
+    # height in [stepup_min_height - band, stepup_min_height) -> _stumble() instead of Kill(2).
+    # 0 = OFF (scorecard/replay/reference behavior unchanged); train ~0.25 (calibrated vs device rate).
+    "stepup_clip_band": 0.0,
     "stepup_min_takeoff_prog": 0.85,   # [DEAD — replaced by stepup_min_height apex model] kept for compat
     "gap_entry_grace": 0.2,            # [MEASURED 2026-07-02] solid lip at a wide-gap cell's entry:
                                        # grounded entry survives until this cprog (device takeoffs
                                        # 0.98-1.02 cleared); still grounded past it -> Fall
+    # WIDE-GAP LANDING MODEL [DEVICE-MEASURED 2026-07-06, jump_arc.py over 8 captures / 1600 jumps].
+    # The old wide-gap check was "still airborne at each cell entry" — which a SHORT arc satisfies
+    # while landing INSIDE the far gap cell (device: clips the far wall -> dt4 Ledge). Device 2-cell
+    # holes clip 21% (18/87), concentrated at LOW speed where the arc barely spans 2 cells. Fix: the
+    # jump must LAND past the far edge. Jump span (cells) fits span = a*velocity + b (NEGATIVE
+    # intercept — NOT proportional; the sim's jump_dur*v/cell_len=v/75 has the wrong slope 0.0133 and
+    # b=0, underestimating high-v span). Only the LAST gap cell is checked (next cell solid). OFF by
+    # default (no-op -> equivalence stays green); enabled in the device-true / training config.
+    "wide_gap_landing_model": False,
+    "wide_gap_span_a": 0.0204,         # cells of jump span per unit velocity (device fit)
+    "wide_gap_span_b": -0.94,          # span intercept (cells) — the arc's fixed shortfall
+    # CREVASSE APEX for ALL level-changes [DEVICE-MEASURED 2026-07-06, vel_y arcs + crevasse_clips.py].
+    # The step-UP apex model only fired on level-UP crevasses; step-DOWN / high-ground crevasses used
+    # the lenient airborne check -> the sim never penalised an EARLY crevasse jump, so v47 drifted to
+    # takeoff cp 0.33 (device: 0.63) and took repeated hits (slowdowns) on high-ground crevasses. The
+    # vel_y arcs show step-down ALSO needs near-apex at the far cell (pt35 cp0.96 vel_y~4 = apex). When
+    # True, the apex check (+ stepup_clip_band graze->stumble) fires on EVERY crevasse ledge cell. OFF
+    # by default (no-op -> equivalence green); enabled in the device-true / training config.
+    "crevasse_apex_all": False,
+    "wide_gap_land_grace": 0.35,       # far-lip landing grace: land within this cprog of the solid
+                                       # cell and still clear. Calibrated (sweep_grace.py + calib_landing.py):
+                                       # ~20% device clip rate, and leaves the GOOD jumper v36 almost
+                                       # untouched (grace-insensitive plateau) while punishing jump-spam.
+                                       # Domain-rand (jump jitter, dr velocity) supplies the real span
+                                       # variance (~0.29) so the policy can't exploit the hard boundary.
     # Powerup spawn probabilities are all 0 in the baseline read (sProbabilityBoost/Invincibility/
     # Vacuum/CoinBonus = 0) — why human runs saw 0 boost frames; the sim models no powerups (v1).
     "min_spaces_between_coin_runs": 12, # [READ] sMinSpacesBetweenCoinRuns
@@ -1131,9 +1174,14 @@ class TempleRunSimEnv(gym.Env):
             # v207, missed min 0.59) the GI_ShouldTurn write is dropped -> the turn NEVER FIRES -> off
             # the edge. Punishes second-frame swipes (~0.6 at v>150, v27's device hesitation deaths)
             # while first-frame swipes stay safe at all speeds (v14: 0 missed turns, 5462m fresh-phone).
-            if cp <= float(self.cfg.get("turn_buffer_late_cp", 0.56)):
+            # decision cp -> PROCESSING cp: the byte arrives turn_send_lat_frames later (velocity-scaled).
+            # At high speed this pushes an on-junction decision past the deadline -> dead-letter.
+            slat = float(self.cfg.get("turn_send_lat_frames", 0.0))
+            proc_cp = cp + (self._velocity * slat * float(self.step_dt) / float(self.cfg["cell_length"])
+                            if slat > 0.0 else 0.0)
+            if proc_cp <= float(self.cfg.get("turn_buffer_late_cp", 0.56)):
                 self._execute_turn(cell, want_left, float(self.cfg["turn_center_cprog"]), from_buffer=True)
-            # else: queued too late -> silent miss (later frames are even later; junction missed).
+            # else: queued too late (arrival past the deadline) -> silent miss / dead-letter off-track.
             return
         early = float(self.cfg["turn_exec_early"])
         late = float(self.cfg["turn_exec_late"])
@@ -1444,7 +1492,14 @@ class TempleRunSimEnv(gym.Env):
                 self._kill(1)   # outside the narrow's safe band -> fell off the strip
                 return
         obst = int(cell.get("obstacles", 0))
-        if obst in _MUST_JUMP and cell.get("stepup"):
+        # apex check fires on the crevasse LEDGE cell: step-UP always; ALL crevasse last-cells when
+        # crevasse_apex_all is on (step-DOWN/high-ground also demand near-apex timing — device-measured).
+        apex_cell = bool(cell.get("stepup"))
+        if not apex_cell and self.cfg.get("crevasse_apex_all") and obst == OBST_LEVEL_CHANGE \
+                and cell.get("wide_gap"):
+            nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
+            apex_cell = not nxt.get("wide_gap")   # the LAST crevasse cell (next cell solid)
+        if obst in _MUST_JUMP and apex_cell:
             # STEP-UP = VELOCITY-DEPENDENT APEX model [device-MEASURED, human_calib_v2 v210 probe
             # 2026-07-03]: the raised far ledge must be reached NEAR the jump APEX (still high). The jump
             # height is a parabola over the span the airtime covers = jump_duration*velocity/cell_len
@@ -1464,8 +1519,15 @@ class TempleRunSimEnv(gym.Env):
             d = float(self._cell_index) - self._jump_takeoff_pos   # cells from takeoff to the ledge lip
             frac = d / max(1e-6, span)                      # 0=takeoff, 0.5=apex, 1=landing
             height = 1.0 - (2.0 * frac - 1.0) ** 2          # parabola: 0 at ends, 1 at apex
-            if height < float(self.cfg["stepup_min_height"]):
-                self._kill(2)   # not high enough at the raised ledge -> clip it -> Fall
+            mh = float(self.cfg["stepup_min_height"])
+            if height < mh:
+                # marginal graze -> non-fatal STUMBLE slowdown (device-measured 2026-07-06); deep
+                # clip -> Fall. band 0 (default) = the old binary clear-or-die.
+                band = float(self.cfg.get("stepup_clip_band", 0.0))
+                if band > 0.0 and height >= mh - band:
+                    self._stumble()
+                else:
+                    self._kill(2)   # not high enough at the raised ledge -> clip it -> Fall
             return
         if obst in _MUST_JUMP:
             # Non-step-up wide gap (long hole / step-DOWN) or 1-cell hole: must be AIRBORNE crossing in.
@@ -1478,6 +1540,25 @@ class TempleRunSimEnv(gym.Env):
                 else:
                     self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / LevelChange/Tree
                 return
+            # WIDE-GAP LANDING MODEL: airborne here, but does the arc actually LAND past the gap?
+            # Fires only on the LAST gap cell (next cell solid). A short arc lands in the far gap cell
+            # -> clips the far wall (device dt4 Ledge). span(velocity) = a*v + b (device fit). To clear,
+            # landing (takeoff_pos + span) must reach the solid cell after this one (cell_index + 1),
+            # within a far-lip grace. See DEFAULT_CONFIG wide_gap_landing_model.
+            # HOLES ONLY: the span fit was calibrated on flat holes (pt12-16). LevelChange crevasses
+            # (obst=OBST_LEVEL_CHANGE) are ALSO wide_gap+must-jump but have a raised-ledge apex physics
+            # (handled by the stepup model, or the airborne check for step-DOWN); applying the hole span
+            # here rewarded EARLY crevasse jumps -> v47 device-regressed on high-ground crevasses.
+            if self.cfg.get("wide_gap_landing_model") and cell.get("wide_gap") \
+                    and obst == OBST_HOLE and self._jump_takeoff_pos is not None:
+                nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
+                if not nxt.get("wide_gap"):                     # this is the LAST gap cell
+                    span = float(self.cfg["wide_gap_span_a"]) * self._velocity \
+                        + float(self.cfg["wide_gap_span_b"])
+                    d = float(self._cell_index) - self._jump_takeoff_pos   # cells from takeoff to here
+                    if span < d + 1.0 - float(self.cfg["wide_gap_land_grace"]):
+                        self._kill(2)   # arc lands inside the gap -> clip the far wall (Ledge)
+                        return
         elif obst in _MUST_SLIDE:
             # die if NOT sliding OR AIRBORNE (jumped into the low bar — device-fatal, 2026-07-03).
             if self._slide_t <= 0.0 or self._jump_t > 0.0:
