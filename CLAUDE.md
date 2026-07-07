@@ -4,6 +4,23 @@ Goal: an RL policy that reaches **10,000 m** on real **Temple Run** (`com.imangi
 trained in a headless sim, deployed on a physical Android phone via **Frida** (read game state + inject
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
+## ⚡ CURRENT STATE (2026-07-07) — read this first
+- **DEVICE CHAMPION = v47** (`runs/ppo_v47_land_1703936_steps.zip`, 256-net obs58): fresh-phone median
+  **3540 / best 6783** vs v36 3112/4307. First 256-net to beat v36 — the hole landing-model fix
+  (`wide_gap_landing_model`) TRANSFERRED, breaking the offline↔device inversion curse. `runs/ppo_best.zip`
+  (v36) is the safe fallback. Branch `sim-fidelity-holes-crevasse-turn` (committed 2309c7b, pushed).
+- **Fidelity fixes SHIPPED (all config-gated, equivalence-green, in both sims):** `wide_gap_landing_model`
+  (holes, device-verified via v47), `crevasse_apex_all` (device-verified via v48 19%→15%), `turn_send_lat_frames`
+  (turn dead-letter, parity 16/16, NOT device-proven in isolation). Regressions: v48/v49/v50 all over-
+  specialised (stacked too many changes / dense-profile grind). LESSON: change ONE thing per retrain.
+- **HOOK 16y (committed): precise hit + arc instrumentation** — the velocity-drop hit heuristic was
+  OVER-counting (false positives). Real device mechanic decoded via source-dig: **high-ground (level-3)
+  crevasse caps stumble (×0.85) 32%, rule = `world_y < ground_height` at cap entry; mid caps 0%.**
+- **IMMEDIATE NEXT ACTION:** (1) recover/cool the phone, re-capture 16y (v47, ~8ep) to lock the 32% rate +
+  arc calibration; (2) model the high-ground cap graze in the sim (arc height at cap < cap top → Stumble,
+  level-aware, config-gated); (3) retrain ISOLATED (v47 + this one fix, no dense profiles) → device eval.
+  See the ★ 2026-07-07 SOURCE-DIG section below for the full mechanic + the exact device numbers.
+
 ## 🎯 GOAL REACHED — 2026-07-06: device run **10,545 m** (v36, hook 16w; `captures/best_run_10545m_v36_hook16u.jsonl`)
 Died Burnt on a flame tower at the end after 180 turns / 34 crevasses / 56 narrows / 54 holes / 92 jumps,
 117 s at the v210 cap. **NEXT PHASE = RELIABILITY: a 10 k MEDIAN, not just best** (same session runs were
