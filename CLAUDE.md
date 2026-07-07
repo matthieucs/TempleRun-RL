@@ -20,6 +20,27 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   arc calibration; (2) model the high-ground cap graze in the sim (arc height at cap < cap top → Stumble,
   level-aware, config-gated); (3) retrain ISOLATED (v47 + this one fix, no dense profiles) → device eval.
   See the ★ 2026-07-07 SOURCE-DIG section below for the full mechanic + the exact device numbers.
+- **TWO fully-specified fixes ready (both device-grounded this session):**
+  - **(A) HIGH-GROUND CAP GRAZE (crevasse fidelity, safe/config-gated).** Device physics NAILED via hook
+    16y: **jump peak = 19.2 world-units (velocity-INDEPENDENT constant, p25 19.1/p75 19.2, n=186)**; cap
+    ground_height by level: **level-3 = 15, level-2 = 0** (from the capture). Model: arc_y = jump_peak ·
+    parabola(frac_at_cap); graze (Stumble ×0.85) iff `arc_y < cap_height`, Ledge-kill iff `arc_y <
+    cap_height − band`. Reproduces device 32% graze @lvl3 / 0% @lvl2 because a lvl3 cap (15) sits just
+    under the 19.2 peak → the descending arc drops below it ~32%; lvl2 caps (0) always clear. Replace the
+    parabola-vs-mh(0.95) proxy in the stepup/`crevasse_apex_all` path with this world-Y check (the sim's
+    `_ground_height` is a comment=15, never actually used — wire the cap height by level). Config-gated,
+    default off → equivalence stays green. Captures: `captures/v47_16y_arcs.jsonl`, `v47_16y_calib2.jsonl`.
+  - **(B) CHAINED-OBSTACLE BLINDNESS (death mode — USER-observed on the 6216m run, THE priority).** Obs has
+    1-obstacle lookahead (next_must_jump/slide) + next2_path_LEVEL, but NOT the 2-ahead OBSTACLE. Death
+    (v47_16y_calib2 ep1 @6216m): JUMP over hole pt11 → still airborne → FLAME tower pt32 right behind →
+    can't slide-under while airborne → Burnt. FIX = add `next2_must_jump` + `next2_must_slide` to the obs
+    (OBS_BOOL_FIELDS, after next_ground_change_higher → OBS_LEN 30→32, obs 58→60). BREAKING (obs-dim
+    change): both sims' _snapshot add them (nxt2 = _track[cell_index+2], nobst2 ∈ _MUST_JUMP/_MUST_SLIDE,
+    with the SAME junction-dropout as next2_path_level: False if cell.is_turn or nxt.is_turn); the torch
+    obs builder must add them at the SAME positions (equivalence catches drift); surgery v47 obs58→obs60
+    (insert 2 zero cols at index 19); hook + capture_calib add the 2-ahead reads for deploy; retrain from
+    the surgery-widened v47. Do this ISOLATED (no dense profiles) as its own line — it's a fork, so the
+    obs58 champions stay deployable on the old obs.
 
 ## 🎯 GOAL REACHED — 2026-07-06: device run **10,545 m** (v36, hook 16w; `captures/best_run_10545m_v36_hook16u.jsonl`)
 Died Burnt on a flame tower at the end after 180 turns / 34 crevasses / 56 narrows / 54 holes / 92 jumps,
