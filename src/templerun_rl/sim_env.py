@@ -143,6 +143,11 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "jumpgap_chain_max": 1,             # RHYTHM CHAIN: repeat [clear,hole] up to n times (uniform 1..max);
                                         # 1 = single tail, no extra rng (v62-compatible). Device: high-ground
                                         # zones chain long-holes every ~4 cells (ab_v62_r1 ep0, ab_v60_r2 ep4)
+    # POST-TURN OBSTACLE [DEVICE-MEASURED 2026-07-08]: the game places obstacles on the FIRST cell after a
+    # junction (72 onsets ~1 cell post-turn across 6 captures; bimodal with the normal bulk at 2.5-5 cells);
+    # min_clear_after_turn(2) meant the sim NEVER did -> post-turn deaths end the 4-7k runs (7/15 of the
+    # pt(-1/1/2) deaths follow a turn by <12 frames). Standard obstacle sampler (holes stay 1-cell). 0=off.
+    "turnobstacle_prob": 0.0,           # P(a standard obstacle on the first post-junction cell)
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
@@ -1011,6 +1016,20 @@ class TempleRunSimEnv(gym.Env):
             ptype = 35
             wide = True
             stepup = False                 # cell 1 is the GAP (airborne), not the ledge; ledge is cell 2
+
+        # POST-TURN OBSTACLE [DEVICE-MEASURED 2026-07-08, 72 must-jump/slide onsets ~1 cell after a
+        # junction across 6 captures]: the real game DOES place obstacles on the first post-junction cell;
+        # min_clear_after_turn(2) meant the sim NEVER did -> the policy exits turns blind (obs null through
+        # junctions) and untrained -> 7/15 of the pt(-1/1/2) deaths follow a turn by <12 frames (ends the
+        # 4-7k runs). With prob, place a standard obstacle here (a HOLE stays 1-cell; a wide long-hole one
+        # cell after a corner would be unclearable), bypassing min_clear/min_space. b2b deliberately NOT
+        # bumped (the elif below resets it — mirrors the torch nonturn_reset). Gated prob>0 FIRST (no rng
+        # draw at default 0 -> stream/equivalence safe).
+        if (obstacle == OBST_NONE and not is_turn and self._cells_since_turn == 1
+                and float(cfg.get("turnobstacle_prob", 0.0)) > 0.0
+                and self._rng.random() < float(cfg.get("turnobstacle_prob", 0.0))):
+            obstacle = self._sample_obstacle_type()
+            self._cells_since_obstacle = 0
 
         # A turn cell carries no obstacle (the player must turn here); the cell right after a junction
         # is also kept clear (min_clear_after_turn) — a must-jump obstacle there is unclearable (you

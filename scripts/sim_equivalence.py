@@ -102,6 +102,13 @@ def scenario_tracks() -> dict:
     # with 2 clear cells between — land->run->jump repeated. Locks the chain death-resolution parity.
     t["jumpgap_chain"] = S(6) + ([cell(type=12, obstacles=1, wide_gap=True),
                                   cell(type=12, obstacles=1, wide_gap=True)] + S(2)) * 3 + S(4)
+    # POST-TURN OBSTACLE (device 2026-07-08): a tree right on the first post-junction cell, and a 1-cell
+    # hole after another junction — the turn-exit instant-reaction scenario. Locks the parity of turning
+    # into an immediate obstacle (turn fired late + must_jump/must_slide next cell).
+    t["turnobstacle"] = S(5) + [cell(type=3, is_turn=True, can_turn_left=True),
+                                cell(type=1, obstacles=4)] + S(4) \
+                        + [cell(type=3, is_turn=True, can_turn_right=True),
+                           cell(type=1, obstacles=1)] + S(6)
     t["junction_l"] = S(5) + [cell(type=3, is_turn=True, can_turn_left=True)] + S(8)
     t["junction_r"] = S(5) + [cell(type=3, is_turn=True, can_turn_right=True)] + S(8)
     t["junction_t"] = S(5) + [cell(type=7, is_turn=True, can_turn_left=True,

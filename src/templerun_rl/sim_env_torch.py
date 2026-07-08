@@ -641,6 +641,23 @@ class TorchTempleRunVecEnv(VecEnv):
                 self.pend_gap_level = torch.where(z_ok, self.zone_level, self.pend_gap_level)
                 self.pend_gap_stepup = torch.where(z_ok, self.zone_level > prev_zone, self.pend_gap_stepup)
 
+            # POST-TURN OBSTACLE (mirror of CPU, device-measured 2026-07-08): with prob, a standard
+            # obstacle on the FIRST post-junction cell (since_turn==1; a junction generated THIS step has
+            # since_turn 0 -> excluded), bypassing min_clear/min_space. Holes stay 1-cell (no wide roll).
+            # b2b deliberately untouched (nonturn_reset below zeroes it, mirroring the CPU elif).
+            top = float(cfg.get("turnobstacle_prob", 0.0))
+            if top > 0.0:
+                to = (rem & ~t_ok & (o_obst == OBST_NONE) & (self.since_turn == 1)
+                      & (self._rand() < top))
+                if bool(to.any()):
+                    w_to = self.obst_w.expand(B, -1).clone()
+                    early_to = (self.dist_real < float(cfg["slides_after_distance"])).unsqueeze(1)
+                    w_to = torch.where(early_to & self.obst_slide_mask.unsqueeze(0),
+                                       torch.zeros_like(w_to), w_to)
+                    typ_to = self.obst_types[torch.multinomial(w_to, 1, generator=self.g).squeeze(1)]
+                    o_obst = torch.where(to, typ_to, o_obst)
+                    self.since_obst = torch.where(to, torch.zeros_like(self.since_obst), self.since_obst)
+
             # normal obstacle placement
             ob_ok = (rem & ~t_ok & (o_obst == OBST_NONE)
                      & (self.since_turn >= int(cfg["min_clear_after_turn"]))
