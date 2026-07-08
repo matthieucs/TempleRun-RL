@@ -5,6 +5,35 @@ trained in a headless sim, deployed on a physical Android phone via **Frida** (r
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
 ## ⚡ CURRENT STATE (2026-07-08) — read this first
+- **★★ WAVE 6 (2026-07-08 night): POST-TURN OBSTACLE (v65) + 512 SCALE-UP (v66) + THE THERMAL DISCOVERY.**
+  - **★★ THERMAL THROTTLE = the evening device collapse decoded (dumpsys battery/thermal): the phone at
+    39-43°C after ~14h play-while-charging → frame-rate throttle → ALL policies collapse 2-3× (same v59:
+    4220 morning vs 1434 evening; monotonic decline batch after batch). App restart does NOT fix it; ONLY
+    COOLING does (game stopped + screen off: 39→36°C in ~20 min → performance RESTORED). The phone re-heats
+    36→38°C in ~4 episodes → OPERATIONAL RULE: cross-model A/Bs must be SHORT ALTERNATING batches (4 ep/arm)
+    on a cooled phone; check `dumpsys battery | grep temperature` (≤360 good, ≥380 throttled) before evals.**
+  - **v65 = v64 recipe + `turnobstacle_prob` 0.08 (POST-TURN OBSTACLE, device-measured: obstacles on the
+    FIRST post-junction cell in ~9% of turns — 72 onsets/6 captures; min_clear_after_turn(2) meant the sim
+    NEVER generated it → 7/15 of pt(-1/1/2) deaths followed a turn by <12 frames, ending the 4-7k runs;
+    both sims + `turnobstacle` equivalence track, 3380/3380 GREEN). Offline: +9.2% own env, +2.5% v64 cfg.**
+  - **v66 = v65@3.5M surgery-widened 256→512 (`surgery_v65_512.py`, 0/500 mism) + 6M cosine 1.2e-4→1e-5 on
+    the v65 recipe (the v57 capacity lesson): offline 2140 vs v65 1982 (+8%) = OFFLINE CHAMPION. COOLED-PHONE
+    A/B (alternating 4-ep batches): v66 pooled median 3737 (n=8, ZERO crevasse deaths, max 6236) vs v62 3253
+    (n=4, max 7368) — v66 leads.** Weights `runs/ppo_v66_512_5500928_steps.zip` (@5.5M = best ckpt).
+  - **REMAINING WALL (fresh cool-phone forensic): HOLES = 41% of the day's deaths; the residual root = the
+    HELD-JUMP reflex (device held% still ~83): (a) idle hedge-jumps landing ON an unseen hole's lip (grounded
+    past-lip → refused → dt1), (b) landing-frame re-jumps into chained holes (the jumpgap scenario — trained,
+    improved, not eliminated). Contributing constraint: obs lookahead 2 cells < jump span ~2.8 cells at speed
+    → the policy hedges. Levers: next3-obstacle obs (a fork, obs 60→62 + hook), or a next-gap-distance
+    scalar obs. **v67 (= v66@5.5M + jumpgap 0.3 + turnobstacle 0.12 pressure-bump) FAILED its own gate
+    (1854 vs v66 2021 in v67's OWN cfg) — the v49/v50 lesson re-confirmed: MORE scenario pressure ≠ better;
+    0.15/0.08 is the right exposure. DISCARDED.**
+  - **★ FINAL NIGHT BENCHMARK (v66@5.5M, coolest window 34°C, 6ep): median 4073, THREE 6k+ runs (6019/6592/
+    6706, enders: flame, flame, turn dead-letter). Pooled v66 device n=14: median ~3737, 4 runs >6k, ZERO
+    crevasse-graze regression. v66 = THE DEPLOY CHAMPION (`runs/ppo_v66_512_5500928_steps.zip`, 512-net
+    obs60, hook 16z). Reliability ladder to 10k median from here: (1) the held-jump/hole reflex (next3 or
+    gap-distance obs = the likely key), (2) turn dead-letter at 5-7k (hook-side or gentle-lat retrain),
+    (3) flame slide-under at speed (the 10545 ender, still unmodeled).**
 - **★★ WAVE 5 (2026-07-08 evening): RHYTHM CHAIN (v63) + the ANTI-DRIFT CONSOLIDATION (v64). USER-driven.**
   - **★ USER INSIGHT (measured, the wave's driver): "mid-to-high still hits the edge" = SEQUENTIAL-FINETUNE
     DRIFT.** Device graze at lvl-3 caps: v59 19% → v62 26-29% → v63 32% (back to v51 baseline); arc
