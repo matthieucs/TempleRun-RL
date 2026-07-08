@@ -213,6 +213,9 @@ class TorchTempleRunVecEnv(VecEnv):
         self.pend_postgap_level = torch.full((B,), 2, **i64)
         self.pend_postgap_pay = torch.zeros(B, **i64)
         self.pend_postgap_nlane = torch.zeros(B, **i64)
+        # jumpgap RHYTHM-CHAIN mode: >0 = total cells of a periodic [clear*g, hole*h]*n tail (phase math
+        # from the jumpgap_gap/hole_cells cfg constants); 0 = legacy threshold mode (jumpslide/jumpnarrow).
+        self.pend_postgap_total = torch.zeros(B, **i64)
 
         # ---- player state ----------------------------------------------------
         self.velocity = torch.full((B,), float(cfg["start_velocity"]), **f32)
@@ -435,6 +438,7 @@ class TorchTempleRunVecEnv(VecEnv):
         self.pend_nar[m] = 0
         self.pend_postgap[m] = 0
         self.pend_postgap_pay[m] = 0
+        self.pend_postgap_total[m] = 0
         self.q_len[m] = 0
         self.inj_cursor[m] = 0
 
@@ -551,6 +555,14 @@ class TorchTempleRunVecEnv(VecEnv):
         srcP = m & ~srcQ & ~srcG & (self.pend_postgap > 0)
         if bool(srcP.any()):
             is_clear = srcP & (self.pend_postgap > self.pend_postgap_pay)
+            # jumpgap RHYTHM-CHAIN (periodic) mode: total>0 -> the tail is [clear*g, hole*h]*n; the cell's
+            # role comes from its phase in the period, not the end-threshold (mirrors CPU list order).
+            per_on = srcP & (self.pend_postgap_total > 0)
+            if bool(per_on.any()):
+                g_c = max(0, int(cfg.get("jumpgap_gap_cells", 2)))
+                h_c = max(1, int(cfg.get("jumpgap_hole_cells", 2)))
+                phase = (self.pend_postgap_total - self.pend_postgap) % (g_c + h_c)
+                is_clear = torch.where(per_on, phase < g_c, is_clear)
             is_pay = srcP & ~is_clear
             is_slide = is_pay & (self.pend_postgap_nlane == 0)
             is_narrow = is_pay & (self.pend_postgap_nlane != 0)
@@ -711,6 +723,8 @@ class TorchTempleRunVecEnv(VecEnv):
                     self.pend_postgap_obst = torch.where(js, sob, self.pend_postgap_obst)
                     self.pend_postgap_type = torch.where(js, spt, self.pend_postgap_type)
                     self.pend_postgap_level = torch.where(js, o_level, self.pend_postgap_level)
+                    self.pend_postgap_total = torch.where(js, torch.zeros_like(self.pend_postgap_total),
+                                                          self.pend_postgap_total)  # threshold mode
                     queued = queued | js
             jnp = float(cfg.get("jumpnarrow_prob", 0.0))
             if jnp > 0.0:
@@ -729,6 +743,8 @@ class TorchTempleRunVecEnv(VecEnv):
                                                         self.pend_postgap_pay)
                     self.pend_postgap_nlane = torch.where(jn, lane, self.pend_postgap_nlane)
                     self.pend_postgap_level = torch.where(jn, o_level, self.pend_postgap_level)
+                    self.pend_postgap_total = torch.where(jn, torch.zeros_like(self.pend_postgap_total),
+                                                          self.pend_postgap_total)  # threshold mode
                     queued = queued | jn
             # GAP->GAP compound (the high-ground double-jump death, mirror of CPU _queue_jumpgap): a 2-cell
             # HoleLong a couple clear cells after this wide-gap -> a blind landing-frame re-jump lands
@@ -743,8 +759,16 @@ class TorchTempleRunVecEnv(VecEnv):
                 if bool(jg.any()):
                     gap = int(cfg.get("jumpgap_gap_cells", 2))
                     hole = max(1, int(cfg.get("jumpgap_hole_cells", 2)))
-                    self.pend_postgap = torch.where(jg, torch.full_like(self.pend_postgap, gap + hole),
-                                                    self.pend_postgap)
+                    # RHYTHM CHAIN: n repeats of [clear*gap, hole*hole]; chain_max=1 (default) = single
+                    # tail with NO extra rng draw (v62 stream untouched); >1 draws n uniform 1..chain_max.
+                    chain_max = int(cfg.get("jumpgap_chain_max", 1))
+                    if chain_max > 1:
+                        n_rep = 1 + torch.randint(0, chain_max, (self.B,), generator=self.g, device=dev)
+                    else:
+                        n_rep = torch.ones(self.B, dtype=torch.int64, device=dev)
+                    tot = n_rep * (gap + hole)
+                    self.pend_postgap = torch.where(jg, tot, self.pend_postgap)
+                    self.pend_postgap_total = torch.where(jg, tot, self.pend_postgap_total)  # periodic mode
                     self.pend_postgap_pay = torch.where(jg, torch.full_like(self.pend_postgap_pay, hole),
                                                         self.pend_postgap_pay)
                     self.pend_postgap_nlane = torch.where(jg, torch.zeros_like(self.pend_postgap_nlane),

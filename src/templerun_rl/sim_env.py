@@ -140,6 +140,9 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "jumpgap_after_distance": 300.0,    # only past this
     "jumpgap_gap_cells": 2,             # clear cells between the wide-gap end and the 2nd hole
     "jumpgap_hole_cells": 2,            # width of the 2nd hole (2 = HoleLong pt12, landing model applies)
+    "jumpgap_chain_max": 1,             # RHYTHM CHAIN: repeat [clear,hole] up to n times (uniform 1..max);
+                                        # 1 = single tail, no extra rng (v62-compatible). Device: high-ground
+                                        # zones chain long-holes every ~4 cells (ab_v62_r1 ep0, ab_v60_r2 ep4)
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
@@ -875,13 +878,23 @@ class TempleRunSimEnv(gym.Env):
         -> dt4 Ledge, the exact device signature) or arrives grounded past the lip (refusal -> Fall);
         land -> run the clear cells -> deliberate jump at the lip CLEARS. Only when jumpgap_prob>0."""
         cfg = self.cfg
+        # RHYTHM CHAIN [DEVICE 2026-07-08, ab_v62_r1 ep0 @794 / ab_v60_r2 ep4 @1481]: high-ground zones
+        # chain long-holes every ~4 cells (hole x2 -> clear x2 -> hole x2 ...) — the documented multi-hole
+        # RHYTHM wall. One tail trains ONE repetition; the device demands a land->run->jump METRONOME over
+        # 3+. chain_max=1 (default) = single tail, NO extra rng draw (v62 stream untouched); >1 draws the
+        # repeat count uniform 1..chain_max.
+        n_rep = 1
+        chain_max = int(cfg.get("jumpgap_chain_max", 1))
+        if chain_max > 1:
+            n_rep = 1 + int(self._rng.integers(0, chain_max))
         seq: list[dict] = []
-        for _ in range(max(0, int(cfg.get("jumpgap_gap_cells", 2)))):
-            seq.append(_element(type=int(cfg["path_type_straight"]), level=level, is_turn=False))
-        for _ in range(max(1, int(cfg.get("jumpgap_hole_cells", 2)))):
-            e = _element(type=12, level=level, obstacles=OBST_HOLE, is_turn=False)
-            e["wide_gap"] = True
-            seq.append(e)
+        for _ in range(n_rep):
+            for _ in range(max(0, int(cfg.get("jumpgap_gap_cells", 2)))):
+                seq.append(_element(type=int(cfg["path_type_straight"]), level=level, is_turn=False))
+            for _ in range(max(1, int(cfg.get("jumpgap_hole_cells", 2)))):
+                e = _element(type=12, level=level, obstacles=OBST_HOLE, is_turn=False)
+                e["wide_gap"] = True
+                seq.append(e)
         self._pending_post_gap.extend(seq)
 
     @staticmethod

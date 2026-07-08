@@ -98,6 +98,10 @@ def scenario_tracks() -> dict:
                            cell(type=12, obstacles=1, wide_gap=True)] \
                    + S(2) + [cell(type=12, obstacles=1, wide_gap=True),
                              cell(type=12, obstacles=1, wide_gap=True)] + S(6)
+    # RHYTHM CHAIN (high-ground multi-hole metronome, ab_v62_r1 ep0 / ab_v60_r2 ep4): three 2-cell holes
+    # with 2 clear cells between — land->run->jump repeated. Locks the chain death-resolution parity.
+    t["jumpgap_chain"] = S(6) + ([cell(type=12, obstacles=1, wide_gap=True),
+                                  cell(type=12, obstacles=1, wide_gap=True)] + S(2)) * 3 + S(4)
     t["junction_l"] = S(5) + [cell(type=3, is_turn=True, can_turn_left=True)] + S(8)
     t["junction_r"] = S(5) + [cell(type=3, is_turn=True, can_turn_right=True)] + S(8)
     t["junction_t"] = S(5) + [cell(type=7, is_turn=True, can_turn_left=True,

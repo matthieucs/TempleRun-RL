@@ -11,7 +11,8 @@ import templerun_rl.obs as O
 CFG = {"jump_exec_lat_frames":1,"jump_exec_lat_jitter":1,"hook_turn_buffer":True,"jump_drop_prob":0.1,
        "compound_prob":0.12,"strafe_exec_lat_frames":1,"narrow_lane_center":5.0,"narrow_lane_tol":2.0,
        "stepup_clip_band":0.25,"wide_gap_landing_model":True,"wide_gap_land_grace":0.35,
-       "crevasse_graze_worldy":True,"turn_approach_buffer":True,"turn_linger_frames":3,
+       "crevasse_graze_worldy":True,"crevasse_cap_arc_offset":0.4,"crevasse_takeoff_std":0.2,
+       "turn_approach_buffer":True,"turn_linger_frames":3,
        "curriculum_max_start_dist":0.0}
 
 def run(model_path, n_eps=50, seed0=1000):

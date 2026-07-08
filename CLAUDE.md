@@ -5,6 +5,33 @@ trained in a headless sim, deployed on a physical Android phone via **Frida** (r
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
 ## ⚡ CURRENT STATE (2026-07-08) — read this first
+- **★★ WAVE 5 (2026-07-08 evening): RHYTHM CHAIN (v63) + the ANTI-DRIFT CONSOLIDATION (v64). USER-driven.**
+  - **★ USER INSIGHT (measured, the wave's driver): "mid-to-high still hits the edge" = SEQUENTIAL-FINETUNE
+    DRIFT.** Device graze at lvl-3 caps: v59 19% → v62 26-29% → v63 32% (back to v51 baseline); arc
+    clearance +3.09 → +0.00. Each isolated 2M finetune optimizes its new scenario while crevasse exposure
+    in standard generation is too sparse to defend the timing. **ROOT CAUSE = TRAINING (not sim/reward).
+    LESSON: the one-change-per-retrain discipline conflicts with skill RETENTION — once 2+ scenario skills
+    matter, they must be trained TOGETHER (anchored mix), not stacked.**
+  - **v63 = v62 + `jumpgap_chain_max` 3 (RHYTHM CHAIN: the tail becomes [clear×2, hole×2]×n, n~U(1..3);
+    torch = periodic phase emission via `pend_postgap_total`, equivalence 3211/3211 GREEN incl the new
+    `jumpgap_chain` track).** Device forensic ground: ab_v62_r1 ep0 @794 / ab_v60_r2 ep4 @1481 = high-ground
+    long-holes chained every ~4 cells; the seamless held re-jump arcs into hole #2 (the USER-observed
+    "double-jump when the first landing is close to the edge"). Offline: +12.6% chain cfg, parity v62 cfg.
+    **DEVICE: median 2180 vs v62 control 2665 = NO win (its crevasse had eroded further). SHELVED as a
+    policy; the chain KNOB is kept (it's in v64's base).**
+  - **★ v64 = v59@1.5M + the WAVE-3-VALIDATED anchored curriculum + ALL scenario knobs in base (jumpgap
+    0.15 + chain 3 + b2b 6), 4M cosine 8e-5→1e-5 (`train_v64_anchored_mix.sh`): profiles 45% standard
+    ANCHOR / 15% gauntlet / 12% crevasse-field / 12% rhythm / 10% compound / 6% narrow. OFFLINE = BEST OF
+    ALL: 2152 crevasse-cfg (v59 2017, v62 2027) AND best sim graze 23% (v59 24, v62 26) — the mix DEFENDED
+    the crevasse skill while adding rhythm.** Best ckpt @3.5M (`ppo_v64_mix_3502080_steps.zip`). DEVICE
+    (same-session pair, depressed evening phone): v64 median 2161 / mean 2522 vs v62 2327/2268 = TIE;
+    graze n too small to read (13-19 encounters/batch). **STATUS: v64 = the deploy CANDIDATE on offline+sim
+    evidence; NOT yet device-crowned. ⚠️ PHONE-STATE: all afternoon/evening medians ran 2-3× below the
+    fresh morning (same v59: 4220 morning vs 1434 evening) — cross-session medians are MEANINGLESS.**
+  - **IMMEDIATE NEXT ACTION (next session): FRESH-PHONE morning 3-way A/B v64@3.5M vs v62@1.5M vs v59@1.5M
+    (8ep each, alternating) + `analyze_crevasse_device` graze on each → crown the champion. Then the
+    remaining killers by mix: turn dead-letter (pt-1/1/2 ends most good runs now — the hook-side pre-swipe
+    idea from the v52 entry, NO retrain), flame slide-under, turn→immediate-hole (survivability unknown).**
 - **★★ WAVE 4 (2026-07-08): v51 → v59 CREVASSE fix = device-validated WIN; then the HIGH-GROUND DOUBLE-JUMP:
   reward-shaping failed twice (v60/v61) → DEATH-MODEL (jumpgap) → v62 = the targeted death mode FIXED on
   device (re-jump deaths 0/46, frequency 17→5.75/ep) + same-session ≥ v59. USER-driven live-watch loop.**
