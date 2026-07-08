@@ -31,6 +31,9 @@ def shaping_reward(
     idle_action_penalty: float = 0.0,
     redundant_action_penalty: float = 0.0,
     airborne_action_penalty: float = 0.0,
+    jump_hold_penalty: float = 0.0,
+    jumped_recently: bool = False,
+    slid_recently: bool = False,
     strafe_penalty: float = 0.0,
     narrow_hold_bonus: float = 0.0,
     aim_center_weight: float = 0.0,
@@ -50,7 +53,7 @@ def shaping_reward(
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
             and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty
             and not narrow_hold_bonus and not velocity_drop_penalty and not off_center_penalty
-            and not slide_jump_penalty and not airborne_action_penalty):
+            and not slide_jump_penalty and not airborne_action_penalty and not jump_hold_penalty):
         return 0.0
     r = 0.0
     # JUMP into a slide-obstacle is FATAL on device [MEASURED 2026-07-03, ppo_speed_v8: 4/8 deaths] —
@@ -175,6 +178,29 @@ def shaping_reward(
             r -= airborne_action_penalty
         elif action == int(C.Action.SLIDE) and prev.get("is_sliding"):
             r -= airborne_action_penalty
+    # JUMP-HOLD penalty [USER-observed + device-decoded 2026-07-08, v59 ab_v59_r1 ep3/ep4 dt=4 Ledge]:
+    # the policy HOLDS jump (presses JUMP on consecutive frames). A single press already fires the full
+    # 0.8s jump, so the hold is pure spam — and it's LETHAL on HIGH-GROUND: the instant jump-1 lands, the
+    # still-held press fires a seamless jump-2 (device is_jumping never drops between them) whose arc
+    # descends into the next step-down crevasse / long-hole packed in the high-ground zone -> Ledge/Fall.
+    # The airborne penalty MISSED this: in-sim jump-1's landing leaves a 1-frame is_jumping=False gap, so
+    # the re-jump press has prev.is_jumping=False and wasn't docked -> the policy learned the landing-frame
+    # re-jump is free (it is NOT on device, where the jumps overlap). Keying on last_action (the policy's
+    # OWN action stream, identical sim<->device) catches the hold regardless of the airborne-state timing:
+    # dock a JUMP that follows a JUMP (and a SLIDE after a SLIDE) -> the policy learns press-once-and-release.
+    # v61 (2026-07-08): WINDOW + GATE. v60's "consecutive JUMP" check was GAMED — the policy inserted
+    # 1-frame NoOp gaps (JMP,-,JMP) so no two presses were adjacent, yet still re-jumped on landing (ab_v60
+    # ep4 dt=4). So key on `jumped_recently` = a JUMP within the last ~6 frames (a jump lasts 8 frames -> a
+    # window can't be dodged by gaps), and GATE on prev.must_jump: NEVER dock a jump AT an obstacle (the
+    # legit jump + the closed-loop retry for dropped jumps) -> stops the over-correction that made v60
+    # jump-shy on holes. Only the purposeless post-obstacle re-jump (the lethal high-ground double-jump) docks.
+    if jump_hold_penalty and prev is not None:
+        if (action == int(C.Action.JUMP) and jumped_recently
+                and not prev.get("must_jump")):
+            r -= jump_hold_penalty
+        elif (action == int(C.Action.SLIDE) and slid_recently
+                and not prev.get("must_slide")):
+            r -= jump_hold_penalty
     # STRAFE dock: curbs the strafe-spam (high ent_coef + action-history let it back). On the DEVICE an
     # off-track strafe drives the continuous lane far OOD (sim lane is 3 discrete values) -> the policy
     # never saw lane=-15 in training -> erratic -> walks off the edge (the 2026-06-26 device failure).

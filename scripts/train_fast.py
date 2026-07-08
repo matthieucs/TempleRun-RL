@@ -69,6 +69,9 @@ def main() -> None:
     p.add_argument("--slide-jump-penalty", type=float, default=0.0)
     p.add_argument("--airborne-action-penalty", type=float, default=0.0,
                    help="dock JUMP-while-jumping / SLIDE-while-sliding (jump-spam curb)")
+    p.add_argument("--jump-hold-penalty", type=float, default=0.0,
+                   help="dock a HELD jump/slide (JUMP-after-JUMP) -> kills the seamless landing-frame "
+                        "re-jump that dies on high-ground (device-decoded 2026-07-08)")
     p.add_argument("--turn-approach-buffer", action="store_true", default=False)
     p.add_argument("--curriculum-max-start-dist", type=float, default=0.0)
     p.add_argument("--domain-rand", dest="domain_rand", action="store_true", default=True)
@@ -98,6 +101,7 @@ def main() -> None:
         strafe_penalty=args.strafe_penalty, narrow_hold_bonus=args.narrow_hold_bonus,
         aim_center_weight=args.aim_center_weight, slide_jump_penalty=args.slide_jump_penalty,
         airborne_action_penalty=args.airborne_action_penalty,
+        jump_hold_penalty=args.jump_hold_penalty,
         action_history_len=K, frame_stack=FS)
 
     net_arch = [int(x) for x in args.net_arch.split(",") if x.strip()]

@@ -91,6 +91,13 @@ def scenario_tracks() -> dict:
     t["jumpnarrow"] = S(6) + [cell(type=12, obstacles=1, wide_gap=True),
                               cell(type=12, obstacles=1, wide_gap=True)] \
                       + S(1) + [cell(type=19, narrow_lane=-1)] * 2 + S(6)
+    # gap->gap compound (the high-ground double-jump death, 2026-07-08): long-hole -> 2 clear -> a 2nd
+    # 2-cell HoleLong. A blind landing-frame re-jump lands INSIDE gap-2 (landing model dt4); a deliberate
+    # jump from the lip clears. Locks the gap->gap death-resolution parity.
+    t["jumpgap"] = S(6) + [cell(type=12, obstacles=1, wide_gap=True),
+                           cell(type=12, obstacles=1, wide_gap=True)] \
+                   + S(2) + [cell(type=12, obstacles=1, wide_gap=True),
+                             cell(type=12, obstacles=1, wide_gap=True)] + S(6)
     t["junction_l"] = S(5) + [cell(type=3, is_turn=True, can_turn_left=True)] + S(8)
     t["junction_r"] = S(5) + [cell(type=3, is_turn=True, can_turn_right=True)] + S(8)
     t["junction_t"] = S(5) + [cell(type=7, is_turn=True, can_turn_left=True,
@@ -283,7 +290,7 @@ def deterministic_suite() -> int:
                       idle_action_penalty=0.05, redundant_action_penalty=0.12,
                       strafe_penalty=0.3, narrow_hold_bonus=0.18, aim_center_weight=1.0,
                       velocity_drop_penalty=0.02, off_center_penalty=0.03,
-                      slide_jump_penalty=0.15, airborne_action_penalty=0.1)
+                      slide_jump_penalty=0.15, airborne_action_penalty=0.1, jump_hold_penalty=0.12)
     variants = {
         "base": ({}, {}),
         "hookbuf": ({"hook_turn_buffer": True}, {}),

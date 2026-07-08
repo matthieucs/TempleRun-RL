@@ -90,6 +90,7 @@ class TorchTempleRunVecEnv(VecEnv):
         idle_action_penalty: float = 0.0,
         redundant_action_penalty: float = 0.0,
         airborne_action_penalty: float = 0.0,
+        jump_hold_penalty: float = 0.0,
         strafe_penalty: float = 0.0,
         narrow_hold_bonus: float = 0.0,
         aim_center_weight: float = 0.0,
@@ -114,6 +115,7 @@ class TorchTempleRunVecEnv(VecEnv):
         self.idle_action_penalty = float(idle_action_penalty)
         self.redundant_action_penalty = float(redundant_action_penalty)
         self.airborne_action_penalty = float(airborne_action_penalty)
+        self.jump_hold_penalty = float(jump_hold_penalty)
         self.strafe_penalty = float(strafe_penalty)
         self.narrow_hold_bonus = float(narrow_hold_bonus)
         self.aim_center_weight = float(aim_center_weight)
@@ -283,6 +285,9 @@ class TorchTempleRunVecEnv(VecEnv):
         self.ep_ret = torch.zeros(B, **f32)
         self.ep_len = torch.zeros(B, **i64)
         self.last_action = torch.full((B,), A_NOOP, **i64)
+        # jump/slide ACTION recency (frames since last JUMP/SLIDE) for the windowed jump_hold_penalty (v61)
+        self.jump_recency = torch.full((B,), 99, **i64)
+        self.slide_recency = torch.full((B,), 99, **i64)
         self.act_hist = torch.full((B, max(1, self.K)), A_NOOP, **i64)
         self.frames = torch.zeros(B, self.FS, O.OBS_LEN, dtype=torch.float32, device=d)
         self.prev = None          # previous snapshot (dict of tensors) for shaping
@@ -413,6 +418,8 @@ class TorchTempleRunVecEnv(VecEnv):
         self.ep_ret[m] = 0.0
         self.ep_len[m] = 0
         self.last_action[m] = A_NOOP
+        self.jump_recency[m] = 99
+        self.slide_recency[m] = 99
         self.act_hist[m] = A_NOOP
         self.frames[m] = 0.0
 
@@ -551,6 +558,10 @@ class TorchTempleRunVecEnv(VecEnv):
                                  torch.full_like(o_type, int(cfg["path_type_straight"])), o_type)
             o_type = torch.where(is_slide, self.pend_postgap_type, o_type)
             o_obst = torch.where(is_slide, self.pend_postgap_obst, o_obst)
+            # GAP->GAP payload: a hole payload (jumpgap) rides the nlane==0 path above; mark it WIDE so
+            # the lip-grace / min-airtime / landing model fire exactly like a normal 2-cell HoleLong.
+            o_wide = torch.where(is_slide & (self.pend_postgap_obst == OBST_HOLE),
+                                 torch.ones_like(o_wide), o_wide)
             narrow_pt = torch.where(self.pend_postgap_nlane < 0,
                                     torch.full_like(o_type, 19), torch.full_like(o_type, 22))
             o_type = torch.where(is_narrow, narrow_pt, o_type)
@@ -718,6 +729,31 @@ class TorchTempleRunVecEnv(VecEnv):
                                                         self.pend_postgap_pay)
                     self.pend_postgap_nlane = torch.where(jn, lane, self.pend_postgap_nlane)
                     self.pend_postgap_level = torch.where(jn, o_level, self.pend_postgap_level)
+                    queued = queued | jn
+            # GAP->GAP compound (the high-ground double-jump death, mirror of CPU _queue_jumpgap): a 2-cell
+            # HoleLong a couple clear cells after this wide-gap -> a blind landing-frame re-jump lands
+            # INSIDE it (landing model dt4); land->run->deliberate-jump clears. Same prob>0-first gating;
+            # at most one tail per wide-gap. Hole payload rides the generic (nlane==0) type/obst emit;
+            # the emission block marks OBST_HOLE payload cells wide.
+            jgp = float(cfg.get("jumpgap_prob", 0.0))
+            if jgp > 0.0:
+                ws = (wide_start0 & ~queued
+                      & (self.dist_real >= float(cfg.get("jumpgap_after_distance", 0.0))))
+                jg = ws & (self._rand() < jgp)
+                if bool(jg.any()):
+                    gap = int(cfg.get("jumpgap_gap_cells", 2))
+                    hole = max(1, int(cfg.get("jumpgap_hole_cells", 2)))
+                    self.pend_postgap = torch.where(jg, torch.full_like(self.pend_postgap, gap + hole),
+                                                    self.pend_postgap)
+                    self.pend_postgap_pay = torch.where(jg, torch.full_like(self.pend_postgap_pay, hole),
+                                                        self.pend_postgap_pay)
+                    self.pend_postgap_nlane = torch.where(jg, torch.zeros_like(self.pend_postgap_nlane),
+                                                          self.pend_postgap_nlane)
+                    self.pend_postgap_obst = torch.where(jg, torch.full_like(self.pend_postgap_obst, OBST_HOLE),
+                                                         self.pend_postgap_obst)
+                    self.pend_postgap_type = torch.where(jg, torch.full_like(self.pend_postgap_type, 12),
+                                                         self.pend_postgap_type)
+                    self.pend_postgap_level = torch.where(jg, o_level, self.pend_postgap_level)
 
             # coin
             coin = rem & ~t_ok & (o_obst == OBST_NONE) \
@@ -1132,6 +1168,13 @@ class TorchTempleRunVecEnv(VecEnv):
             # device geometry: the raised cap sits slightly LATER in the arc (runner descending at it) ->
             # shift d so a cp~0.9 takeoff clips instead of clearing at apex. 0 = old apex-at-ledge model.
             d = self.cell_counter - self.takeoff_pos + float(cfg.get("crevasse_cap_arc_offset", 0.0))
+            # takeoff-timing VARIANCE (mirror of CPU ref): per-crevasse Gaussian shift of d so the
+            # descending-arc clearance spreads around the cap top -> partial graze (~32% @lvl3), not the
+            # sharp v55 threshold. Gated (0 = no draw). Matched N(0,std) distribution -> statistical-tier
+            # equivalence (the deterministic suite uses no random knobs, so its RNG stream is untouched).
+            _tk_std = float(cfg.get("crevasse_takeoff_std", 0.0))
+            if _tk_std > 0.0:
+                d = d + torch.randn(self.B, generator=self.g, device=self.dev) * _tk_std
             frac = d / span.clamp_min(1e-6)
             height = 1.0 - (2.0 * frac - 1.0) ** 2
             if cfg.get("crevasse_graze_worldy"):
@@ -1295,7 +1338,7 @@ class TorchTempleRunVecEnv(VecEnv):
         if not any((self.action_cost, self.reaction_bonus, self.turn_spam_penalty,
                     self.idle_action_penalty, self.redundant_action_penalty, self.strafe_penalty,
                     self.narrow_hold_bonus, self.velocity_drop_penalty, self.off_center_penalty,
-                    self.slide_jump_penalty, self.airborne_action_penalty)):
+                    self.slide_jump_penalty, self.airborne_action_penalty, self.jump_hold_penalty)):
             return torch.zeros(self.B, dtype=torch.float64, device=self.dev)
         p = self.prev
         r = torch.zeros(self.B, dtype=torch.float64, device=self.dev)
@@ -1352,6 +1395,11 @@ class TorchTempleRunVecEnv(VecEnv):
             aj = is_j & p["is_jumping"]
             asl = ~aj & is_s & p["is_sliding"]
             r = r - self.airborne_action_penalty * (aj | asl).float()
+        if self.jump_hold_penalty:   # v61 WINDOW+GATE: dock a re-jump WITHIN jump_hold_window frames of a
+            win = int(self.cfg.get("jump_hold_window", 6))   # prior jump (a jump lasts 8 fr -> gaps can't
+            hj = is_j & (self.jump_recency < win) & ~p["must_jump"]     # dodge it) EXCEPT at an obstacle
+            hs = ~hj & is_s & (self.slide_recency < win) & ~p["must_slide"]  # (protect the legit jump/retry)
+            r = r - self.jump_hold_penalty * (hj | hs).float()
         dock = self.strafe_penalty if self.strafe_penalty else self.idle_action_penalty
         if dock:
             r = r - dock * (is_strafe & (ntl == 0)).float()
@@ -1390,6 +1438,10 @@ class TorchTempleRunVecEnv(VecEnv):
         self.prev_score = snap["score"].clone()
         self.prev = snap
         self.last_action = a.clone()
+        self.jump_recency = torch.where(a == A_JUMP, torch.zeros_like(self.jump_recency),
+                                        (self.jump_recency + 1).clamp(max=99))
+        self.slide_recency = torch.where(a == A_SLIDE, torch.zeros_like(self.slide_recency),
+                                         (self.slide_recency + 1).clamp(max=99))
         self.elapsed = self.elapsed + 1
         truncated = (self.elapsed >= self.max_episode_steps) & ~terminated
         done = terminated | truncated
@@ -1443,6 +1495,10 @@ class TorchTempleRunVecEnv(VecEnv):
         self.prev_score = snap["score"].clone()
         self.prev = snap
         self.last_action = a.clone()
+        self.jump_recency = torch.where(a == A_JUMP, torch.zeros_like(self.jump_recency),
+                                        (self.jump_recency + 1).clamp(max=99))
+        self.slide_recency = torch.where(a == A_SLIDE, torch.zeros_like(self.slide_recency),
+                                         (self.slide_recency + 1).clamp(max=99))
         self.elapsed = self.elapsed + 1
         truncated = (self.elapsed >= self.max_episode_steps) & ~terminated
         done = terminated | truncated

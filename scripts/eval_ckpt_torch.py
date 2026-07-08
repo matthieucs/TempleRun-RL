@@ -56,13 +56,21 @@ def main() -> None:
     p.add_argument("--episodes", type=int, default=64)
     p.add_argument("--seed", type=int, default=24680)
     p.add_argument("--max-episode-steps", type=int, default=4000)
+    p.add_argument("--sim-config", default="", help="JSON dict merged into DEVICE_TRUE_CFG (e.g. the "
+                   "crevasse-fix knobs) so a model is evaluated in the env it was trained on")
     args = p.parse_args()
+
+    import json as _json
+    eval_cfg = dict(DEVICE_TRUE_CFG)
+    if args.sim_config:
+        eval_cfg.update(_json.loads(args.sim_config))
+        print(f"[eval cfg override] {args.sim_config}")
 
     for ck in args.checkpoints:
         m = PPO.load(ck, device="cpu")
         K, FS = infer_k_fs(int(m.observation_space.shape[0]))
         B = args.episodes
-        v = TorchTempleRunVecEnv(B, config=DEVICE_TRUE_CFG, device="cpu", seed=args.seed,
+        v = TorchTempleRunVecEnv(B, config=eval_cfg, device="cpu", seed=args.seed,
                                  max_episode_steps=args.max_episode_steps,
                                  reward_mode="distance", action_history_len=K, frame_stack=FS)
         obs = v.reset()

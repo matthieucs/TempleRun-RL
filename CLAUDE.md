@@ -4,12 +4,97 @@ Goal: an RL policy that reaches **10,000 m** on real **Temple Run** (`com.imangi
 trained in a headless sim, deployed on a physical Android phone via **Frida** (read game state + inject
 actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
 
-## ⚡ CURRENT STATE (2026-07-07) — read this first
+## ⚡ CURRENT STATE (2026-07-08) — read this first
+- **★★ WAVE 4 (2026-07-08): v51 → v59 CREVASSE fix = device-validated WIN; then the HIGH-GROUND DOUBLE-JUMP:
+  reward-shaping failed twice (v60/v61) → DEATH-MODEL (jumpgap) → v62 = the targeted death mode FIXED on
+  device (re-jump deaths 0/46, frequency 17→5.75/ep) + same-session ≥ v59. USER-driven live-watch loop.**
+  - **★ v62 = v59@1.5M + `jumpgap_prob` 0.15 (the GAP→GAP death model). TARGET FIXED ON DEVICE.**
+    Forensic first (`scratchpad/rejump_lethality.py`): device = ~17 landing-frame re-jumps/ep, ~2% lethal
+    each → **35% of device episodes END within 15 frames of a re-jump**; sim (v59 cfg) = 0.8/ep, **0/47
+    lethal** — `min_space_between_obstacles: 6` guarantees a clear landing (a jump spans ~2.2-2.8 cells) so
+    the blind re-jump was STRUCTURALLY free in-sim = no learning signal (why shaping kept failing). FIX =
+    `jumpgap_prob` compound (both sims, `_pending_post_gap` tail like jumpslide): after a wide-gap, 2 clear
+    cells then a 2-cell HoleLong; a blind landing-frame re-jump lands INSIDE gap-2 (landing model → dt4, the
+    device signature), land→run→deliberate-jump-at-the-lip clears. Torch: hole payload rides the nlane==0
+    generic emit + `o_wide` marked for OBST_HOLE payloads; `queued|jn` one-tail rule. With it ON, v59's sim
+    re-jump lethality 0→2.6% ≈ device. **Equivalence 3042/3042 GREEN** (new `jumpgap` injected track ×12
+    variants ×14 policies). v62 offline: +4.4% in its training env, NO regression (2027≈2017 crevasse-cfg).
+    **DEVICE (8ep, `ab_v62_r1`): re-jump deaths 0/46 events (v59: 7/345), re-jump freq 17→5.75/ep, hi-ground
+    jump-deaths 2/8 (v59 3/6). SAME-SESSION control (`ab_v59_r2`, mandatory per the same-session rule):
+    v62 median 1845 vs v59 1434 — TIED-leaning-v62 (n=8, overlapping).** NOTE the huge PHONE-STATE effect:
+    the SAME v59 scored median 4220 on the fresh morning phone vs 1434 in the depressed afternoon session —
+    afternoon medians are NOT comparable to morning ones; only same-session pairs count. **VERDICT: v62 =
+    new deploy candidate (`ppo_v62_jumpgap_1503232_steps.zip`) — beats v59 on the targeted death mode,
+    ≥ v59 overall. Death mix now: plain low-speed holes (600-1300m) + turn dead-letters + flames = the
+    remaining killers.** Scripts: `train_v62_jumpgap.sh`; knobs `jumpgap_prob/_after_distance/_gap_cells/
+    _hole_cells` (default 0/off).
+  - **v59 = v51 + CREVASSE TAKEOFF-VARIANCE fix (crevasse_graze_worldy + cap_arc_offset 0.4 +
+    crevasse_takeoff_std 0.2). DEVICE-VALIDATED.** Device capture (ab_v59_r1): lvl-3 crevasse graze
+    26%→19%, arc clears the cap HIGHER (+0.00→+3.09). **USER (live): "the mid to high ground transition is
+    almost mastered."** The #1 median killer (crevasse ~610m) largely closed. Offline: v59@1.5M = the sweet
+    checkpoint (crevasse +8%, standard +3.2%, NO regression; @2M over-specialized = the drift-past-1M
+    lesson). See the CREVASSE entry below for the full mechanism + why v55 failed (fixed offset = sharp
+    all-or-nothing; needed the takeoff VARIANCE for a clean partial rate).
+  - **★★ v60 = v59 + JUMP-HOLD fix (jump_hold_penalty 0.12). THE DOUBLE-JUMP FIX — TRANSFERRED TO DEVICE
+    (where v58's airborne penalty totally failed).** USER-observed (live, watching v59): "on HIGH-GROUND it
+    jumps AFTER having jumped an obstacle → jumps into its death. Only on high-ground." DECODED (ab_v59_r1
+    ep3/ep4 dt=4 Ledge): the policy HOLDS jump; the instant jump-1 lands, the still-held press fires a
+    SEAMLESS jump-2 (device is_jumping never drops between them) whose arc descends into the next step-down
+    crevasse / long-hole packed in the high-ground zone → Ledge/Fall. Only high-ground (flat low-ground = the
+    stray jump lands on solid ground). WHY v58's airborne penalty MISSED it: in-sim jump-1's landing leaves a
+    1-frame is_jumping=False gap so the landing-frame re-jump wasn't docked → the policy learned it's free
+    (it is NOT on device where the jumps overlap seamlessly). FIX = jump_hold_penalty: dock a JUMP-after-JUMP
+    (SLIDE-after-SLIDE), keyed on `last_action` (the policy's OWN action stream, IDENTICAL sim↔device → it
+    TRANSFERS). **PARTIAL/FRAGILE — the double-jump is NOT cleanly fixed (2 reward-shaping attempts failed,
+    as the docs warned; deploy champion stays v59):**
+    - **v60 (`jump_hold_penalty` 0.12, CONSECUTIVE JUMP-after-JUMP): GAMED + REGRESSED.** Device consecutive-
+      held 82.8%→2.7% (looked like a win) BUT the policy EVADED it with 1-frame NoOp gaps (JMP,-,JMP) → still
+      double-jumps on high-ground (ab_v60_r2 ep4 dt=4, decoded) AND over-corrected into hole deaths →
+      **device median 4220 (v59) → 2285 (v60), whole distribution shifted DOWN.**
+    - **v61 (WINDOWED [rejump within jump_hold_window=6 frames, un-gameable by gaps] + GATED on must_jump):
+      the GATE BACKFIRED.** Gating "don't dock a jump AT an obstacle" (to protect the legit jump + dropped-
+      jump retry) let ~all re-jumps through (obstacle-dense zones = must_jump often True) → v61 rejump(win6)
+      84.5% ≈ v59's 86.5% (barely curbed). Distance fine (offline 7764) only because behaviour barely changed.
+    - **OPEN LESSON: the ~85% "rejump" is MOSTLY harmless airborne HOLDS (dropped presses); the lethal event
+      is specifically the LANDING-frame NEW jump (starts a 2nd airtime). The metric conflates them, and
+      shaping keeps either missing the lethal press (gate) or over-correcting (ungated). NEXT = the PROVEN
+      death-modeling method: verify the sim does NOT kill v59's high-ground double-jump (survives in-sim = no
+      learning signal), then MODEL it — a high-ground obstacle→step-down/hole compound so the 2nd jump lands
+      short → Ledge (via the existing wide_gap_landing/apex models) → retrain → device.** Reward tooling
+      (jump_hold_penalty windowed+gated, `_jump_recency` in both sims, `measure_jumphold`, `device_jumphold`,
+      `decode_highground_death`) stays for reuse. reward.py + both sims' _shaping + train_fast + equivalence
+      shaping variant. **DEPLOY CHAMPION = v59 (`ppo_v59_crevasse_1503232_steps.zip`, device-validated). All
+    weights gitignored/local; UNCOMMITTED per norm.
 - **★ WAVE 3 (2026-07-07 late night): CURRICULUM + SCALE + the jump-spam wall.** New tooling all committed,
   equivalence GREEN throughout. USER-driven.
   - **v55 crevasse geometry fix (`crevasse_cap_arc_offset` + world-Y): DEVICE-DISPROVEN offline** — mild
     regression (dynamics change, sharp threshold, no clean partial rate; needs takeoff-VARIANCE not just an
     offset). Knob committed default-off. Crevasse still the #1 early killer (~600m); UNSOLVED.
+  - **★★ 2026-07-08 CREVASSE TAKEOFF-VARIANCE FIX → v59 (the v55 completion). DEVICE-MEASURED + calibrated,
+    equivalence GREEN, RETRAIN pending.** Fresh v51 device capture (`captures/v51_crevasse_16z.jsonl`, 6ep,
+    hook 16z, `scratchpad/analyze_crevasse_device.py`): v51 grazes high-ground (level-3, cap ground_height
+    15) crevasse caps **26% (n=19), 0% kill**; level-2 caps **0%** — CONFIRMS the documented ~32%. WHY v55
+    FAILED (now decoded): with `crevasse_graze_worldy` alone the cap sits near v51's jump APEX in-sim
+    (arc_y~19.2 >> cap 15, and the parabola is FLAT there) → clears 100%; a FIXED `cap_arc_offset` moves the
+    cap onto the descending arc but v51's in-sim takeoff is near-deterministic → SHARP all-or-nothing (no
+    partial rate). FIX = NEW `crevasse_takeoff_std` (both sims): a per-crevasse Gaussian shift of `d`
+    (takeoff→cap cells) so the descending-arc clearance SPREADS around the cap top → a FRACTION grazes.
+    Gated default-0 (no RNG draw → deterministic-suite stream untouched; follows the jump_exec_lat_jitter
+    pattern, drawn from self._rng / torch.randn(gen)). Calibrated in-sim (`scratchpad/sweep_crevasse_
+    variance.py`): **offset 0.4 + std 0.2 → v51 grazes 32% @lvl3 / 0% kill / lvl2 1% — matches device**
+    (errs slightly harsh = the safe direction). Equivalence **DETERMINISTIC 2873/2873 GREEN** (incl the
+    crevasse_graze variant; the std>0 path is matched-distribution → statistical-tier). v59 = v51 + ONLY
+    these two knobs, isolated (no dense profiles, 5e-5, per the v48/v52 one-change lesson);
+    `scratchpad/train_v59_crevasse.sh`. MIND v52/v55: v51 is a SHARP optimum, crevasse retrains regressed
+    before → gate HARD on device A/B. **SESSION NOTE: during the v51 capture, ep5 hit 10,389m (v51, hook
+    16z) — but run-luck: the 6ep set was 1044/2475/5709/6470/6538/10390, median ~6090 (cool phone). NOT
+    reliable 10k; the crevasse/hole early-killers still cap the median (ep0 died @1044 on a hole; the 10k
+    run also died on a hole).**
+  - **★ 2026-07-08 JUMP-TIMING PROBE = the jump-spam wall is NOT a fidelity gap (see the JUMP-SPAM WALL
+    entry below for the full refutation): device airtime 0.767s ≈ sim 0.80s, obs FRESH, airborne presses
+    DROPPED (not queued), arc peak 19.17 = sim 19.2. Jump model FAITHFUL; airborne penalty solved a non-
+    problem for device. The 6813m "random jump" death = a spurious GROUND jump → airborne into a must-slide
+    (the jump→slide death, v53's scenario), a policy habit not a timing gap. No jump_duration recal.**
   - **★ USER INSIGHT (the big one): "modelled correctly but TRAINED incorrectly."** `max_back_to_back_
     obstacles=2` CAPPED chains → the sim literally never made a GAUNTLET; training was sparse (min_space 6).
     FIX = raise b2b to 6 + `episode_profiles` MIX (torch-only, per-reset sample): 45% standard / 15% dense-
@@ -30,12 +115,23 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     the penalty works for STRAFE because random strafe self-punishes via lane/cliff death; jump-spam has no
     in-sim cost.) FIX = `airborne_action_penalty` (dock JUMP-while-jumping / SLIDE-while-sliding; reward.py
     + torch _shaping + train_fast; equivalence GREEN). **v58 = v57 + penalty 0.15: offline jump-spam 80%→
-    27% (PROVEN in-sim). BUT DEVICE spam UNCHANGED: v57 97% / v58 97% — the fix did NOT transfer.** Likely a
-    sim-to-real JUMP-TIMING gap: device jump lasts longer than sim's 0.8s AND/OR `is_jumping` obs is TCP-
-    stale (~1-2 frames) → the policy can't perceive its airborne state on device, so a state-based penalty
-    can't bite. **NEXT: measure device jump_duration + is_jumping obs latency (hook probe), calibrate the
-    sim's jump timing, THEN the airborne penalty (or an action-history-based one) can transfer.** v58 had 0
-    hole deaths in its 6ep batch (vs v57's 2) but n=6 = likely run-luck. Captures: `ab4_v57_r1`,`ab5_v58`.
+    27% (PROVEN in-sim). BUT DEVICE spam UNCHANGED: v57 97% / v58 97% — the fix did NOT transfer.**
+    **★ 2026-07-08 DEVICE JUMP-TIMING PROBE (`scripts/probe_jump_timing.py` single-vs-burst n=41 +
+    `scratchpad/probe_airtime_30hz.py` 30Hz n=50): ALL THREE documented hypotheses REFUTED.** (1) airtime =
+    23fr@30Hz = **0.767s** (dist {23:40,24:10}) ≈ the sim's 0.80s (within 1 frame / 4%, inside dr [0.72,0.88]);
+    NOT longer. (2) `is_jumping` obs is **FRESH** — liftoff latency 0 frames (single 25/25), NOT TCP-stale.
+    (3) NO airborne QUEUEING — burst-of-8/single airborne = **1.00x** median (airborne presses are DROPPED
+    exactly like the sim; the bimodal {7:10,14:5} is a post-LANDING press firing a fresh GROUND jump, not a
+    queued airborne re-jump). BONUS: device jump PEAK = 19.17 = sim's `crevasse_jump_peak` 19.2 (arc height
+    model correct). **CONCLUSION: the sim jump model is FAITHFUL; jump-spam is NOT a fidelity gap. Airborne
+    presses are HARMLESS on device (dropped) — the `airborne_action_penalty` solves a non-problem for device,
+    so v58 correctly showed no device change. The 6813m "random jump after obstacle" death is really a
+    spurious GROUND jump leaving the runner airborne into a must-slide = the JUMP→SLIDE death (v53 scenario),
+    a policy-HABIT issue, not a jump-timing gap.** No `jump_duration` recalibration warranted. Probe captures:
+    `captures/jump_timing_probe.jsonl`,`captures/airtime_30hz.jsonl`. **NEXT: pivot to the #1 median killer =
+    CREVASSE (~610m); the probe validated the arc peak so the graze model's height is right — the gap is the
+    cap-arc OFFSET / takeoff-VARIANCE (v55 lesson).** v58 had 0 hole deaths in its 6ep batch but n=6 = run-luck.
+    Captures: `ab4_v57_r1`,`ab5_v58`.
   - **DEPLOY: v51 (obs58, hook pre-fork obs.py) remains the safe device champion. v57/v58 (obs60, 512-net,
     hook 16z) are the best offline but NOT device-proven > v51. All weights gitignored/local.**
 - **★ EDGE-CASE ACCUMULATION WAVE 2 (2026-07-07 late): the method is now "enumerate + model the edge cases

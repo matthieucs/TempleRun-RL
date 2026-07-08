@@ -129,6 +129,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "jumpnarrow_after_distance": 300.0, # only past this
     "jumpnarrow_gap_cells": 1,          # clear cells between the wide-gap end and the narrow
     "jumpnarrow_strip_cells": 2,        # narrow strip length (fixed, matched CPU<->torch for the tail)
+    # GAP->GAP compound [DEVICE DEATH 2026-07-08, USER-observed high-ground DOUBLE-JUMP + rejump_lethality
+    # forensic]: on device, holes sit 2-3 cells apart in high-ground zones -> a blind landing-frame RE-JUMP
+    # after gap-1 lands INSIDE gap-2 (dt4 Ledge; 35% of device eps end within 15 frames of a re-jump). The
+    # sim's min_space 6 made the re-jump structurally harmless (0/47 lethality -> no learning signal; and
+    # 2 reward-shaping attempts v60/v61 failed: gamed by gaps / gate let the killer through). Same shape as
+    # jumpslide: place a 2-cell HoleLong tail after a wide-gap (bypasses min_space). Blind re-jump dies,
+    # land->run->deliberate-jump-at-the-lip clears. 0 default; train ~0.15.
+    "jumpgap_prob": 0.0,                # P(a wide-gap is followed by a close 2nd hole)
+    "jumpgap_after_distance": 300.0,    # only past this
+    "jumpgap_gap_cells": 2,             # clear cells between the wide-gap end and the 2nd hole
+    "jumpgap_hole_cells": 2,            # width of the 2nd hole (2 = HoleLong pt12, landing model applies)
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
@@ -369,6 +380,15 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # in the DESCENDING arc (height drops) and v51 clips it in-sim like on device -> retrain learns the
     # earlier takeoff. 0 default (no-op -> equivalence/scorecard unchanged); calibrate to the device rate.
     "crevasse_cap_arc_offset": 0.0,    # cells added to the takeoff->cap distance (shifts the cap later in the arc)
+    # TAKEOFF-TIMING VARIANCE [DEVICE-MEASURED 2026-07-08, probe_jump_timing + v51_crevasse_16z]: a FIXED
+    # cap-arc offset (v55) gave a SHARP all-or-nothing threshold (no clean partial rate) because in-sim v51's
+    # takeoff is near-deterministic. On device the takeoff cell_progress VARIES run-to-run (std ~0.06-0.1 cp),
+    # so at the descending arc the world-Y clearance spreads around the cap top -> a FRACTION grazes (device
+    # ~32% @lvl3) rather than 0% or 100%. Model it as a per-crossing Gaussian shift of d (in cells), drawn
+    # from self._rng exactly like jump_exec_lat_jitter (line ~1209). Gated on >0 (default 0 -> NO rng draw ->
+    # deterministic-suite RNG stream unchanged -> equivalence baseline green; tested via the STATISTICAL tier
+    # when on). Calibrate WITH crevasse_cap_arc_offset so mean(arc_y)~cap+0.5*std*slope -> ~32% below.
+    "crevasse_takeoff_std": 0.0,       # cells; per-crevasse-cap Gaussian takeoff-position jitter (0 = off)
     "wide_gap_land_grace": 0.35,       # far-lip landing grace: land within this cprog of the solid
                                        # cell and still clear. Calibrated (sweep_grace.py + calib_landing.py):
                                        # ~20% device clip rate, and leaves the GOOD jumper v36 almost
@@ -566,6 +586,7 @@ class TempleRunSimEnv(gym.Env):
         idle_action_penalty: float = C.DEFAULT_IDLE_ACTION_PENALTY,
         redundant_action_penalty: float = C.DEFAULT_REDUNDANT_ACTION_PENALTY,
         airborne_action_penalty: float = 0.0,
+        jump_hold_penalty: float = 0.0,
         strafe_penalty: float = 0.0,
         narrow_hold_bonus: float = 0.0,
         aim_center_weight: float = 0.0,
@@ -614,6 +635,7 @@ class TempleRunSimEnv(gym.Env):
         self.idle_action_penalty = float(idle_action_penalty)
         self.redundant_action_penalty = float(redundant_action_penalty)
         self.airborne_action_penalty = float(airborne_action_penalty)
+        self.jump_hold_penalty = float(jump_hold_penalty)
         self.strafe_penalty = float(strafe_penalty)
         self.narrow_hold_bonus = float(narrow_hold_bonus)
         self.aim_center_weight = float(aim_center_weight)
@@ -684,6 +706,10 @@ class TempleRunSimEnv(gym.Env):
         self._cell_index = 0                 # index of the cell the player is on (in self._track)
         self._is_dead = False
         self._death_type: Optional[int] = None
+        # jump/slide ACTION recency (frames since the last JUMP/SLIDE action byte) for the windowed
+        # jump_hold_penalty (v61): a re-jump within jump_hold_window frames of a prior jump is docked.
+        self._jump_recency = 99
+        self._slide_recency = 99
         # transient action flags as time-remaining counters (seconds)
         self._jump_t = 0.0
         # STEP-UP timing: longitudinal position (cell_index + cell_progress) where the CURRENT jump took
@@ -837,6 +863,24 @@ class TempleRunSimEnv(gym.Env):
         for _ in range(strip):
             e = _element(type=self._narrow_ptype(lane), level=level, is_turn=False)
             e["narrow_lane"] = lane
+            seq.append(e)
+        self._pending_post_gap.extend(seq)
+
+    def _queue_jumpgap(self, level: int) -> None:
+        """Build a GAP->GAP tail into _pending_post_gap: a couple clear cells then a 2-cell HoleLong
+        (pt12, wide_gap) — the high-ground DOUBLE-JUMP death scenario (device 2026-07-08: 35% of eps end
+        within 15 frames of a landing-frame re-jump; holes packed 2-3 cells apart on high ground, while the
+        sim's min_space 6 made the blind re-jump STRUCTURALLY harmless -> 0/47 sim lethality, no learning
+        signal). A blind re-jump right after landing from gap-1 lands INSIDE gap-2 (wide-gap landing model
+        -> dt4 Ledge, the exact device signature) or arrives grounded past the lip (refusal -> Fall);
+        land -> run the clear cells -> deliberate jump at the lip CLEARS. Only when jumpgap_prob>0."""
+        cfg = self.cfg
+        seq: list[dict] = []
+        for _ in range(max(0, int(cfg.get("jumpgap_gap_cells", 2)))):
+            seq.append(_element(type=int(cfg["path_type_straight"]), level=level, is_turn=False))
+        for _ in range(max(1, int(cfg.get("jumpgap_hole_cells", 2)))):
+            e = _element(type=12, level=level, obstacles=OBST_HOLE, is_turn=False)
+            e["wide_gap"] = True
             seq.append(e)
         self._pending_post_gap.extend(seq)
 
@@ -1028,6 +1072,13 @@ class TempleRunSimEnv(gym.Env):
                 and self._distance_real >= float(cfg.get("jumpnarrow_after_distance", 0.0))
                 and self._rng.random() < float(cfg.get("jumpnarrow_prob", 0.0))):
             self._queue_jumpnarrow(level)
+            queued_tail = True
+        # GAP->GAP compound (the high-ground double-jump death): another 2-cell hole a couple clear cells
+        # after this wide-gap. Same prob>0-first rng gating; at most one tail per wide-gap.
+        if (wide and not queued_tail and float(cfg.get("jumpgap_prob", 0.0)) > 0.0
+                and self._distance_real >= float(cfg.get("jumpgap_after_distance", 0.0))
+                and self._rng.random() < float(cfg.get("jumpgap_prob", 0.0))):
+            self._queue_jumpgap(level)
 
         # --- coin / bonus cell (gated) --------------------------------------
         is_coin = False
@@ -1089,6 +1140,8 @@ class TempleRunSimEnv(gym.Env):
         self._reset_internal_state()
         self._elapsed_steps = 0
         self._last_action = None
+        self._jump_recency = 99
+        self._slide_recency = 99
         self._action_buffer = [int(C.Action.NOOP)] * self.action_delay
         self._act_hist = []
         self._frames = []
@@ -1135,6 +1188,9 @@ class TempleRunSimEnv(gym.Env):
             turn_spam_penalty=self.turn_spam_penalty, idle_action_penalty=self.idle_action_penalty,
             redundant_action_penalty=self.redundant_action_penalty, strafe_penalty=self.strafe_penalty,
             airborne_action_penalty=self.airborne_action_penalty,
+            jump_hold_penalty=self.jump_hold_penalty,
+            jumped_recently=self._jump_recency < int(self.cfg.get("jump_hold_window", 6)),
+            slid_recently=self._slide_recency < int(self.cfg.get("jump_hold_window", 6)),
             narrow_hold_bonus=self.narrow_hold_bonus,
             aim_center_weight=self.aim_center_weight,
             velocity_drop_penalty=self.velocity_drop_penalty,
@@ -1152,6 +1208,9 @@ class TempleRunSimEnv(gym.Env):
         self._prev_distance = distance
         self._prev_state = state
         self._last_action = a
+        # advance jump/slide action recency (0 on a fresh press) for the windowed jump_hold_penalty
+        self._jump_recency = 0 if a == int(C.Action.JUMP) else min(99, self._jump_recency + 1)
+        self._slide_recency = 0 if a == int(C.Action.SLIDE) else min(99, self._slide_recency + 1)
         self._elapsed_steps += 1
         truncated = self._elapsed_steps >= self.max_episode_steps
 
@@ -1622,6 +1681,12 @@ class TempleRunSimEnv(gym.Env):
             # (the runner is descending at it) -> shift d so a cp~0.9 takeoff lands the cap in the
             # descending arc (clips) instead of at apex (clears). 0 = the old apex-at-ledge model.
             d += float(self.cfg.get("crevasse_cap_arc_offset", 0.0))
+            # takeoff-timing VARIANCE (device std ~0.06-0.1 cp): per-crossing Gaussian shift of d so the
+            # descending-arc clearance spreads around the cap top -> partial graze (~32% @lvl3), not the
+            # sharp all-or-nothing v55 threshold. Gated (0 = no draw -> equivalence baseline untouched).
+            _tk_std = float(self.cfg.get("crevasse_takeoff_std", 0.0))
+            if _tk_std > 0.0:
+                d += float(self._rng.normal(0.0, _tk_std))
             frac = d / max(1e-6, span)                      # 0=takeoff, 0.5=apex, 1=landing
             height = 1.0 - (2.0 * frac - 1.0) ** 2          # parabola: 0 at ends, 1 at apex
             # WORLD-Y GRAZE model (device-decoded): arc height in WORLD units = jump_peak * parabola; the
