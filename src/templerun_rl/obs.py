@@ -37,6 +37,13 @@ OBS_BOOL_FIELDS = (
     # flame tower right behind). Giving the policy the 2-ahead must-jump/slide lets it defer/re-time the
     # jump. SAME junction-dropout as next2_path_level (False through a turn). BREAKING: obs 58->60.
     "next2_must_jump", "next2_must_slide",
+    # 3-cell OBSTACLE lookahead (2026-07-08) — the HEDGE-JUMP fix. A jump spans ~2.8 cells at speed, so a
+    # 2-cell lookahead is SHORTER than one jump: the policy cannot know whether a jump launched NOW lands
+    # clear -> it hedge-jumps (held% ~83 on device) and dies landing on unseen hole lips / re-jumping into
+    # chained holes (41% of deaths = holes). next3 extends the horizon past the jump span (the same
+    # mechanism as next2 = the +108% device win). SAME junction-dropout chain (False if any of the 3 cells
+    # to it is a turn). BREAKING: obs 60->62 (hook 17a reads the 3rd neighbor).
+    "next3_must_jump", "next3_must_slide",
 )
 OBS_SCALAR_FIELDS = ("velocity", "path_type", "path_level", "facing")
 # Perception added 2026-06-19 so the NN can time turns + control its lane natively (replacing the

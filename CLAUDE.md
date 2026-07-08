@@ -34,6 +34,27 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     obs60, hook 16z). Reliability ladder to 10k median from here: (1) the held-jump/hole reflex (next3 or
     gap-distance obs = the likely key), (2) turn dead-letter at 5-7k (hook-side or gentle-lat retrain),
     (3) flame slide-under at speed (the 10545 ender, still unmodeled).**
+  - **★★ USER INSIGHT (live, late night): "the bottleneck is ROBUSTNESS when obstacles STACK — the model
+    reaches 10k+ when generation is kind; it struggles to be creative in stacks; may partially come from
+    the penalties." CODE-CONFIRMED — the PENALTY-CONFLICT discovery: `slide_jump_penalty` 0.15 docks a JUMP
+    whenever must_slide/next_must_slide/is_sliding — which is EXACTLY the legit early jump of a jump→slide
+    STACK (the v53 compound: jump the gap early while the slide looms next_must_slide=True). The death-model
+    says jump-now-or-die; the shaping says −0.15 for jumping → CONFLICTING GRADIENTS precisely on stacked
+    obstacles. Plus train_fast's IMPLICIT `--idle-action-penalty` 0.05 (default, in every recipe) taxes
+    pre-jumps beyond the flag horizon. These penalties were pre-death-model scaffolding; the sim now prices
+    real mistakes with real deaths. TWO-ARM RESPONSE + VERDICTS (both equivalence 3380/3380 GREEN):
+    - **v68 = next3 obs fork (obs 60→62, hook 16z→17a; surgery `surgery_v66_next3.py` 0/400): NO offline
+      gain (best ckpt 2078 vs the surgery base 2140) — the boolean at cell+3 didn't pay within 4M (likely
+      partially redundant with next2_path_level / not the binding constraint). SHELVED as a policy; the
+      obs62/17a INFRASTRUCTURE stays (committed) for future lookahead work.**
+    - **v69 = PENALTY-STRIP (slide_jump 0.15→0 + idle 0.05→0, from the obs62-widened v66): median parity
+      (2059 vs 2140) but the TAIL stretched — max 6727 vs 4011, the longest offline run of the night =
+      directionally the USER's "creativity → survive stacks → run long" signature, but max-on-n=96 is
+      noisy. NOT crowned; the penalty-strip idea stays OPEN (candidate: strip penalties INSIDE the next
+      big consolidation train rather than as a finetune).**
+    - **⚠️ DEPLOY NOTE (the obs62 fork is now in code): obs60 models (v66 et al) need the surgery-widened
+      artifact to run on the current pipeline — `runs/ppo_v66_obs62_next3.zip` = EXACTLY v66's behavior
+      (zero-weight new cols, 0/400) on obs62/hook 17a. Deploy THAT for v66.**
 - **★★ WAVE 5 (2026-07-08 evening): RHYTHM CHAIN (v63) + the ANTI-DRIFT CONSOLIDATION (v64). USER-driven.**
   - **★ USER INSIGHT (measured, the wave's driver): "mid-to-high still hits the edge" = SEQUENTIAL-FINETUNE
     DRIFT.** Device graze at lvl-3 caps: v59 19% → v62 26-29% → v63 32% (back to v51 baseline); arc

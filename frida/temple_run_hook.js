@@ -189,7 +189,7 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'clean-16z'; // 16z = + 2-ahead obstacle lookahead (next2_must_jump/next2_must_slide) for the chained-obstacle obs (obs 58->60). 16y = + precise hit/arc ground-truth (time_since_stumble/stumble_duration/stumble_kill_vel_pct/is_falling/time_since_fall/death_run_velocity/world_y). 16x = + Velocity Vec3 (vel_x/y/z). 16t = 30 Hz state broadcast + 16s turn-write diag
+const HOOK_VERSION = 'clean-17a'; // 17a = + 3-ahead obstacle lookahead (next3_must_jump/next3_must_slide) for the hedge-jump obs (obs 60->62; a jump spans ~2.8 cells > the old 2-cell horizon). 16z = + 2-ahead obstacle lookahead (next2_must_jump/next2_must_slide) for the chained-obstacle obs (obs 58->60). 16y = + precise hit/arc ground-truth (time_since_stumble/stumble_duration/stumble_kill_vel_pct/is_falling/time_since_fall/death_run_velocity/world_y). 16x = + Velocity Vec3 (vel_x/y/z). 16t = 30 Hz state broadcast + 16s turn-write diag
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -304,6 +304,8 @@ let cachedNextPathLevel = -1;       // forward-neighbor cell PE_Level (readable,
 let cachedNext2PathLevel = -1;      // 2-ahead cell PE_Level — direction = sign(next2_path_level - path_level) (10/10)
 let cachedNext2MustJump = false;    // 2-ahead cell obstacle ∈ MUST_JUMP (chained-obstacle fix, 2026-07-07)
 let cachedNext2MustSlide = false;   // 2-ahead cell obstacle ∈ MUST_SLIDE — a jump over +1 lands airborne into +2
+let cachedNext3MustJump = false;    // 3-ahead cell obstacle ∈ MUST_JUMP (17a hedge-jump fix — see the walk)
+let cachedNext3MustSlide = false;   // 3-ahead cell obstacle ∈ MUST_SLIDE — horizon past the ~2.8-cell jump span
 let cachedNextGroundHigher = false; // forward cell is a ZONE CREVASSE (next_path_type 33-36) -> jump LATE
                                     // (§23). Uses path_type, NOT PE_Level (future cells' Level reads 0).
 // REGION-SAMPLED narrow band (perception, replaces the guessed NARROW_SIDE map): when the forward
@@ -740,6 +742,8 @@ function installHooks() {
               cachedNext2PathLevel = -1;
               cachedNext2MustJump = false;
               cachedNext2MustSlide = false;
+              cachedNext3MustJump = false;
+              cachedNext3MustSlide = false;
               try {
                 const nxt2 = noff ? nxt.add(noff).readPointer() : NULL;
                 if (nxt2 && !nxt2.isNull()) {
@@ -749,6 +753,15 @@ function installHooks() {
                   const n2obs = nxt2.add(OFF.PE_Obstacles).readS32();
                   cachedNext2MustJump = MUST_JUMP_TYPES.indexOf(n2obs) !== -1;
                   cachedNext2MustSlide = MUST_SLIDE_TYPES.indexOf(n2obs) !== -1;
+                  // 3-ahead OBSTACLE (17a, hedge-jump fix): a jump spans ~2.8 cells — 2-cell lookahead is
+                  // SHORTER than one jump, so the policy hedges. One more neighbor step, same dropout
+                  // (through a junction nxt3 is NULL -> stays false).
+                  const nxt3 = nxt2.add(noff).readPointer();
+                  if (nxt3 && !nxt3.isNull()) {
+                    const n3obs = nxt3.add(OFF.PE_Obstacles).readS32();
+                    cachedNext3MustJump = MUST_JUMP_TYPES.indexOf(n3obs) !== -1;
+                    cachedNext3MustSlide = MUST_SLIDE_TYPES.indexOf(n3obs) !== -1;
+                  }
                 }
               } catch (_) {}
               if (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(cachedNextPathType) !== -1) cachedNextMustJump = true;
@@ -1057,6 +1070,7 @@ function snapshot() {
     next_is_turn: false, next_can_turn_left: false, next_can_turn_right: false,
     next_must_jump: false, next_must_slide: false, next_wide_gap: false, next_path_type: -1,
     next2_must_jump: false, next2_must_slide: false,   // 2-ahead obstacle lookahead (chained-obstacle fix)
+    next3_must_jump: false, next3_must_slide: false,   // 3-ahead obstacle lookahead (17a hedge-jump fix)
     lane: 0.0, cell_progress: 0.0, narrow_target_lane: null,
     // --- Phase-0 PROBE fields (read-only; confirm semantics vs the failure modes) ---
     player_x_offset: 0.0, is_over_ground: false, ground_height: 0.0, ground_change_higher: false,
@@ -1168,6 +1182,8 @@ function snapshot() {
   s.next2_path_level = cachedNext2PathLevel;  // 2-ahead cell PE_Level (+2) — direction = sign(next2 - path_level)
   s.next2_must_jump = cachedNext2MustJump;    // 2-ahead obstacle ∈ MUST_JUMP (chained-obstacle fix)
   s.next2_must_slide = cachedNext2MustSlide;  // 2-ahead obstacle ∈ MUST_SLIDE (jump over +1 lands airborne into +2)
+  s.next3_must_jump = cachedNext3MustJump;    // 3-ahead obstacle ∈ MUST_JUMP (17a hedge-jump fix)
+  s.next3_must_slide = cachedNext3MustSlide;  // 3-ahead obstacle ∈ MUST_SLIDE (horizon past the jump span)
   s.turn_write = lastTurnWrite;               // 16s: one-shot turn-byte verdict (null when none since last poll)
   lastTurnWrite = null;
   // narrow_target_lane: PERCEPTION for the NN — which lane (-1 L/0 C/+1 R, runner-relative) the upcoming

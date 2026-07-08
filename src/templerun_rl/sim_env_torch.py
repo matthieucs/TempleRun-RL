@@ -1323,6 +1323,11 @@ class TorchTempleRunVecEnv(VecEnv):
             # 2-cell OBSTACLE lookahead (chained-obstacle fix) — same junction dropout as next2_path_level.
             "next2_must_jump": self.must_jump_lut[self.t_obst[:, 2]] & ~(raw_turn | self.t_turn[:, 1]),
             "next2_must_slide": self.must_slide_lut[self.t_obst[:, 2]] & ~(raw_turn | self.t_turn[:, 1]),
+            # 3-cell OBSTACLE lookahead (hedge-jump fix) — junction-dropout CHAIN through cell+2.
+            "next3_must_jump": self.must_jump_lut[self.t_obst[:, 3]]
+                               & ~(raw_turn | self.t_turn[:, 1] | self.t_turn[:, 2]),
+            "next3_must_slide": self.must_slide_lut[self.t_obst[:, 3]]
+                                & ~(raw_turn | self.t_turn[:, 1] | self.t_turn[:, 2]),
             "narrow_target_lane": self.t_nlane[:, 1].clone(),    # 0 == None
             "cell_progress": cp,
             "lane": self.lane.clone(),

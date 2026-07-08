@@ -1860,6 +1860,7 @@ class TempleRunSimEnv(gym.Env):
         self._extend_track()
         nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
         nxt2 = self._track[self._cell_index + 2] if self._cell_index + 2 < len(self._track) else {}
+        nxt3 = self._track[self._cell_index + 3] if self._cell_index + 3 < len(self._track) else {}
         nobst = int(nxt.get("obstacles", 0))
 
         on_ground = self._jump_t <= 0.0 and not self._is_dead
@@ -1917,6 +1918,14 @@ class TempleRunSimEnv(gym.Env):
                                else int(nxt2.get("obstacles", 0)) in _MUST_JUMP,
             "next2_must_slide": False if (cell.get("is_turn") or nxt.get("is_turn"))
                                 else int(nxt2.get("obstacles", 0)) in _MUST_SLIDE,
+            # 3-cell OBSTACLE lookahead (hedge-jump fix 2026-07-08): a jump spans ~2.8 cells, so 2-cell
+            # lookahead is SHORTER than one jump — the policy can't know whether a jump launched now lands
+            # clear. next3 extends the horizon past the span. SAME junction-dropout CHAIN (any turn cell
+            # between here and cell+3 nulls the read — the hook's PE walk breaks through turns).
+            "next3_must_jump": False if (cell.get("is_turn") or nxt.get("is_turn") or nxt2.get("is_turn"))
+                               else int(nxt3.get("obstacles", 0)) in _MUST_JUMP,
+            "next3_must_slide": False if (cell.get("is_turn") or nxt.get("is_turn") or nxt2.get("is_turn"))
+                                else int(nxt3.get("obstacles", 0)) in _MUST_SLIDE,
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).
