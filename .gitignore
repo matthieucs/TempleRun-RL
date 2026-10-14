@@ -53,3 +53,28 @@ captures/calib_passive.jsonl
 captures/turn6_partial.jsonl
 captures/human_snap.jsonl
 captures/human.jsonl
+
+# --- 2026-07-31 session: local-only state ---
+# Claude Code local state + a stale agent worktree (a nested git repo)
+.claude/
+# local snapshot of the C++ sim taken before a refactor
+backups/
+# native build artifacts (sim.cpp is the source of truth; build with cpp_sim/build.sh)
+*.dll
+*.pyd
+
+# scratchpad: KEEP the analysis tools (*.py), the training recipes (*.sh) and the
+# sim configs (*_cfg.json) — they are how every arm in CLAUDE.md is reproduced.
+# DROP the rollout/eval data dumps.
+scratchpad/*.jsonl
+scratchpad/*.json
+!scratchpad/*_cfg*.json
+scratchpad/*.err
+scratchpad/*.out
+scratchpad/*.pt
+scratchpad/*.html
+scratchpad/*.bak.py
+scratchpad/_t.cpp
+
+# --- champion weights: re-included from the runs/ + *.zip ban above ---
+!models/*.zip

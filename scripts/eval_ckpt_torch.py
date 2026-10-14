@@ -58,7 +58,15 @@ def main() -> None:
     p.add_argument("--max-episode-steps", type=int, default=4000)
     p.add_argument("--sim-config", default="", help="JSON dict merged into DEVICE_TRUE_CFG (e.g. the "
                    "crevasse-fix knobs) so a model is evaluated in the env it was trained on")
+    p.add_argument("--land-span", default="",
+                   help="A,B overriding obs.LAND_SPAN_A/B. Pass '0.0204,-0.94' for any model trained "
+                        "before the 2026-07-27 span correction (v90, v91*) — otherwise landing_hazard "
+                        "is computed with a law they never trained under.")
     args = p.parse_args()
+
+    if args.land_span:
+        O.LAND_SPAN_A, O.LAND_SPAN_B = (float(x) for x in args.land_span.split(","))
+        print(f"[land-span pinned] {O.LAND_SPAN_A}, {O.LAND_SPAN_B}")
 
     import json as _json
     eval_cfg = dict(DEVICE_TRUE_CFG)

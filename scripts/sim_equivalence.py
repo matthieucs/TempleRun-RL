@@ -34,8 +34,27 @@ import numpy as np  # noqa: E402
 
 import templerun_rl.constants as C  # noqa: E402
 from templerun_rl.sim_env import TempleRunSimEnv, _element  # noqa: E402
-from templerun_rl.sim_env_torch import TorchSimGymAdapter  # noqa: E402
 import train_sim  # noqa: E402  (the oracle — shared driver for both sims)
+
+# BACKENDS: the CPU sim (sim_env.py) is always the REFERENCE; the backend under
+# test is either the torch port or the C++ port. Imported lazily so a cpp-only
+# run needs no torch and vice-versa.
+BACKEND = "torch"
+_BACKEND_ADAPTER = {}
+
+
+def backend_adapter(name: str):
+    if name not in _BACKEND_ADAPTER:
+        if name == "torch":
+            from templerun_rl.sim_env_torch import TorchSimGymAdapter
+            _BACKEND_ADAPTER[name] = TorchSimGymAdapter
+        elif name == "cpp":
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from cpp_sim.cpp_vec_env import CppSimGymAdapter
+            _BACKEND_ADAPTER[name] = CppSimGymAdapter
+        else:
+            raise SystemExit(f"unknown backend {name!r} (torch|cpp)")
+    return _BACKEND_ADAPTER[name]
 
 FLOAT_KEYS = {"velocity", "distance", "cell_progress", "lane", "stumble_kill_timer", "score"}
 ATOL = {"velocity": 1e-6, "distance": 1e-6, "cell_progress": 1e-9, "lane": 1e-9,
@@ -102,6 +121,33 @@ def scenario_tracks() -> dict:
     # with 2 clear cells between — land->run->jump repeated. Locks the chain death-resolution parity.
     t["jumpgap_chain"] = S(6) + ([cell(type=12, obstacles=1, wide_gap=True),
                                   cell(type=12, obstacles=1, wide_gap=True)] + S(2)) * 3 + S(4)
+    # SLIDE->HOLE compound (WAVE 9 HUMAN-DEMO 2026-07-09, killed the human @3604/686: sliding when the
+    # gap arrived, jump swipe refused mid-fall): a slide obstacle -> 2 clear cells -> a single 1-cell
+    # hole. The ~0.7s slide commit (jump refused while sliding) eats the jump window unless the slide
+    # starts EARLY + the jump fires the instant it ends. Locks the slide-commit/hole death-resolution
+    # parity for both slide forms (tree-slide + flame).
+    # AIRBORNE TRAP (WAVE 14, device-measured 2026-07-25: LevelChange->Hole at gap 2 is the most
+    # common inside-the-jump-arc pair, n=21; it killed v78 @612 and v74 @1722). A crevasse, ONE clear
+    # cell, then a SINGLE 1-cell hole: the runner jumping the crevasse is still DESCENDING when the
+    # hole arrives and its arc lands inside it. The 1-cell hole is not wide_gap, so only the new
+    # hole_landing_model prices it. Locks the single-hole arc-landing death-resolution parity.
+    t["holetrap"] = S(6) + [cell(type=35, obstacles=7, wide_gap=True, level=3),
+                            cell(type=35, obstacles=7, wide_gap=True, stepup=True, level=3)] \
+                    + S(1) + [cell(type=1, obstacles=1)] + S(3) \
+                    + [cell(type=1, obstacles=1)] + S(6)
+    # ONE-CELL crevasse form (device: 67.5% of structures, WAVE 14 crevasse_single_cell_prob). Device
+    # says it is ~6x SAFER than the 2-cell form (1.1% deaths / 0% grazes vs 7.0% / 33.7%), so it is a
+    # plain NON-wide must-jump cell: airborne-at-entry only, no apex/graze, no gap-lip refusal — and
+    # the following hole sits one cell CLOSER, inside the jump arc. Locks parity for the 1-cell
+    # crevasse + trap-hole resolution.
+    t["holetrap1"] = S(6) + [cell(type=35, obstacles=7, level=3)] \
+                     + S(1) + [cell(type=1, obstacles=1)] + S(3) \
+                     + [cell(type=35, obstacles=7, level=1)] \
+                     + S(1) + [cell(type=1, obstacles=1)] + S(6)
+    t["slidegap"] = S(6) + [cell(type=1, obstacles=5)] + S(2) \
+                    + [cell(type=1, obstacles=1)] + S(6)
+    t["slidegap_flame"] = S(6) + [cell(type=31, obstacles=6)] + S(2) \
+                          + [cell(type=1, obstacles=1)] + S(6)
     # POST-TURN OBSTACLE (device 2026-07-08): a tree right on the first post-junction cell, and a 1-cell
     # hole after another junction — the turn-exit instant-reaction scenario. Locks the parity of turning
     # into an immediate obstacle (turn fired late + must_jump/must_slide next cell).
@@ -227,9 +273,11 @@ def make_cpu(cells, cfg, K=0, FS=1, shaping=None):
 
 
 def make_torch(cells, cfg, K=0, FS=1, shaping=None):
-    env = TorchSimGymAdapter(track_source=[dict(c) for c in cells], config=cfg, seed=0,
-                             device="cpu", max_episode_steps=100000, reward_mode="distance",
-                             action_history_len=K, frame_stack=FS, **(shaping or {}))
+    """Build the BACKEND-UNDER-TEST env on an injected track (torch or cpp)."""
+    Adapter = backend_adapter(BACKEND)
+    env = Adapter(track_source=[dict(c) for c in cells], config=cfg, seed=0,
+                  device="cpu", max_episode_steps=100000, reward_mode="distance",
+                  action_history_len=K, frame_stack=FS, **(shaping or {}))
     obs, info = env.reset(seed=0)
     return env, obs, info["raw_state"]
 
@@ -239,11 +287,11 @@ def diff_state(sc, kc, tag, k):
     keys = set(sc) & set(kc)
     for f in sorted(keys):
         a, b = sc[f], kc[f]
-        if f == "narrow_target_lane":
+        if f in ("narrow_target_lane", "next2_narrow_lane"):   # None == 0 sentinel on both sides
             a = 0 if a is None else int(a)
             b = 0 if b is None else int(b)
             if a != b:
-                return f"{tag} step {k}: narrow_target_lane {a} != {b}"
+                return f"{tag} step {k}: {f} {a} != {b}"
             continue
         if f in FLOAT_KEYS:
             if abs(float(a) - float(b)) > ATOL.get(f, 1e-6):
@@ -295,7 +343,7 @@ def run_pair(name, cells, cfg_over, pol_factory, K=0, FS=1, shaping=None, max_st
     return None
 
 
-def deterministic_suite() -> int:
+def deterministic_suite(only_tracks=None, only_variants=None, only_policies=None) -> int:
     tracks = scenario_tracks()
     shaping_on = dict(action_cost=0.02, reaction_bonus=0.1, turn_spam_penalty=0.1,
                       idle_action_penalty=0.05, redundant_action_penalty=0.12,
@@ -314,6 +362,18 @@ def deterministic_suite() -> int:
                           "turn_linger_frames": 3, "strafe_exec_lat_frames": 1,
                           "jump_exec_lat_frames": 1, "jump_exec_lat_jitter": 0}, {}),
         "shaping": ({"hook_turn_buffer": True}, shaping_on),
+        # LANDING-HAZARD PENALTY [2026-07-28]: docks a JUMP whose predicted arc lands on a must-jump
+        # hazard. It recomputes the landing cell from velocity + cell_progress + the must_jump ladder
+        # (the same arithmetic obs.py does), so CPU and C++ must agree on the SPAN, the int() cell
+        # rounding AND the ladder index -- an off-by-one there would silently price a different cell.
+        "landhaz_pen": ({"hook_turn_buffer": True},
+                        dict(shaping_on, landing_hazard_penalty=0.25)),
+        # TURN-TAKEOFF PENALTY [2026-07-28]: docks a JUMP whose arc is still airborne when a
+        # junction arrives. Recomputes the arc reach from velocity + cell_progress and tests it
+        # against is_turn / next_is_turn, so CPU and C++ must agree on the SPAN and on the
+        # `reach >= 1.0` boundary -- a mismatch there prices a different takeoff.
+        "turntakeoff_pen": ({"hook_turn_buffer": True},
+                            dict(shaping_on, turn_takeoff_penalty=0.25)),
         "clipband": ({"stepup_clip_band": 0.25}, {}),
         # wide-gap landing model ON: exercises the new arc-lands-past-gap check (spam_jump /
         # gap_jump_late policies take off short of a 2-cell hole -> the far-wall clip fires).
@@ -327,6 +387,73 @@ def deterministic_suite() -> int:
         # crevasse ledge cells now graze (stumble) / deep-clip (kill) by world-Y instead of the mh-proxy.
         "crevasse_graze": ({"crevasse_graze_worldy": True, "wide_gap_landing_model": True,
                             "wide_gap_land_grace": 0.35}, {}),
+        # STEP-DOWN TO LOW GROUND is foot-crossable [DEVICE-MEASURED 2026-07-27: 17 human grounded
+        # crossings of a 2->1 / 3->1 drop, ZERO deaths, vs 100% jump rate for every policy]. Turns the
+        # crevasse must_jump flag from HARD to SOFT in one direction only, so the parity that matters
+        # is: a GROUNDED crossing survives on a step-DOWN and still kills on a step-UP, and the flag
+        # is carried onto the 2nd cell of a 2-cell crevasse but NOT onto a long hole that reuses the
+        # same pending-gap slot. Bool knob, no rng draw -> the OFF stream stays bit-identical.
+        "stepdown_soft": ({"stepdown_grounded_ok": True, "stepdown_grounded_max_level": 1,
+                           "crevasse_single_cell_prob": 0.0}, {}),
+        # AIRTIME SCALES WITH THE HEIGHT CHANGE [device-measured 2026-07-27 night]: a step-DOWN jump
+        # flies 1.17x (3 cells not 2), a step-UP 0.74x. Touches three coupled things that must agree
+        # step-exactly: the takeoff airtime itself, the step-up APEX span (the parabola must be
+        # evaluated over the arc actually flown), and the landing_hazard OBS. Paired with the graze
+        # model because that is what promotes a crevasse cell into an apex cell.
+        "arc_levelscaled": ({"jump_dur_stepdown_scale": 1.17, "jump_dur_stepup_scale": 0.74,
+                             "crevasse_graze_worldy": True, "stepup_clip_band": 0.25}, {}),
+        # WAVE 10 post-16o turn-byte fidelity: off-junction turns DROP (hook's measured drop paths) +
+        # the 0.3s anti-double-turn debounce (spam eats the real swipe) + binding send latency. The
+        # junction tracks x turn policies exercise drop/eaten/latch/dead-letter resolution parity.
+        "turn_dropdeb": ({"hook_turn_buffer": True, "turn_approach_buffer": True,
+                          "turn_offjunction_drop": True, "turn_drop_debounce_s": 0.3,
+                          "turn_send_lat_frames": 0.7}, {}),
+        # WAVE 13 turn-buffer (pre-swipe) reward: the approach-cell latch bonus (+ the reactive-turn
+        # reaction_bonus it must out-weigh) on the full drop/debounce/latency turn regime. The
+        # approach_swipe / turn_cp* policies exercise the pre-swipe-credit vs reactive-credit parity.
+        # WAVE 14 SINGLE-HOLE ARC LANDING (the airborne trap): a 1-cell hole entered while airborne
+        # now demands the arc actually LAND past it (device: takeoff >1 cell back kills 30%; takeoff
+        # on the approach cell is free). std 0 here keeps this in the DETERMINISTIC tier — the
+        # partial-rate std>0 path is matched-distribution, i.e. statistical-tier (crevasse_takeoff_std
+        # pattern). Paired with the wide-gap model so both hole widths resolve together.
+        "hole_land": ({"hole_landing_model": True, "hole_trap_apex_frac": 0.5,
+                       "hole_trap_kill_prob": 1.0,
+                       "wide_gap_landing_model": True, "wide_gap_land_grace": 0.35}, {}),
+        # WAVE 15 PERCEPTION FIX: the lookahead now walks THROUGH a forced corner and only blanks at a
+        # genuine T-junction (both directions available). Exercised on the junction tracks, where the
+        # obs vector past a turn differs field-for-field from the old always-blind behaviour.
+        "turn_aware_look": ({"turn_aware_lookahead": True, "hook_turn_buffer": True,
+                             "turn_approach_buffer": True}, {}),
+        # WAVE 16 HELD-JUMP -> LANDING RE-JUMP: a JUMP pressed while airborne now fires on touchdown
+        # (device: 10% solid / 28-46% gap). prob 1.0 here keeps it in the DETERMINISTIC tier; the
+        # partial-rate path is matched-distribution = statistical tier. The spam_jump policy exercises
+        # it directly (it holds the button), tap policies must be unaffected.
+        "held_jump": ({"held_jump_rejump_solid": 1.0, "held_jump_rejump_gap": 1.0,
+                       "jump_refuse_strafing_prob": 0.0}, {}),
+        # ★ DRAW-THEN-SUBSTITUTE OBSTACLE TYPES [2026-07-28]: the obstacle-type sampler becomes
+        # rejection sampling with a pairwise admissibility rule and one substitution re-draw, with
+        # TREES exempt (the game places them in a later, unfiltered pass). The matrix below is
+        # deliberately NON-TRIVIAL -- several prev types, every rejectable cur (1 Hole / 2 Narrow /
+        # 6 FlameTower), doses from 0.2 to 0.9, and two re-draw rounds -- so a draw-order slip has
+        # somewhere to show. ⚠️ THIS TIER INJECTS FIXED TRACKS, so it exercises the SELECTION and
+        # the no-stray-draw property, NOT generation itself; `cpp_sim/test_rng_order.py` is what
+        # covers the generator. Paired with the two legacy pair_* knobs at non-zero doses to pin
+        # the model-select: with type_reject_model ON they must contribute nothing, on both ports.
+        "type_reject": ({"type_reject_model": True, "type_reject_redraws": 2,
+                         "type_reject": {"1,1": 0.75, "1,2": 0.30, "1,6": 0.20,
+                                         "4,1": 0.45, "5,1": 0.90, "5,2": 0.60, "5,6": 0.25,
+                                         "6,1": 0.85, "6,2": 0.50, "7,1": 0.40},
+                         "pair_same_type_prob": 0.6, "pair_anti_repeat_prob": 0.41,
+                         "hook_turn_buffer": True}, {}),
+        # the LEGACY sampler at non-zero doses, as the backward-compatibility control: it is the
+        # path every pre-2026-07-28 recipe (and the v111 champion) actually runs, and it was never
+        # covered here -- pair_anti_repeat_prob had not even been ported to C++.
+        "pair_legacy": ({"pair_same_type_prob": 0.6, "pair_anti_repeat_prob": 0.41,
+                         "pair_same_type_cells": 4, "hook_turn_buffer": True}, {}),
+        "turn_bufbonus": ({"hook_turn_buffer": True, "turn_approach_buffer": True,
+                           "turn_offjunction_drop": True, "turn_drop_debounce_s": 0.3,
+                           "turn_send_lat_frames": 0.7},
+                          {"turn_buffer_bonus": 0.5, "reaction_bonus": 0.1, "aim_center_weight": 1.0}),
     }
     policies = {
         "noop": pol_noop,
@@ -347,6 +474,21 @@ def deterministic_suite() -> int:
             (st.get("next_wide_gap") and float(st.get("cell_progress") or 0) >= 0.82)
             or st.get("must_jump") or st.get("next_must_jump")) else 6),
     }
+    # SUBSET FILTERS: the full matrix is ~24 tracks x 29 variants x 13 policies, and the torch sim is
+    # forced to CPU at batch 1 (its worst case) for step-exactness -> tens of minutes. For a targeted
+    # change only a handful of combinations can possibly differ, so allow narrowing by substring. The
+    # FULL matrix stays the gate before any device deployment; this is for fast iteration.
+    def _keep(d, pats):
+        if not pats:
+            return d
+        want = [x.strip() for x in pats.split(",") if x.strip()]
+        return {k: v for k, v in d.items() if any(w in k for w in want)}
+    tracks = _keep(tracks, only_tracks)
+    variants = _keep(variants, only_variants)
+    policies = _keep(policies, only_policies)
+    if only_tracks or only_variants or only_policies:
+        print(f"  [subset] {len(tracks)} tracks x {len(variants)} variants x {len(policies)} policies",
+              flush=True)
     fails, total = [], 0
     for vname, (cfg_over, shaping) in variants.items():
         for tname, cells in tracks.items():
@@ -369,6 +511,16 @@ TRAIN_CFG = {
     "narrow_lane_center": 5.0, "narrow_lane_tol": 2.0, "domain_rand": True,
     "turn_approach_buffer": True, "turn_linger_frames": 3,
     "curriculum_max_start_dist": 0.0,   # stats compare full-run episodes
+    # WAVE 14 airborne-trap knobs — ON here so the statistical tier actually exercises them: the
+    # 1-cell-crevasse GENERATION draw (an rng-stream divergence between the sims would otherwise go
+    # unseen, since the deterministic tier injects fixed tracks) and the probabilistic hole-trap kill.
+    "crevasse_single_cell_prob": 0.675, "hole_landing_model": True,
+    "hole_trap_apex_frac": 0.5, "hole_trap_kill_prob": 0.35,
+    # tight_pair_prob is GENERATION-only, so the deterministic tier (fixed tracks) cannot see it —
+    # the statistical tier is its only parity check. Calibrated 0.65/2: 6.2% of consecutive must-jump
+    # pairs land within the jump arc (<=3 cells) vs 6.2% on device; min_cells 2 drops the
+    # gap-1 layouts the device barely has (0.9%) and the sim made unfairly common.
+    "tight_pair_prob": 0.65, "tight_pair_min_cells": 2,
 }
 
 
@@ -377,8 +529,8 @@ def collect_stats(kind: str, n_eps: int, seed0: int):
         env = TempleRunSimEnv(config=TRAIN_CFG, max_episode_steps=4000,
                               reward_mode="distance")
     else:
-        env = TorchSimGymAdapter(config=TRAIN_CFG, device="cpu", max_episode_steps=4000,
-                                 reward_mode="distance")
+        env = backend_adapter(BACKEND)(config=TRAIN_CFG, device="cpu",
+                                       max_episode_steps=4000, reward_mode="distance")
     dists, dtypes = [], Counter()
     ev = Counter()
     frames = 0
@@ -413,7 +565,7 @@ def collect_stats(kind: str, n_eps: int, seed0: int):
 def stats_suite(n_eps: int) -> int:
     print("\nSTATISTICAL (procedural, oracle, full training cfg):", flush=True)
     a = collect_stats("cpu", n_eps, 50000)
-    b = collect_stats("torch", n_eps, 90000)
+    b = collect_stats(BACKEND, n_eps, 90000)
     fails = 0
 
     def band(name, x, y, lo=0.75, hi=1.33):
@@ -422,29 +574,36 @@ def stats_suite(n_eps: int) -> int:
         ok = lo <= ratio <= hi
         if not ok:
             fails += 1
-        print(f"  {name:<12} cpu={x:.4g}  torch={y:.4g}  ratio={ratio:.3f}  "
+        print(f"  {name:<12} cpu={x:.4g}  {BACKEND}={y:.4g}  ratio={ratio:.3f}  "
               f"{'PASS' if ok else 'FAIL'}", flush=True)
 
     band("median_dist", a["median"], b["median"], 0.75, 1.33)
     band("mean_dist", a["mean"], b["mean"], 0.75, 1.33)
     for k in sorted(set(a["rates"]) | set(b["rates"])):
         band(f"rate.{k}", a["rates"].get(k, 0.0), b["rates"].get(k, 0.0), 0.7, 1.43)
-    print(f"  deaths cpu={a['deaths']}  torch={b['deaths']}", flush=True)
+    print(f"  deaths cpu={a['deaths']}  {BACKEND}={b['deaths']}", flush=True)
     return fails
 
 
 def main():
+    global BACKEND
     p = argparse.ArgumentParser()
+    p.add_argument("--backend", default="torch", choices=("torch", "cpp"),
+                   help="which port to check against the CPU reference")
     p.add_argument("--det-only", action="store_true")
     p.add_argument("--stats-only", action="store_true")
     p.add_argument("--stats-eps", type=int, default=120)
+    p.add_argument("--tracks", default="", help="comma-separated substrings; only these scenario tracks")
+    p.add_argument("--variants", default="", help="comma-separated substrings; only these config variants")
+    p.add_argument("--policies", default="", help="comma-separated substrings; only these scripted policies")
     args = p.parse_args()
+    BACKEND = args.backend
     fails = 0
     if not args.stats_only:
-        fails += deterministic_suite()
+        fails += deterministic_suite(args.tracks, args.variants, args.policies)
     if not args.det_only:
         fails += stats_suite(args.stats_eps)
-    print(f"\n{'GREEN: torch sim matches the CPU reference' if fails == 0 else f'RED: {fails} failure(s)'}")
+    print(f"\n{f'GREEN: {BACKEND} sim matches the CPU reference' if fails == 0 else f'RED: {fails} failure(s)'}")
     sys.exit(1 if fails else 0)
 
 

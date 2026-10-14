@@ -63,7 +63,7 @@ def _merged_cfg(config: Optional[dict]) -> dict:
         for k, v in config.items():
             if k == "obstacle_type_weights" and isinstance(v, dict):
                 w = dict(DEFAULT_SIM_CONFIG["obstacle_type_weights"])
-                w.update(v)
+                w.update({int(kk): vv for kk, vv in v.items()})   # JSON gives STRING keys; see sim_env
                 cfg[k] = w
             else:
                 cfg[k] = v
@@ -97,6 +97,8 @@ class TorchTempleRunVecEnv(VecEnv):
         velocity_drop_penalty: float = 0.0,
         off_center_penalty: float = 0.0,
         slide_jump_penalty: float = 0.0,
+        turn_buffer_bonus: float = 0.0,
+        stepdown_bonus_gate: bool = False,
         action_history_len: int = 0,
         frame_stack: int = 1,
         injected_track: Optional[list] = None,   # test hook: fixed track (list of cell dicts)
@@ -122,6 +124,8 @@ class TorchTempleRunVecEnv(VecEnv):
         self.velocity_drop_penalty = float(velocity_drop_penalty)
         self.off_center_penalty = float(off_center_penalty)
         self.slide_jump_penalty = float(slide_jump_penalty)
+        self.turn_buffer_bonus = float(turn_buffer_bonus)
+        self.stepdown_bonus_gate = bool(stepdown_bonus_gate)
         self.K = int(action_history_len)
         self.FS = max(1, int(frame_stack))
 
@@ -180,6 +184,9 @@ class TorchTempleRunVecEnv(VecEnv):
         self.t_coin = torch.zeros(B, L, **bl)
         self.t_wide = torch.zeros(B, L, **bl)
         self.t_stepup = torch.zeros(B, L, **bl)
+        # step-DOWN to low ground -> crossable ON FOOT (device-measured; see the CPU ref's
+        # stepdown_grounded_ok). Mirrors t_stepup everywhere it is shifted / reset / injected.
+        self.t_sdlow = torch.zeros(B, L, **bl)
         self.t_nlane = torch.zeros(B, L, **i64)   # 0 = none, -1/+1 = side strips
 
         # ---- compound FIFO ---------------------------------------------------
@@ -202,11 +209,15 @@ class TorchTempleRunVecEnv(VecEnv):
         self.pend_gap_type = torch.ones(B, **i64)
         self.pend_gap_level = torch.full((B,), 2, **i64)
         self.pend_gap_stepup = torch.zeros(B, **bl)
+        self.pend_gap_sdlow = torch.zeros(B, **bl)
         self.pend_nar = torch.zeros(B, **i64)
         self.pend_nar_lane = torch.zeros(B, **i64)
         self.pend_nar_type = torch.full((B,), 17, **i64)
         # jump->slide / jump->narrow tail after a wide-gap: counter = clear cells then a PAYLOAD (slide
         # cell OR a narrow strip). pay = payload length (1=slide, strip=narrow); nlane 0=slide, +/-1=narrow.
+        # sDoubleObstaclePercent (device-read, ramps 0 -> 0.20): the next cell after an emitted
+        # obstacle also carries one, bypassing min_space; capped by max_back_to_back_obstacles.
+        self.pend_double = torch.zeros(B, dtype=torch.bool, device=self.dev)
         self.pend_postgap = torch.zeros(B, **i64)
         self.pend_postgap_obst = torch.zeros(B, **i64)
         self.pend_postgap_type = torch.ones(B, **i64)
@@ -247,6 +258,11 @@ class TorchTempleRunVecEnv(VecEnv):
         self.linger_l = torch.zeros(B, **bl)
         self.linger_r = torch.zeros(B, **bl)
         self.pend_turn = torch.zeros(B, **i64)      # 0 none / 1 left / 2 right
+        self.turn_debounce = torch.zeros(B, **f32)  # hook anti-double-turn window (turn_drop_debounce_s)
+        self.frames_since_land = torch.full((B,), 99, **i64)  # frames since jump touchdown (post_land_gap_rejump)
+        # HELD-JUMP -> LANDING RE-JUMP (WAVE 16, mirror of the CPU ref): JUMP pressed while airborne is
+        # dropped by the guard (free in-sim) but on device the held press fires on touchdown.
+        self.jump_held_air = torch.zeros(B, dtype=torch.bool, device=self.dev)
         self.pend_turn_ttl = torch.zeros(B, **i64)
         self.gap_grace = torch.zeros(B, **bl)
         self.turn_landed = torch.zeros(B, **bl)
@@ -321,6 +337,7 @@ class TorchTempleRunVecEnv(VecEnv):
             "coin": col("is_coin", False, torch.bool),
             "wide": col("wide_gap", False, torch.bool),
             "stepup": col("stepup", False, torch.bool),
+            "sdlow": col("stepdown_low", False, torch.bool),
             "nlane": torch.tensor(nlane, dtype=torch.int64, device=self.dev),
         }
 
@@ -414,6 +431,9 @@ class TorchTempleRunVecEnv(VecEnv):
         self.post_linger[m] = 0
         self.pend_turn[m] = 0
         self.pend_turn_ttl[m] = 0
+        self.turn_debounce[m] = 0
+        self.frames_since_land[m] = 99
+        self.jump_held_air[m] = False
         self.gap_grace[m] = False
         self.turn_landed[m] = False
         self.score[m] = base("start_score")
@@ -435,7 +455,9 @@ class TorchTempleRunVecEnv(VecEnv):
         self.b2b[m] = 0
         self.pend_gap[m] = 0
         self.pend_gap_stepup[m] = False
+        self.pend_gap_sdlow[m] = False
         self.pend_nar[m] = 0
+        self.pend_double[m] = False
         self.pend_postgap[m] = 0
         self.pend_postgap_pay[m] = 0
         self.pend_postgap_total[m] = 0
@@ -446,7 +468,8 @@ class TorchTempleRunVecEnv(VecEnv):
         for t, v in ((self.t_type, int(cfg["path_type_straight"])), (self.t_level, int(cfg["default_path_level"])),
                      (self.t_obst, 0), (self.t_nlane, 0)):
             t[m] = v
-        for t in (self.t_turn, self.t_canl, self.t_canr, self.t_coin, self.t_wide, self.t_stepup):
+        for t in (self.t_turn, self.t_canl, self.t_canr, self.t_coin, self.t_wide, self.t_stepup,
+                  self.t_sdlow):
             t[m] = False
         for i in range(1, TRACK_LEN):
             self._gen_cell(m, i)
@@ -522,6 +545,7 @@ class TorchTempleRunVecEnv(VecEnv):
         o_coin = torch.zeros(B, dtype=torch.bool, device=dev)
         o_wide = torch.zeros(B, dtype=torch.bool, device=dev)
         o_stepup = torch.zeros(B, dtype=torch.bool, device=dev)
+        o_sdlow = torch.zeros(B, dtype=torch.bool, device=dev)
         o_nlane = torch.zeros(B, dtype=torch.int64, device=dev)
 
         # 1) compound FIFO pop
@@ -545,6 +569,7 @@ class TorchTempleRunVecEnv(VecEnv):
             o_level = torch.where(srcG, self.pend_gap_level, o_level)
             o_obst = torch.where(srcG, self.pend_gap_obst, o_obst)
             o_wide = torch.where(srcG, torch.ones_like(o_wide), o_wide)
+            o_sdlow = torch.where(srcG & self.pend_gap_sdlow, torch.ones_like(o_sdlow), o_sdlow)
             last = srcG & (self.pend_gap == 0) & self.pend_gap_stepup
             o_stepup = torch.where(last, torch.ones_like(o_stepup), o_stepup)
             self.pend_gap_stepup = torch.where(last, torch.zeros_like(self.pend_gap_stepup),
@@ -572,7 +597,10 @@ class TorchTempleRunVecEnv(VecEnv):
             o_obst = torch.where(is_slide, self.pend_postgap_obst, o_obst)
             # GAP->GAP payload: a hole payload (jumpgap) rides the nlane==0 path above; mark it WIDE so
             # the lip-grace / min-airtime / landing model fire exactly like a normal 2-cell HoleLong.
-            o_wide = torch.where(is_slide & (self.pend_postgap_obst == OBST_HOLE),
+            # Type-gated on 12 (HoleLong): a SINGLE-hole payload (slidegap default, straight type) stays
+            # non-wide exactly like a normal 1-cell hole. jumpgap always sets type 12 -> unchanged.
+            o_wide = torch.where(is_slide & (self.pend_postgap_obst == OBST_HOLE)
+                                 & (self.pend_postgap_type == 12),
                                  torch.ones_like(o_wide), o_wide)
             narrow_pt = torch.where(self.pend_postgap_nlane < 0,
                                     torch.full_like(o_type, 19), torch.full_like(o_type, 22))
@@ -592,10 +620,30 @@ class TorchTempleRunVecEnv(VecEnv):
             o_nlane = torch.where(srcN, self.pend_nar_lane, o_nlane)
 
         rem = m & ~srcQ & ~srcG & ~srcP & ~srcN
+        # ★ THE GAME'S OWN DIFFICULTY RAMP (mirror of the CPU ref; device-read 2026-07-26, hook 17j).
+        # Vectorised: each env looks its own distance up in the measured table. When on, these REPLACE
+        # the flat constants and the lerp below. See sim_env.DEFAULT_CONFIG difficulty_ramp_table.
+        r_minobst = r_minturn = r_dbl = r_narrow = r_slide = None
+        if cfg.get("device_difficulty_ramp"):
+            tbl = cfg["difficulty_ramp_table"]
+            d0 = self.dist_real
+            r_minobst = torch.full_like(self.min_obst, int(tbl[0][1]))
+            r_minturn = torch.full_like(self.dist_real, float(tbl[0][2]))
+            r_dbl = torch.full_like(self.dist_real, float(tbl[0][3]))
+            r_narrow = torch.zeros_like(rem)
+            r_slide = torch.zeros_like(rem)
+            for row in tbl:
+                sel = d0 >= float(row[0])
+                r_minobst = torch.where(sel, torch.full_like(r_minobst, int(row[1])), r_minobst)
+                r_minturn = torch.where(sel, torch.full_like(r_minturn, float(row[2])), r_minturn)
+                r_dbl = torch.where(sel, torch.full_like(r_dbl, float(row[3])), r_dbl)
+                r_narrow = torch.where(sel, torch.full_like(r_narrow, bool(row[4])), r_narrow)
+                r_slide = torch.where(sel, torch.full_like(r_slide, bool(row[5])), r_slide)
         if bool(rem.any()):
             diff = ((self.dist_real - float(cfg["start_distance"]))
                     / max(1.0, float(cfg["ramp_distance"]))).clamp(0.0, 1.0)
-            min_t = self.min_turns_base * (1.0 - diff) + self.min_turns_late * diff
+            min_t = (r_minturn if r_minturn is not None
+                     else self.min_turns_base * (1.0 - diff) + self.min_turns_late * diff)
             turn_p = self.turn_p * (1.0 - diff) + self.turn_p_late * diff
 
             # junction decision
@@ -615,7 +663,7 @@ class TorchTempleRunVecEnv(VecEnv):
             # zone transition (priority obstacle)
             z_ok = (rem & ~t_ok
                     & (self.since_turn >= int(cfg["min_clear_after_turn"]))
-                    & (self.since_obst >= self.min_obst)
+                    & (self.since_obst >= (r_minobst if r_minobst is not None else self.min_obst))
                     & (self.since_zone >= self.zone_every)
                     & (self.dist_real >= self.zone_after))
             if bool(z_ok.any()):
@@ -634,12 +682,31 @@ class TorchTempleRunVecEnv(VecEnv):
                 o_level = torch.where(z_ok, self.zone_level, o_level)
                 o_type = torch.where(z_ok, torch.full_like(o_type, 35), o_type)
                 o_wide = torch.where(z_ok, torch.ones_like(o_wide), o_wide)
-                self.pend_gap = torch.where(z_ok, torch.ones_like(self.pend_gap), self.pend_gap)
+                # ONE-CELL CREVASSES (mirror of the CPU ref; WAVE 14, device-measured 67.5% of n=409):
+                # with prob, this cell is the WHOLE crevasse — no second ledge cell queued, so every
+                # following obstacle sits one cell closer, inside the jump arc (the airborne trap the
+                # 2-cell-only sim made unreachable). Device says the 1-cell form is ~6x SAFER (1.1%
+                # deaths / 0% grazes vs 7.0% / 33.7%), so it is left NON-wide: airborne-at-entry is
+                # the whole requirement, no apex/graze, no gap-lip refusal. prob>0-first gating keeps
+                # the default (all 2-cell) rng stream untouched.
+                _p1 = float(cfg.get("crevasse_single_cell_prob", 0.0))
+                one = z_ok & (self._rand() < _p1) if _p1 > 0.0 else torch.zeros_like(z_ok)
+                self.pend_gap = torch.where(z_ok, (~one).long(), self.pend_gap)
+                o_wide = torch.where(one, torch.zeros_like(o_wide), o_wide)
                 self.pend_gap_obst = torch.where(z_ok, torch.full_like(o_obst, OBST_LEVEL_CHANGE),
                                                  self.pend_gap_obst)
                 self.pend_gap_type = torch.where(z_ok, torch.full_like(o_type, 35), self.pend_gap_type)
                 self.pend_gap_level = torch.where(z_ok, self.zone_level, self.pend_gap_level)
-                self.pend_gap_stepup = torch.where(z_ok, self.zone_level > prev_zone, self.pend_gap_stepup)
+                self.pend_gap_stepup = torch.where(z_ok & ~one, self.zone_level > prev_zone,
+                                                   self.pend_gap_stepup)
+                # STEP-DOWN TO LOW GROUND (mirror of the CPU ref): device-measured foot-crossable, so
+                # it is marked on the START cell AND carried to the continuation cell. Applies to both
+                # the 1-cell and 2-cell forms, exactly as the CPU computes it after its if/else.
+                if cfg.get("stepdown_grounded_ok"):
+                    sd = z_ok & (self.zone_level < prev_zone) \
+                        & (self.zone_level <= int(cfg.get("stepdown_grounded_max_level", 1)))
+                    o_sdlow = torch.where(sd, torch.ones_like(o_sdlow), o_sdlow)
+                    self.pend_gap_sdlow = torch.where(z_ok, sd, self.pend_gap_sdlow)
 
             # POST-TURN OBSTACLE (mirror of CPU, device-measured 2026-07-08): with prob, a standard
             # obstacle on the FIRST post-junction cell (since_turn==1; a junction generated THIS step has
@@ -651,19 +718,41 @@ class TorchTempleRunVecEnv(VecEnv):
                       & (self._rand() < top))
                 if bool(to.any()):
                     w_to = self.obst_w.expand(B, -1).clone()
-                    early_to = (self.dist_real < float(cfg["slides_after_distance"])).unsqueeze(1)
+                    early_to = ((~r_slide) if r_slide is not None
+                                else (self.dist_real < float(cfg["slides_after_distance"]))).unsqueeze(1)
                     w_to = torch.where(early_to & self.obst_slide_mask.unsqueeze(0),
                                        torch.zeros_like(w_to), w_to)
                     typ_to = self.obst_types[torch.multinomial(w_to, 1, generator=self.g).squeeze(1)]
                     o_obst = torch.where(to, typ_to, o_obst)
                     self.since_obst = torch.where(to, torch.zeros_like(self.since_obst), self.since_obst)
 
-            # normal obstacle placement
+            # normal obstacle placement. TIGHT PAIRS (mirror of the CPU ref; WAVE 14): device places
+            # 19% of consecutive must-jump obstacles closer than the min_space floor and 6.2% inside
+            # the jump arc; the sim's floor is hard, so with prob allow a SHORT spacing. prob>0-first
+            # gating keeps the default rng stream untouched.
+            _tp = float(cfg.get("tight_pair_prob", 0.0))
+            tight = ((rem & ~t_ok & (o_obst == OBST_NONE)
+                      & (self.since_turn >= int(cfg["min_clear_after_turn"]))
+                      & (self.since_obst >= int(cfg.get("tight_pair_min_cells", 1)))
+                      & (self.since_obst < self.min_obst)
+                      & (self._rand() < _tp)) if _tp > 0.0
+                     else torch.zeros_like(rem))
             ob_ok = (rem & ~t_ok & (o_obst == OBST_NONE)
                      & (self.since_turn >= int(cfg["min_clear_after_turn"]))
-                     & (self.since_obst >= self.min_obst))
+                     & ((self.since_obst >= (r_minobst if r_minobst is not None
+                                            else self.min_obst)) | tight | self.pend_double))
             place = ob_ok & (self._rand() < self.obst_prob) \
                     & ~(self.b2b >= int(cfg["max_back_to_back_obstacles"]))
+            # DOUBLE OBSTACLE (mirror of the CPU ref): arm it when one is placed, so the NEXT cell
+            # bypasses min_space. prob>0-first so the default draws no rng.
+            _dblp = r_dbl if r_dbl is not None else float(cfg.get("double_obstacle_percent", 0.0))
+            _dbl_on = (r_dbl is not None) or float(cfg.get("double_obstacle_percent", 0.0)) > 0.0
+            if _dbl_on:
+                self.pend_double = (place
+                                    & (self.b2b + 1 < int(cfg["max_back_to_back_obstacles"]))
+                                    & (self._rand() < _dblp))
+            else:
+                self.pend_double = torch.zeros_like(self.pend_double)
             # b2b: placed -> +1; any other non-turn generated-here cell -> 0 (mirrors CPU if/elif)
             nonturn_reset = rem & ~t_ok & ~place & ~z_ok
             self.b2b = torch.where(place, self.b2b + 1,
@@ -713,6 +802,8 @@ class TorchTempleRunVecEnv(VecEnv):
                     self.pend_gap_level = torch.where(holewide, o_level, self.pend_gap_level)
                     self.pend_gap_stepup = torch.where(holewide, torch.zeros_like(self.pend_gap_stepup),
                                                        self.pend_gap_stepup)
+                    self.pend_gap_sdlow = torch.where(holewide, torch.zeros_like(self.pend_gap_sdlow),
+                                                      self.pend_gap_sdlow)
 
             # JUMP->SLIDE / JUMP->STRAFE compounds: after a wide-gap START (crevasse z_ok / long-hole
             # holewide), sometimes queue a SLIDE tail (jumpslide) or a side-NARROW tail (jumpnarrow) within
@@ -792,9 +883,44 @@ class TorchTempleRunVecEnv(VecEnv):
                                                           self.pend_postgap_nlane)
                     self.pend_postgap_obst = torch.where(jg, torch.full_like(self.pend_postgap_obst, OBST_HOLE),
                                                          self.pend_postgap_obst)
-                    self.pend_postgap_type = torch.where(jg, torch.full_like(self.pend_postgap_type, 12),
+                    # hole_cells==1 -> STRAIGHT type => the emission block leaves it non-wide, i.e. a
+                    # normal 1-cell hole (the device-true tight LevelChange->Hole pair, WAVE 14);
+                    # >1 -> type 12 + wide (the v62 gap->gap form). Mirrors CPU _queue_jumpgap.
+                    jg_pt = 12 if hole > 1 else int(cfg["path_type_straight"])
+                    self.pend_postgap_type = torch.where(jg, torch.full_like(self.pend_postgap_type, jg_pt),
                                                          self.pend_postgap_type)
                     self.pend_postgap_level = torch.where(jg, o_level, self.pend_postgap_level)
+
+            # SLIDE->HOLE compound [WAVE 9 HUMAN-DEMO 2026-07-09, mirror of CPU _queue_slidegap]: a hole
+            # a couple clear cells after a SLIDE obstacle emitted THIS step (normal or post-turn
+            # placement) — the ~0.7s slide commit (jump refused while sliding) eats the jump window;
+            # the survivable line = EARLY slide + jump the INSTANT the slide ends (the human's recipe,
+            # 12/14 events, slidegap_survival.py). Same prob>0-first gating; threshold mode. The
+            # single-hole payload (default) rides the nlane==0 emit on a STRAIGHT type -> non-wide,
+            # exactly like a normal 1-cell hole; hole_cells>1 -> type 12 + wide like jumpgap.
+            sgp = float(cfg.get("slidegap_prob", 0.0))
+            if sgp > 0.0:
+                slide_emit = rem & ((o_obst == OBST_TREE_SLIDE) | (o_obst == OBST_FLAME_TOWER))
+                se = (slide_emit & ~queued
+                      & (self.dist_real >= float(cfg.get("slidegap_after_distance", 0.0))))
+                sg = se & (self._rand() < sgp)
+                if bool(sg.any()):
+                    gap = max(0, int(cfg.get("slidegap_gap_cells", 2)))
+                    hole = max(1, int(cfg.get("slidegap_hole_cells", 1)))
+                    spt = 12 if hole > 1 else int(cfg["path_type_straight"])
+                    self.pend_postgap = torch.where(sg, torch.full_like(self.pend_postgap, gap + hole),
+                                                    self.pend_postgap)
+                    self.pend_postgap_pay = torch.where(sg, torch.full_like(self.pend_postgap_pay, hole),
+                                                        self.pend_postgap_pay)
+                    self.pend_postgap_nlane = torch.where(sg, torch.zeros_like(self.pend_postgap_nlane),
+                                                          self.pend_postgap_nlane)
+                    self.pend_postgap_obst = torch.where(sg, torch.full_like(self.pend_postgap_obst, OBST_HOLE),
+                                                         self.pend_postgap_obst)
+                    self.pend_postgap_type = torch.where(sg, torch.full_like(self.pend_postgap_type, spt),
+                                                         self.pend_postgap_type)
+                    self.pend_postgap_total = torch.where(sg, torch.zeros_like(self.pend_postgap_total),
+                                                          self.pend_postgap_total)  # threshold mode
+                    self.pend_postgap_level = torch.where(sg, o_level, self.pend_postgap_level)
 
             # coin
             coin = rem & ~t_ok & (o_obst == OBST_NONE) \
@@ -812,6 +938,7 @@ class TorchTempleRunVecEnv(VecEnv):
         self.t_coin[:, slot] = torch.where(m, o_coin, self.t_coin[:, slot])
         self.t_wide[:, slot] = torch.where(m, o_wide, self.t_wide[:, slot])
         self.t_stepup[:, slot] = torch.where(m, o_stepup, self.t_stepup[:, slot])
+        self.t_sdlow[:, slot] = torch.where(m, o_sdlow, self.t_sdlow[:, slot])
         self.t_nlane[:, slot] = torch.where(m, o_nlane, self.t_nlane[:, slot])
 
     def _gen_cell_injected(self, m: torch.Tensor, slot: int) -> None:
@@ -828,6 +955,7 @@ class TorchTempleRunVecEnv(VecEnv):
         self.t_coin[:, slot] = torch.where(valid, inj["coin"][idx], self.t_coin[:, slot])
         self.t_wide[:, slot] = torch.where(valid, inj["wide"][idx], self.t_wide[:, slot])
         self.t_stepup[:, slot] = torch.where(valid, inj["stepup"][idx], self.t_stepup[:, slot])
+        self.t_sdlow[:, slot] = torch.where(valid, inj["sdlow"][idx], self.t_sdlow[:, slot])
         self.t_nlane[:, slot] = torch.where(valid, inj["nlane"][idx], self.t_nlane[:, slot])
         if bool(neutral.any()):
             self.t_type[:, slot] = torch.where(neutral, torch.full_like(self.t_type[:, slot],
@@ -836,7 +964,8 @@ class TorchTempleRunVecEnv(VecEnv):
                                                 int(self.cfg["default_path_level"])), self.t_level[:, slot])
             self.t_obst[:, slot] = torch.where(neutral, torch.zeros_like(self.t_obst[:, slot]),
                                                self.t_obst[:, slot])
-            for t in (self.t_turn, self.t_canl, self.t_canr, self.t_coin, self.t_wide, self.t_stepup):
+            for t in (self.t_turn, self.t_canl, self.t_canr, self.t_coin, self.t_wide, self.t_stepup,
+                  self.t_sdlow):
                 t[:, slot] = torch.where(neutral, torch.zeros_like(t[:, slot]), t[:, slot])
             self.t_nlane[:, slot] = torch.where(neutral, torch.zeros_like(self.t_nlane[:, slot]),
                                                 self.t_nlane[:, slot])
@@ -918,6 +1047,9 @@ class TorchTempleRunVecEnv(VecEnv):
     def _apply_action(self, a: torch.Tensor, alive: torch.Tensor) -> None:
         cfg = self.cfg
         # --- JUMP ---
+        # HELD-JUMP bookkeeping (mirror of the CPU ref): remember a JUMP pressed while ALREADY
+        # AIRBORNE (the guard below drops it), and clear the flag on any other action = button released.
+        self.jump_held_air = (self.jump_held_air | (alive & (a == A_JUMP) & (self.jump_t > 0.0)))             & (a == A_JUMP)
         can_jump = alive & (a == A_JUMP) & (self.jump_t <= 0.0) & (self.slide_t <= 0.0)
         p_drop = float(cfg.get("jump_drop_prob", 0.0))
         if p_drop > 0.0:
@@ -926,6 +1058,12 @@ class TorchTempleRunVecEnv(VecEnv):
         refuse = can_jump & ((self.lat_target - self.lane).abs() > 1.8) & (self._rand() < p_ref)
         can_jump = can_jump & ~refuse
         lip = can_jump & self.t_wide[:, 0] & (self._cp() > float(cfg.get("gap_jump_lip_cp", 0.2)))
+        # POST-LANDING GAP RE-JUMP (WAVE 12, mirror of CPU): a jump within ~1 frame of touchdown on a
+        # wide-gap cell fires 46% on device — bypass the lip refusal at the measured rate (prob>0-first).
+        plr = float(cfg.get("post_land_gap_rejump_prob", 0.0))
+        if plr > 0.0:
+            fresh = lip & (self.frames_since_land <= 1) & (self._rand() < plr)
+            lip = lip & ~fresh
         can_jump = can_jump & ~lip
         lat = int(cfg.get("jump_exec_lat_frames", 0))
         if lat > 0:
@@ -965,6 +1103,16 @@ class TorchTempleRunVecEnv(VecEnv):
         m = m & ~linger_hit
         if not bool(m.any()):
             return
+        # HOOK DEBOUNCE (mirror of CPU, WAVE 10): a turn byte within turn_drop_debounce_s of the
+        # previous one is EATEN; every processed byte arms the timer. Default 0 = off.
+        deb = float(cfg.get("turn_drop_debounce_s", 0.0))
+        if deb > 0.0:
+            eaten = m & (self.turn_debounce > 0.0)
+            m = m & ~eaten
+            self.turn_debounce = torch.where(m, torch.full_like(self.turn_debounce, deb),
+                                             self.turn_debounce)
+            if not bool(m.any()):
+                return
         cell_turn = self.t_turn[:, 0]
         side_ok = torch.where(want_left, self.t_canl[:, 0], self.t_canr[:, 0])
         cp = self._cp()
@@ -999,6 +1147,10 @@ class TorchTempleRunVecEnv(VecEnv):
             self.pend_turn_ttl = torch.where(app, torch.full_like(self.pend_turn_ttl,
                                              int(cfg.get("turn_buffer_ttl", 3))), self.pend_turn_ttl)
             rem = rem & ~app
+        # OFF-JUNCTION DROP (mirror of CPU, WAVE 10): with the knob on (+ hook_turn_buffer), the hook's
+        # measured drop paths make any leftover turn byte a harmless no-op — no stumble, no kill.
+        if cfg.get("turn_offjunction_drop") and cfg.get("hook_turn_buffer"):
+            return
         # mistimed near a junction -> stumble; on a plain straight -> fatal
         near = rem & (cell_turn | self.t_turn[:, 1])
         self._stumble(near)
@@ -1059,9 +1211,28 @@ class TorchTempleRunVecEnv(VecEnv):
         self.has_takeoff = self.has_takeoff | fire
 
         # transient timers
+        _was_air = self.jump_t > 0.0
         self.jump_t = torch.where(alive, (self.jump_t - dt).clamp_min(0.0), self.jump_t)
+        _landed = _was_air & (self.jump_t <= 0.0) & alive
+        self.frames_since_land = torch.where(_landed, torch.zeros_like(self.frames_since_land),
+                                             (self.frames_since_land + 1).clamp(max=99))
+        # HELD-JUMP -> LANDING RE-JUMP (mirror of the CPU ref): the button was still down at touchdown,
+        # so the device fires a jump the policy never chose. Gap cells convert far more often than
+        # solid ground (device-measured 28-46% vs 10%). prob>0-first gating keeps the default stream.
+        _hjs = float(cfg.get("held_jump_rejump_solid", 0.0))
+        _hjg = float(cfg.get("held_jump_rejump_gap", 0.0))
+        if _hjs > 0.0 or _hjg > 0.0:
+            _p = torch.where(self.t_wide[:, 0], _hjg, _hjs)
+            _fire = _landed & self.jump_held_air & (self._rand() < _p)
+            self.jump_t = torch.where(_fire, torch.full_like(self.jump_t, float(cfg["jump_duration"])),
+                                      self.jump_t)
+            self.takeoff_pos = torch.where(_fire, self.cell_counter + self._cp(), self.takeoff_pos)
+            self.has_takeoff = self.has_takeoff | _fire
+        self.jump_held_air = self.jump_held_air & ~_landed
         self.slide_t = torch.where(alive, (self.slide_t - dt).clamp_min(0.0), self.slide_t)
         self.strafe_t = torch.where(alive, (self.strafe_t - dt).clamp_min(0.0), self.strafe_t)
+        self.turn_debounce = torch.where(alive, (self.turn_debounce - dt).clamp_min(0.0),
+                                         self.turn_debounce)
 
         # strafe-command latency -> active lateral target
         if self.slat > 0:
@@ -1107,8 +1278,13 @@ class TorchTempleRunVecEnv(VecEnv):
                                        self.post_linger)
 
         # distance / velocity (unguarded on is_dead — CPU order)
+        # dist_per_velsec_slope > 0 => the DEVICE-MEASURED law, rate = slope * velocity^2 (see the
+        # sim_env.py config comment); 0 keeps the old flat scalar. Branch is on a config scalar, not
+        # on tensor state, so the step stays capture-safe for the CUDA graph.
+        _dslope = float(cfg.get("dist_per_velsec_slope", 0.0))
+        _dpv = (_dslope * self.velocity) if _dslope > 0.0 else float(cfg["dist_per_velsec"])
         self.dist_real = torch.where(alive,
-                                     self.dist_real + self.velocity * dt * float(cfg["dist_per_velsec"]),
+                                     self.dist_real + self.velocity * dt * _dpv,
                                      self.dist_real)
         curve_v = self._interp_vel(self.dist_real)
         sv = alive & self.stumble_vel_on
@@ -1159,7 +1335,7 @@ class TorchTempleRunVecEnv(VecEnv):
         # shift the ring left; generate the new horizon cell
         mm2 = mm.unsqueeze(1)
         for t in (self.t_type, self.t_level, self.t_obst, self.t_turn, self.t_canl, self.t_canr,
-                  self.t_coin, self.t_wide, self.t_stepup, self.t_nlane):
+                  self.t_coin, self.t_wide, self.t_stepup, self.t_sdlow, self.t_nlane):
             shifted = torch.roll(t, -1, dims=1)
             t.copy_(torch.where(mm2, shifted, t))
         self._gen_cell(mm, TRACK_LEN - 1)
@@ -1199,6 +1375,9 @@ class TorchTempleRunVecEnv(VecEnv):
         if cfg.get("crevasse_apex_all") or cfg.get("crevasse_graze_worldy"):
             last_crev = (obst == OBST_LEVEL_CHANGE) & self.t_wide[:, 0] & ~self.t_wide[:, 1]
             apex_mask = apex_mask | last_crev
+        # a step-DOWN to LOW ground has no raised cap to clear -> never an apex cell (mirror of the CPU
+        # ref; without this the apex branch kills a grounded runner before the soft-flag check below)
+        apex_mask = apex_mask & ~self.t_sdlow[:, 0]
         # step-up crevasse: velocity-dependent apex check at the raised ledge
         su = m & mj & apex_mask
         if bool(su.any()):
@@ -1245,9 +1424,12 @@ class TorchTempleRunVecEnv(VecEnv):
         pj = m & mj & ~apex_mask
         need = torch.where(self.t_wide[:, 0], float(cfg["wide_gap_min_airtime"]), 0.0)
         fail = pj & (self.jump_t <= need)
-        grace_ok = fail & self.t_wide[:, 0] & (float(cfg["gap_entry_grace"]) > 0.0)
+        # STEP-DOWN TO LOW GROUND is crossable ON FOOT (device-measured; CPU ref returns BEFORE the
+        # grace path, so a soft cell must take NEITHER the kill NOR the gap-grace mark).
+        soft = fail & self.t_sdlow[:, 0]
+        grace_ok = fail & ~soft & self.t_wide[:, 0] & (float(cfg["gap_entry_grace"]) > 0.0)
         self.gap_grace = self.gap_grace | grace_ok
-        die = fail & ~grace_ok
+        die = fail & ~soft & ~grace_ok
         self._kill_t(die, torch.where(obst == OBST_HOLE, 1, 2))
         m = m & ~self.is_dead
         # WIDE-GAP LANDING MODEL (mirror of the CPU ref): airborne here, but does the arc LAND past
@@ -1262,6 +1444,22 @@ class TorchTempleRunVecEnv(VecEnv):
             d = self.cell_counter - self.takeoff_pos
             short = last_gap & (span < d + 1.0 - float(cfg["wide_gap_land_grace"]))
             self._kill(short, 2)
+            m = m & ~self.is_dead
+        # SINGLE-HOLE AIRBORNE TRAP (mirror of the CPU ref; WAVE 14). A 1-cell hole is not wide_gap,
+        # so the block above skips it and the only gate was binary airborne -> an almost-expired arc
+        # crossed for free in-sim. Device: reaching the hole PAST THE ARC APEX (descending) kills
+        # ~30%; rising/at apex is free. Probabilistic -> statistical-tier equivalence (prob 1.0 keeps
+        # the deterministic tier step-exact and draws no rng).
+        _hp = float(cfg.get("hole_trap_kill_prob", 0.0))
+        if _hp > 0.0 and cfg.get("hole_landing_model"):
+            sh = (m & (obst == OBST_HOLE) & ~self.t_wide[:, 0] & ~apex_mask
+                  & (self.jump_t > 0.0) & self.has_takeoff)
+            span_h = float(cfg["wide_gap_span_a"]) * self.velocity + float(cfg["wide_gap_span_b"])
+            frac_h = (self.cell_counter - self.takeoff_pos) / span_h.clamp_min(1e-6)
+            sh = sh & (frac_h > float(cfg["hole_trap_apex_frac"]))
+            if _hp < 1.0:
+                sh = sh & (self._rand() < _hp)
+            self._kill(sh, 1)
             m = m & ~self.is_dead
 
         # must-slide: not sliding OR airborne -> death
@@ -1280,6 +1478,17 @@ class TorchTempleRunVecEnv(VecEnv):
         cp = self._cp()
         win = (cp >= float(cfg["turn_exec_early"])) & (cp <= float(cfg["turn_exec_late"]))
         raw_turn = self.t_turn[:, 0]
+        # LOOKAHEAD BLOCKING (mirror of the CPU ref; WAVE 15 perception fix). The hook's neighbour walk
+        # used one fixed heading offset per step and died past every corner (72% of near-junction device
+        # frames streamed next/next2 = -1). A heading-aware walk sees through a FORCED corner; only a
+        # genuine T-junction (both directions available) must stay blind, because the continuation is
+        # not yet decided and a wrong lookahead is worse than none. Gated; default = always blind.
+        if cfg.get("turn_aware_lookahead"):
+            _b0 = raw_turn & self.t_canl[:, 0] & self.t_canr[:, 0]
+            _b1 = self.t_turn[:, 1] & self.t_canl[:, 1] & self.t_canr[:, 1]
+            _b2 = self.t_turn[:, 2] & self.t_canl[:, 2] & self.t_canr[:, 2]
+        else:
+            _b0, _b1, _b2 = raw_turn, self.t_turn[:, 1], self.t_turn[:, 2]
         is_turn = raw_turn & win
         can_l = self.t_canl[:, 0] & win
         can_r = self.t_canr[:, 0] & win
@@ -1317,18 +1526,26 @@ class TorchTempleRunVecEnv(VecEnv):
             "next_must_jump": self.must_jump_lut[nobst],
             "next_must_slide": self.must_slide_lut[nobst],
             "next_wide_gap": self.t_wide[:, 1].clone(),
+            # SOFT must-jump (step-DOWN to low ground). Reward-only: obs is built from an explicit
+            # field list, so OBS_LEN is unchanged. Mirror of the CPU ref's snapshot.
+            "soft_stepdown": self.t_sdlow[:, 0].clone(),
+            "next_soft_stepdown": self.t_sdlow[:, 1].clone(),
             "next_ground_change_higher": nobst == OBST_LEVEL_CHANGE,
-            "next_path_level": torch.where(raw_turn, neg1, self.t_level[:, 1]),
-            "next2_path_level": torch.where(raw_turn | self.t_turn[:, 1], neg1, self.t_level[:, 2]),
+            "next_path_level": torch.where(_b0, neg1, self.t_level[:, 1]),
+            "next2_path_level": torch.where(_b0 | _b1, neg1, self.t_level[:, 2]),
             # 2-cell OBSTACLE lookahead (chained-obstacle fix) — same junction dropout as next2_path_level.
-            "next2_must_jump": self.must_jump_lut[self.t_obst[:, 2]] & ~(raw_turn | self.t_turn[:, 1]),
-            "next2_must_slide": self.must_slide_lut[self.t_obst[:, 2]] & ~(raw_turn | self.t_turn[:, 1]),
+            "next2_must_jump": self.must_jump_lut[self.t_obst[:, 2]] & ~(_b0 | _b1),
+            "next2_must_slide": self.must_slide_lut[self.t_obst[:, 2]] & ~(_b0 | _b1),
             # 3-cell OBSTACLE lookahead (hedge-jump fix) — junction-dropout CHAIN through cell+2.
             "next3_must_jump": self.must_jump_lut[self.t_obst[:, 3]]
-                               & ~(raw_turn | self.t_turn[:, 1] | self.t_turn[:, 2]),
+                               & ~(_b0 | _b1 | _b2),
             "next3_must_slide": self.must_slide_lut[self.t_obst[:, 3]]
-                                & ~(raw_turn | self.t_turn[:, 1] | self.t_turn[:, 2]),
+                                & ~(_b0 | _b1 | _b2),
             "narrow_target_lane": self.t_nlane[:, 1].clone(),    # 0 == None
+            # 2-ahead NARROW SIDE (WAVE 9, obs 62->63 — the jump->narrow mid-air tilt fix): the slot-2
+            # narrow lane with the SAME junction dropout as next2_path_level (0 == None through turns).
+            "next2_narrow_lane": torch.where(_b0 | _b1,
+                                             torch.zeros_like(self.t_nlane[:, 2]), self.t_nlane[:, 2]),
             "cell_progress": cp,
             "lane": self.lane.clone(),
             "stumble_kill_timer": self.stumble_kill_t.clone(),
@@ -1362,14 +1579,49 @@ class TorchTempleRunVecEnv(VecEnv):
         out[:, b + 6] = lane_norm(ntl.float() * O.NARROW_CENTER)   # ntl==0 (None) -> center 0.5, like CPU
         out[:, b + 7] = (cp + O.DCPROG_PER_VEL * v).clamp(0.0, 1.0)
         span = O.JUMP_DURATION * v / O.CELL_LENGTH
-        raw = (O.LEDGE_CELLS_AHEAD - cp) - 0.5 * span
-        pj = ((raw + 0.5) / 2.0).clamp(0.0, 1.0)
+        if O.PJ_VELOCITY_INVARIANT:   # dimensionless arc fraction — see the obs.py note
+            pj = ((O.LEDGE_CELLS_AHEAD - cp) / span.clamp_min(1e-6) / 2.0).clamp(0.0, 1.0)
+        else:
+            raw = (O.LEDGE_CELLS_AHEAD - cp) - 0.5 * span
+            pj = ((raw + 0.5) / 2.0).clamp(0.0, 1.0)
         out[:, b + 8] = torch.where(s["next_ground_change_higher"], pj,
                                     torch.full_like(pj, O.PJ_NONE))
         npl = s["next_path_level"]
         out[:, b + 9] = torch.where(npl < 0, 0.0, npl.float().clamp(0.0, O.PATH_LEVEL_MAX) / O.PATH_LEVEL_MAX)
         n2 = s["next2_path_level"]
         out[:, b + 10] = torch.where(n2 < 0, 0.0, n2.float().clamp(0.0, O.PATH_LEVEL_MAX) / O.PATH_LEVEL_MAX)
+        # next2_narrow_lane: 2-ahead narrow side on the lane scale (0 == None -> center), same as b+6.
+        out[:, b + 11] = lane_norm(s["next2_narrow_lane"].float() * O.NARROW_CENTER)
+        # predicted_turn (WAVE 11): approach-cell swipe cue / junction deadline margin, mirror of CPU.
+        pt_margin = O.TURN_DEADLINE_CP - cp - O.TURN_SEND_FRAMES * v * O.DCPROG_PER_VEL
+        pt_j = (pt_margin / O.TURN_DEADLINE_CP).clamp(0.0, 1.0) * 0.75
+        out[:, b + 12] = torch.where(s["is_turn"].bool(), pt_j,
+                                     torch.where(s["next_is_turn"].bool(),
+                                                 torch.ones_like(pt_j), torch.zeros_like(pt_j)))
+        # landing_hazard (WAVE 16, mirror of the CPU ref): if a jump were taken NOW, does the arc come
+        # down on a must-jump hazard? span = SPAN_A*v + SPAN_B (device jump-arc fit); landing offset =
+        # cell_progress + span. 1.0 = hazard at the landing cell, 0.0 = clear, 0.5 = beyond the 3-cell
+        # lookahead. Targets the measured dominant death mode: 60% of device deaths are "my arc landed
+        # me somewhere fatal", with takeoff->fatal distance clustering at exactly the arc span.
+        span = (O.LAND_SPAN_A * v + O.LAND_SPAN_B).clamp_min(0.0)
+        off = (cp + span).floor().long()
+        haz = torch.where(off <= 0, s["must_jump"].bool(),
+              torch.where(off == 1, s["next_must_jump"].bool(),
+              torch.where(off == 2, s["next2_must_jump"].bool(),
+                                    s["next3_must_jump"].bool())))
+        lh = haz.float()
+        out[:, b + 13] = torch.where(off > 3, torch.full_like(lh, 0.5), lh)
+        # slide_landing_hazard (WAVE 18): same arc, must-SLIDE ladder -- the airborne-into-slide trap.
+        shaz = torch.where(off <= 0, s["must_slide"].bool(),
+               torch.where(off == 1, s["next_must_slide"].bool(),
+               torch.where(off == 2, s["next2_must_slide"].bool(),
+                                     s["next3_must_slide"].bool())))
+        slh = shaz.float()
+        out[:, b + 14] = torch.where(off > 3, torch.full_like(slh, 0.5), slh)
+        # ⚠️ THIS SIM IS RETIRED AND ALREADY DRIFTS FROM THE C++ TRAINER AND THE CPU REFERENCE -- the
+        # span above is FLAT, missing LAND_SPAN_LEVEL_SCALED (2026-07-27), so landing_hazard AND this
+        # column are wrong by a whole cell at crevasses. The column is mirrored only to keep the obs
+        # WIDTH right. Do not judge a policy here: use scripts/eval_cpp.py.
         return out
 
     def _full_obs(self) -> torch.Tensor:
@@ -1384,7 +1636,8 @@ class TorchTempleRunVecEnv(VecEnv):
         if not any((self.action_cost, self.reaction_bonus, self.turn_spam_penalty,
                     self.idle_action_penalty, self.redundant_action_penalty, self.strafe_penalty,
                     self.narrow_hold_bonus, self.velocity_drop_penalty, self.off_center_penalty,
-                    self.slide_jump_penalty, self.airborne_action_penalty, self.jump_hold_penalty)):
+                    self.slide_jump_penalty, self.airborne_action_penalty, self.jump_hold_penalty,
+                    self.turn_buffer_bonus)):
             return torch.zeros(self.B, dtype=torch.float64, device=self.dev)
         p = self.prev
         r = torch.zeros(self.B, dtype=torch.float64, device=self.dev)
@@ -1423,8 +1676,21 @@ class TorchTempleRunVecEnv(VecEnv):
             cp_land = cp0 + O.DCPROG_PER_VEL * p["velocity"]
             aim = (1.0 - self.aim_center_weight * (cp_land - 0.44).abs() / 0.16).clamp_min(0.0)
             side_ok = ((a == A_TL) & p["can_turn_left"]) | ((a == A_TR) & p["can_turn_right"])
+            if self.stepdown_bonus_gate:
+                # mirror of reward.py: a jump credited SOLELY by a soft step-down earns nothing --
+                # removing the death removed the requirement, this removes the incentive.
+                hard = ((p["must_jump"] & ~p["soft_stepdown"])
+                        | (p["next_must_jump"] & ~p["next_soft_stepdown"]))
+                jm = jm & hard
             r = r + self.reaction_bonus * (jm | sm).float()
             r = r + self.reaction_bonus * aim * (tm & side_ok).float()
+        if self.turn_buffer_bonus:   # WAVE 13: credit the APPROACH-cell pre-swipe (latency-robust latch);
+            # mirror of reward.py — valid-direction turn on the approach cell (next_is_turn, correct exit
+            # side). ~is_turn & next_is_turn & (A_TL&next_canl | A_TR&next_canr).
+            pre = (~p["is_turn"].bool() & p["next_is_turn"].bool()
+                   & (((a == A_TL) & p["next_can_turn_left"].bool())
+                      | ((a == A_TR) & p["next_can_turn_right"].bool())))
+            r = r + self.turn_buffer_bonus * pre.float()
         if self.turn_spam_penalty:
             last_t = (self.last_action == A_TL) | (self.last_action == A_TR)
             r = r - self.turn_spam_penalty * (is_t & last_t).float()
@@ -1450,6 +1716,23 @@ class TorchTempleRunVecEnv(VecEnv):
         if dock:
             r = r - dock * (is_strafe & (ntl == 0)).float()
         return r
+
+    def approach_turn_hint(self) -> torch.Tensor:
+        """[B] int64 GUIDED-EXPLORATION hint (WAVE 13, for train_fast --turn-explore-prob): on an
+        APPROACH cell (current cell NOT a junction type, NEXT cell a junction with a valid exit) return
+        the correct-direction turn (A_TL/A_TR per next_can_turn); else -1. Lets the trainer FORCE the
+        pre-swipe to be SAMPLED so turn_buffer_bonus fires and its positive advantage propagates — the
+        approach-turn probability is otherwise collapsed to ~0 (measured P(turn|approach)=0.000000) and
+        pure entropy never explores it (exploring-starts, still 100% RL). Training-only; NOT sim dynamics
+        (reads state, mutates nothing) -> no equivalence impact. Matches the approach-buffer latch path in
+        the CPU sim's _attempt_turn (not cell.is_turn & nxt.is_turn & valid side)."""
+        cur_j = self.t_turn[:, 0].bool()
+        nxt_j = self.t_turn[:, 1].bool()
+        nl, nr = self.t_canl[:, 1].bool(), self.t_canr[:, 1].bool()
+        approach = (~cur_j) & nxt_j & (nl | nr)
+        none = torch.full((self.B,), -1, dtype=torch.int64, device=self.dev)
+        direction = torch.where(nl, torch.full_like(none, A_TL), torch.full_like(none, A_TR))
+        return torch.where(approach, direction, none)
 
     # ------------------------------------------------- tensor-native fast path
     def reset_tensor(self) -> torch.Tensor:
@@ -1645,6 +1928,8 @@ class TorchSimGymAdapter(gym.Env):
                 out[k] = float(x)
         ntl = int(s["narrow_target_lane"][0].item())
         out["narrow_target_lane"] = None if ntl == 0 else ntl
+        n2l = int(s["next2_narrow_lane"][0].item())
+        out["next2_narrow_lane"] = None if n2l == 0 else n2l
         return out
 
     def raw_state(self) -> dict:

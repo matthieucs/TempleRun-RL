@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -48,6 +49,10 @@ LOG_FIELDS = (
     "dist_to_change_temple", "dist_to_change_other", "dist_since_level_change", "dist_remainder",
     "ground_height", "is_over_ground", "ground_change_higher", "next_ground_change_higher",
     "next_path_level", "next2_path_level",   # [PROBE 16q] upcoming-cell Level readability (direction fix)
+    "gen",   # [17j] the GAME's own generation law, sampled ~2s (difficulty ramp)
+    "wp",                                    # [PROBE 17g] [plain, turn-aware] lookahead cells resolved:
+                                             # the walk uses ONE fixed heading offset per step, so it dies
+                                             # past a junction (72% of on-junction frames drop next/next2)
     "turn_write", "should_turn_left", "should_turn_right",  # [16s] turn-byte verdict + GI readback
     "stumble_kill_timer", "did_stumble", "stumble_count", "death_type",
     "is_stumbling",              # [16x] LIVE hit state (IsStumbling 0x10C) — precise hit/slowdown detect
@@ -105,7 +110,16 @@ def main() -> None:
                         "gives an unambiguous device takeoff->outcome curve. 'off' = policy jumps.")
     p.add_argument("--narrow-override", choices=["off", "L", "C", "R", "cycle"], default="off",
                    help="force a commanded lane at each narrow (isolates the sweep from the hook guess)")
+    p.add_argument("--land-span", default="",
+                   help="A,B overriding obs.LAND_SPAN_A/B for this run. REQUIRED for any policy "
+                        "trained before the 2026-07-27 span correction (v90, v91*): they learned "
+                        "landing_hazard under 0.0204,-0.94, and feeding them the corrected 0.0143,"
+                        "-0.11 hands them an input they never saw. Pass '0.0204,-0.94' for those.")
     a = p.parse_args()
+
+    if a.land_span:
+        O.LAND_SPAN_A, O.LAND_SPAN_B = (float(x) for x in a.land_span.split(","))
+        print(f"[land-span pinned] {O.LAND_SPAN_A}, {O.LAND_SPAN_B}")
 
     m, fs, K = load_policy(a.model)
     ports = C.device_ports(a.device_index)
@@ -142,6 +156,9 @@ def main() -> None:
         for ep in range(a.episodes):
             o, info = env.reset()
             st = info["raw_state"]
+            # wall clock (NOT perf_counter -- it must be comparable across processes) so a screen
+            # recording can be aligned to this capture. See scripts/overlay_video.py.
+            t_reset = time.time()
             # per-episode narrow-override state
             narrow_active = False
             narrow_strafed = False
@@ -219,13 +236,15 @@ def main() -> None:
                         narrow_active = False
                         cmd_log = "recenter"
 
+                t_act = time.time()          # the instant the action byte goes out
                 o, r, t, tr, info = env.step(act)
                 st = info["raw_state"]
                 if info.get("degraded"):
                     print(f"ep {ep}: device degraded, skipping rest", flush=True)
                     break
 
-                rec = {"ep": ep, "step": step, "action": act, "narrow_cmd": cmd_log}
+                rec = {"ep": ep, "step": step, "action": act, "narrow_cmd": cmd_log,
+                       "t_host": t_act, "t_reset": t_reset}
                 for k in LOG_FIELDS:
                     rec[k] = st.get(k)
                 rec["lane_bucket"] = lane_bucket(st.get("lane"))

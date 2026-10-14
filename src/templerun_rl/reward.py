@@ -32,6 +32,10 @@ def shaping_reward(
     redundant_action_penalty: float = 0.0,
     airborne_action_penalty: float = 0.0,
     jump_hold_penalty: float = 0.0,
+    turn_buffer_bonus: float = 0.0,
+    stepdown_bonus_gate: bool = False,
+    landing_hazard_penalty: float = 0.0,
+    turn_takeoff_penalty: float = 0.0,
     jumped_recently: bool = False,
     slid_recently: bool = False,
     strafe_penalty: float = 0.0,
@@ -53,13 +57,55 @@ def shaping_reward(
     if (not action_cost and not reaction_bonus and not turn_spam_penalty
             and not idle_action_penalty and not redundant_action_penalty and not strafe_penalty
             and not narrow_hold_bonus and not velocity_drop_penalty and not off_center_penalty
-            and not slide_jump_penalty and not airborne_action_penalty and not jump_hold_penalty):
+            and not slide_jump_penalty and not airborne_action_penalty and not jump_hold_penalty
+            and not turn_buffer_bonus and not landing_hazard_penalty
+            and not turn_takeoff_penalty):
         return 0.0
     r = 0.0
     # JUMP into a slide-obstacle is FATAL on device [MEASURED 2026-07-03, ppo_speed_v8: 4/8 deaths] —
     # a TreeSlide/FlameTower is a LOW bar you pass UNDER; jumping lifts you into it. Dock a JUMP issued
     # when a slide-obstacle is HERE / AHEAD or a slide is already in progress, so the policy stops
     # popping up mid-slide (the "slid then jumped and died" bug). Mirrors the sim death model.
+    # ★ LANDING-HAZARD PENALTY [2026-07-28]: dock a JUMP whose ARC IS PREDICTED TO COME DOWN ON A
+    # MUST-JUMP HAZARD. This is the amplifier for a cue that is already correct but too quiet.
+    # MEASURED: v107 dies 5 of 7 deaths with dt=4 Ledge ("my arc landed me somewhere fatal"), and the
+    # fatal takeoff had landing_hazard = 1.0 ALREADY SET one frame early AND at takeoff -- so this is
+    # NOT a perception gap. The counterfactual response is the problem: flipping landing_hazard on
+    # real states moves P(JUMP) by only -0.0039 on a 0.036 base (~10% relative), nowhere near enough
+    # to veto a jump the rest of the obs is demanding. (v92b -0.0078, v104 -0.0005: the cue also
+    # ERODED through the lineage.) Same shape as the held-jump fix, which is the project's strongest
+    # precedent: the death model made the world truthful, and airborne_action_penalty made it LOUD
+    # enough to learn -- 10.67 -> 0.00 per km on device.
+    # Recomputed here from the SAME streamed fields obs.py uses, so it is identical on device and in
+    # sim, and un-gameable (it prices the arc, not the button).
+    if landing_hazard_penalty and action == int(C.Action.JUMP) and prev is not None:
+        from .obs import LAND_SPAN_A, LAND_SPAN_B
+        _v = float(prev_velocity or prev.get("velocity") or 0.0)
+        _sp = max(0.0, LAND_SPAN_A * _v + LAND_SPAN_B)
+        _off = int(float(prev.get("cell_progress") or 0.0) + _sp)
+        _lad = (prev.get("must_jump"), prev.get("next_must_jump"),
+                prev.get("next2_must_jump"), prev.get("next3_must_jump"))
+        if 0 <= _off <= 3 and _lad[_off]:
+            r -= landing_hazard_penalty
+    # ★ TURN-TAKEOFF PENALTY [2026-07-28]: dock a JUMP whose ARC IS STILL IN THE AIR WHEN AN
+    # UNRESOLVED JUNCTION ARRIVES. USER: "it jumped in a turn, turned and landed in a hole."
+    # MEASURED: 5.0% of takeoffs happen with a junction within 2 cells, and 8.7% of THOSE kill,
+    # against ~1% for takeoffs generally -- an 8x lethality multiplier on one identifiable setup.
+    # WHY IT IS STRUCTURAL, not a training gap: landing_hazard and the whole lookahead are computed
+    # ALONG THE CURRENT HEADING, with an explicit junction dropout. When the turn fires mid-air the
+    # runner comes down on a path the observation NEVER MODELLED, so no amount of exposure can teach
+    # the landing -- the cue for it does not exist. Pricing the TAKEOFF is the tractable half: the
+    # policy cannot know where it will land, but it can know not to leave the ground here, and
+    # is_turn / next_is_turn are both already in the obs, so the counterfactual IS learnable.
+    # Third use of the amplifier pattern (held-jump, landing-hazard, this). Prices the ARC and the
+    # geometry rather than the button, so it cannot be gamed by a one-frame gap.
+    if turn_takeoff_penalty and action == int(C.Action.JUMP) and prev is not None:
+        from .obs import LAND_SPAN_A, LAND_SPAN_B
+        _v = float(prev_velocity or prev.get("velocity") or 0.0)
+        _sp = max(0.0, LAND_SPAN_A * _v + LAND_SPAN_B)
+        _reach = float(prev.get("cell_progress") or 0.0) + _sp
+        if prev.get("is_turn") or (_reach >= 1.0 and prev.get("next_is_turn")):
+            r -= turn_takeoff_penalty
     if slide_jump_penalty and action == int(C.Action.JUMP) and prev is not None:
         if prev.get("must_slide") or prev.get("next_must_slide") or prev.get("is_sliding"):
             r -= slide_jump_penalty
@@ -118,7 +164,17 @@ def shaping_reward(
         # check, so it MUST be rewarded (the old shaping only rewarded must_*, which punished the
         # correct early jump and rewarded the trailing re-jump -> the double-jump artifact).
         if (prev.get("must_jump") or prev.get("next_must_jump")) and action == int(C.Action.JUMP):
-            r += reaction_bonus
+            # SOFT step-down [2026-07-27]: with stepdown_grounded_ok the sim stops KILLING a grounded
+            # mid->low crossing, but reaction_bonus still PAYS 0.1 for jumping it, so v103 kept jumping
+            # 98.5% of them (v102: 98.6% -- i.e. the world fix alone moved nothing). Removing the
+            # death removed the requirement; this removes the incentive. The bonus exists to reward a
+            # NECESSARY reaction, and on a step-down to low ground there is nothing to clear -- the
+            # human jumps only 29.4% of them. A jump is still legal and still free; it is just no
+            # longer paid for. Only fires when the must_jump comes SOLELY from soft cells.
+            hard = ((prev.get("must_jump") and not prev.get("soft_stepdown"))
+                    or (prev.get("next_must_jump") and not prev.get("next_soft_stepdown")))
+            if hard or not stepdown_bonus_gate:
+                r += reaction_bonus
         elif (prev.get("must_slide") or prev.get("next_must_slide")) and action == int(C.Action.SLIDE):
             r += reaction_bonus
         elif prev.get("is_turn"):
@@ -134,6 +190,23 @@ def shaping_reward(
                        or (action == int(C.Action.TURN_RIGHT) and prev.get("can_turn_right")))
             if side_ok:
                 r += reaction_bonus * aim
+    # TURN-BUFFER (PRE-SWIPE) bonus [WAVE 13, 2026-07-14 — the turn dead-letter credit-assignment fix]:
+    # under turn_send_lat, a swipe ON the junction cell DEAD-LETTERS (arrives past the consume deadline ->
+    # off-track Fall); the ONLY latency-robust play is to PRE-SWIPE on the APPROACH cell (next_is_turn),
+    # which LATCHES into the game's HandleDelayedTurning and fires CENTERED, immune to latency
+    # (turn_approach_buffer, from_buffer). The reaction_bonus turn branch above rewards the *reactive*
+    # junction swipe (prev.is_turn) — the wrong, dead-lettering behavior — while the pre-swipe earned ZERO
+    # shaping. Five RL arms plateaued because the dense reward pointed AT the reactive swipe and only the
+    # sparse, delayed death pointed away. This term aligns the dense reward WITH survival: credit a
+    # valid-direction turn issued on the approach cell (the correct exit side per next_can_turn_*). It is
+    # UN-GAMEABLE (spam is eaten by turn_drop_debounce; a reactive junction swipe doesn't latch), the same
+    # shape as the jump/slide reaction_bonus that works. Default 0 = off (equivalence/replay unchanged).
+    if turn_buffer_bonus and prev is not None:
+        if (action in (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))
+                and not prev.get("is_turn") and prev.get("next_is_turn")):
+            want_left = action == int(C.Action.TURN_LEFT)
+            if (prev.get("next_can_turn_left") if want_left else prev.get("next_can_turn_right")):
+                r += turn_buffer_bonus
     # Turn-spam: a turn immediately after another turn is the junction exploit -> dock it.
     if turn_spam_penalty and last_action is not None:
         turns = (int(C.Action.TURN_LEFT), int(C.Action.TURN_RIGHT))
@@ -173,6 +246,19 @@ def shaping_reward(
     # landing -> perpetual airborne -> the takeoff at the next hole is mistimed -> clip (dt=4 Ledge). The
     # idle penalty checks the OBSTACLE context, not the airborne STATE, so it can't catch this spam. Dock
     # a jump pressed while jumping (and a slide while sliding) so the policy stops the reflexive re-press.
+    # ⚠️ 2026-07-27 REHABILITATED. This penalty was retired on 2026-07-08 on the conclusion that
+    # "airborne presses are HARMLESS on device (dropped) -- so it solves a non-problem". That is WRONG,
+    # and the wave-12 landing-lock forensic proves it: a press held through the arc is dropped WHILE
+    # AIRBORNE but fires a fresh jump ON TOUCHDOWN (10% solid / 28-46% gap). It is the user's #1
+    # reported death ("on high ground it jumps for no reason right after clearing a crevasse").
+    # It is now paired with the held_jump_rejump_* death model, and the pairing is the point: the model
+    # makes the world punish holding TRUTHFULLY, this penalty only AMPLIFIES a gradient that is now
+    # genuinely there. That is why v58/v60/v61's shaping failed and this need not -- they taxed a
+    # behaviour the world never punished, so the policy could game them (1-frame gaps) at zero cost.
+    # ⚠️ KNOWN FALSE POSITIVE: on the LANDING frame prev.is_jumping is still True, so this also docks
+    # the DELIBERATE landing-frame re-jump that post_land_gap_rejump_prob models as a REAL device
+    # affordance in gap chains. Keep the coefficient modest for that reason (v60 over-corrected into
+    # hole deaths at 0.12 on the related jump_hold_penalty).
     if airborne_action_penalty and prev is not None:
         if action == int(C.Action.JUMP) and prev.get("is_jumping"):
             r -= airborne_action_penalty

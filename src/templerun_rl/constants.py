@@ -138,6 +138,7 @@ STATE_DEFAULTS.update({"score": 0, "path_type": -1, "path_level": -1, "facing": 
                        "velocity": 0.0, "distance": 0.0,
                        "cell_progress": 0.0, "lane": 0.0,  # lane default = center (tilt-controlled model)
                        "next_wide_gap": False, "narrow_target_lane": None,
+                       "next2_narrow_lane": None,   # 2-ahead narrow side (WAVE 9 2026-07-09, obs 62->63)
                        "next_ground_change_higher": False,   # zone-crevasse-ahead flag (gates predicted_jump)
                        "next_path_level": -1, "next2_path_level": -1,  # upcoming altitude 2-cell lookahead (16q)
                        "stumble_kill_timer": 0.0, "stumble_count": 0})

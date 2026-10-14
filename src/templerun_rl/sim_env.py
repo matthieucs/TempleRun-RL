@@ -143,13 +143,51 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "jumpgap_chain_max": 1,             # RHYTHM CHAIN: repeat [clear,hole] up to n times (uniform 1..max);
                                         # 1 = single tail, no extra rng (v62-compatible). Device: high-ground
                                         # zones chain long-holes every ~4 cells (ab_v62_r1 ep0, ab_v60_r2 ep4)
+    # SLIDE->HOLE compound [WAVE 9 HUMAN-DEMO 2026-07-09, `scratchpad/slidegap_survival.py`]: a HOLE a couple
+    # clear cells after a SLIDE obstacle. The slide COMMITS ~0.73s (device-measured; sim slide_duration 0.7 +
+    # jump-while-sliding already refused, sim_env.py _apply_action) — if the hole arrives inside the commit
+    # the jump window is EATEN. Killed the HUMAN twice (ep2 @3604 / ep3 @686: sliding when the gap arrived,
+    # jump swipe refused mid-fall); human survives spacing >=1.1s via slide-end -> INSTANT jump (takeoff
+    # -0.33..+0.07s rel. hole entry, 12/14 events). Generation NEVER stacks slide->hole (min_space 6;
+    # jumpslide is the REVERSE order) -> free in-sim -> no learning signal (the 6th such gap). The trainable
+    # skill = EARLY slide (commit ends sooner) + instant jump at slide end. 0 default; train ~0.12.
+    "slidegap_prob": 0.0,               # P(a slide obstacle is followed by a close hole)
+    "slidegap_after_distance": 300.0,   # only past this (slides need slides_after_distance anyway)
+    "slidegap_gap_cells": 2,            # clear cells between the slide and the hole (2 ~= the human's ~1.2s limit)
+    "slidegap_hole_cells": 1,           # hole width (1 = single pt11 hole, the device-observed form)
     # POST-TURN OBSTACLE [DEVICE-MEASURED 2026-07-08]: the game places obstacles on the FIRST cell after a
     # junction (72 onsets ~1 cell post-turn across 6 captures; bimodal with the normal bulk at 2.5-5 cells);
     # min_clear_after_turn(2) meant the sim NEVER did -> post-turn deaths end the 4-7k runs (7/15 of the
     # pt(-1/1/2) deaths follow a turn by <12 frames). Standard obstacle sampler (holes stay 1-cell). 0=off.
     "turnobstacle_prob": 0.0,           # P(a standard obstacle on the first post-junction cell)
+    "turnobstacle3_prob": 0.0,          # P(one at post-junction cell +3) — the DEVICE PEAK, see below
     "min_space_between_obstacles": 6,   # [READ] sMinSpaceBetweenObstacles (cells)
     "min_space_between_turns": 12,      # [READ] sMinSpaceBetweenTurns (cells)
+    # ★★★ THE GAME'S OWN DIFFICULTY RAMP [READ LIVE OFF THE DEVICE 2026-07-26, hook 17j `s.gen`:
+    # PathElement statics via klass+0xB8 from a live instance, sampled every ~2s over a 10,768 m run].
+    # This is an EXACT distance-keyed schedule, not a fitted distribution — implement it, do not
+    # calibrate it. The sim previously held min_space_between_obstacles at a CONSTANT 6 for the whole
+    # run while the real game ramps it 6 -> 2, so past ~4.5 km the device packs obstacles THREE TIMES
+    # tighter than anything the policy ever trained on. That single fact accounts for: the device's
+    # tight pairs, the 17 hazard-pair types with ZERO sim coverage (incl. every "-> Crevasse"
+    # compound), the sim being ~1.5x too easy (v78: 6786 sim vs 4425 device), and the user-reported
+    # "succession of obstacles" death. sMaxBackToBackObstacles is 2 THROUGHOUT (training used 6 = wrong).
+    # Rows: (from_distance_m, min_space_obstacles, min_space_turns, double_obstacle_pct, narrows, flame_slide)
+    "device_difficulty_ramp": False,    # OFF = the historical flat behaviour (equivalence baseline)
+    "difficulty_ramp_table": (
+        (0.0,    6, 12, 0.00, False, False),
+        (250.0,  5, 10, 0.00, False, False),
+        (500.0,  4,  8, 0.05, False, True),
+        (1100.0, 4,  6, 0.05, False, True),
+        (1500.0, 3,  5, 0.10, True,  True),
+        (2000.0, 3,  4, 0.15, True,  True),
+        (3250.0, 3,  3, 0.17, True,  True),
+        (4500.0, 2,  2, 0.20, True,  True),
+    ),
+    # sDoubleObstaclePercent (0 -> 0.20 with distance): P(an emitted obstacle is immediately followed
+    # by a SECOND one on the very next cell) — capped by max_back_to_back_obstacles(2). NOT previously
+    # modelled at all; this is the mechanism behind the device's gap-1 hazard pairs.
+    "double_obstacle_percent": 0.0,
     "min_spaces_between_bonus": 50,     # [READ] sMinSpacesBetweenBonusItems
     "obstacle_prob": 0.52,             # [AUDIT 2026-06-26] denser to match real obstacle-frame rate (was 0.45, ~under)
     "double_obstacle_percent": 0.0,     # [READ] sDoubleObstaclePercent (no doubles in the baseline section)
@@ -241,6 +279,30 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # (= the measured 1-frame control latency) reproduces it; the latency-robust play is a PRE-SWIPE on the
     # approach cell (turn_approach_buffer, immune). Default 0 = off (equivalence/scorecard unchanged).
     "turn_send_lat_frames": 0.0,
+    # WAVE 10 (2026-07-09) — post-16o turn-byte fidelity pair (see _attempt_turn comments): the hook
+    # DROPS off-junction turn bytes (measured drop paths 2026-07-05) instead of executing them, so the
+    # 2026-07-02 turn-on-straight=FATAL rule is stale for the current pipeline. Both default OFF.
+    "turn_offjunction_drop": False,     # off-junction turn (w/ hook_turn_buffer) = silent drop, not kill
+    "turn_drop_debounce_s": 0.0,        # hook anti-double-turn window: a turn byte within this of the
+                                        # previous one is EATEN (spam near a junction kills the real swipe)
+    # WAVE 12 (2026-07-09): a landing-frame re-jump ON a wide-gap cell fires 46% on device (41/90,
+    # landing_lock_forensic context split) — the hole-chain recovery affordance; the lip rule alone
+    # refuses it 100% in-sim = unlearnable. Per-attempt draw at the measured rate. Default 0 = off.
+    "post_land_gap_rejump_prob": 0.0,
+    # ★★ HELD-JUMP -> LANDING RE-JUMP [WAVE 16, USER-reported ~50 times: "on the high-ground it jumps
+    # for no reason just after having jumped over a crevasse"]. MEASURED (scripts/detect_patterns.py):
+    # the policy holds JUMP through its whole arc 10.7 times per km; the HUMAN does it ZERO times in
+    # 41 km -- they tap. In the sim, a JUMP pressed while airborne is simply DISCARDED by the airborne
+    # guard, so holding the button is completely FREE and nothing ever teaches the policy to release
+    # it. On DEVICE the still-held press fires a NEW jump the instant the runner touches down
+    # (wave-12 landing_lock_forensic: 10% on solid ground, 28-46% on a gap cell) -- and on high ground
+    # that second jump drops into the next crevasse/hole. That is the user's complaint, and it is a
+    # SIM-FIDELITY gap, not a reward-shaping one (which is why the v58/v60/v61 penalties failed: they
+    # taxed a behaviour the world never punished, and got gamed by 1-frame gaps).
+    # With this on, holding JUMP has the same consequence it has on the phone, so releasing becomes
+    # something the policy has a reason to learn. Gated prob>0-first (0 = old behaviour, stream safe).
+    "held_jump_rejump_solid": 0.0,     # device-measured 0.10 on solid ground
+    "held_jump_rejump_gap": 0.0,       # device-measured 0.28 on a wide-gap/crevasse cell
     # DEAD (kept only so old sidecars/configs referencing them don't KeyError): the off-centre turn
     # death is DELETED — device shows early turns are how humans play, NOT a trap. _attempt_turn no
     # longer reads these; turning at any cprog in the window (or buffered early) is clean.
@@ -350,13 +412,110 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # The old wide-gap check was "still airborne at each cell entry" — which a SHORT arc satisfies
     # while landing INSIDE the far gap cell (device: clips the far wall -> dt4 Ledge). Device 2-cell
     # holes clip 21% (18/87), concentrated at LOW speed where the arc barely spans 2 cells. Fix: the
-    # jump must LAND past the far edge. Jump span (cells) fits span = a*velocity + b (NEGATIVE
-    # intercept — NOT proportional; the sim's jump_dur*v/cell_len=v/75 has the wrong slope 0.0133 and
-    # b=0, underestimating high-v span). Only the LAST gap cell is checked (next cell solid). OFF by
+    # jump must LAND past the far edge. Only the LAST gap cell is checked (next cell solid). OFF by
     # default (no-op -> equivalence stays green); enabled in the device-true / training config.
+    # ⚠️ 2026-07-27: the old default (0.0204 / -0.94) is WRONG and was too LENIENT — an over-long span
+    # judges a jump to clear the far edge when it actually falls short, under-punishing exactly the
+    # "my arc landed me somewhere fatal" class that is 60% of device deaths. The claim it rested on
+    # ("the sim's v/75 has the wrong slope") is refuted: measured with ONE estimator on both sides,
+    # HUMAN 30 Hz gives 0.0143*v - 0.11 and the SIM gives 0.0147*v + 0.06 -- the sim's arc was right,
+    # the fit was built on 10 Hz captures whose 0.1 s quantisation inflates the slope with velocity.
+    # See the obs.py LAND_SPAN_A note; keep these two in step with it.
     "wide_gap_landing_model": False,
-    "wide_gap_span_a": 0.0204,         # cells of jump span per unit velocity (device fit)
-    "wide_gap_span_b": -0.94,          # span intercept (cells) — the arc's fixed shortfall
+    "wide_gap_span_a": 0.0143,         # [DEVICE-MEASURED, human 30 Hz n=428] cells of span per velocity
+    "wide_gap_span_b": -0.11,          # span intercept (cells)
+    # SINGLE-HOLE AIRBORNE TRAP [WAVE 14, DEVICE-MEASURED 2026-07-25,
+    # scratchpad/hole_landing_forensic.py over 1065 hole crossings / 4 policies]. A 1-cell hole is NOT
+    # wide_gap, so the wide-gap landing model above skips it and the ONLY test is binary `_jump_t > 0`
+    # -> an almost-expired arc crosses a hole FOR FREE in-sim. On device it does not, and this is
+    # ~80% of the device hole deaths (v78 ep3 @612 + ep0 @12779, v74 ep3 @1722, r2 ep0/ep1/ep3): the
+    # runner jumps obstacle A, the hole sits INSIDE its arc, it cannot re-take-off, and its DESCENDING
+    # arc drops into the hole.
+    # THE SEPARATOR IS ARC PHASE, not landing position: every device death entered the hole with
+    # frac = d/span >= 0.51 (past the apex, descending) while all 858 free crossings sit at frac <= 0.41
+    # (d<=1 cell = a takeoff on the approach cell, which is what the policy already does and MUST stay
+    # free -- 0/858 deaths). Physically exact: reach a hole while still rising/at apex and you sail
+    # over; reach it descending and you drop in. Same parabola framing as the crevasse apex model.
+    # The kill is PROBABILISTIC (device 6/20 = 30% once past apex) rather than a sharp threshold --
+    # the v55 lesson. OFF by default (no rng draw -> equivalence stream untouched).
+    "hole_landing_model": False,
+    "hole_trap_apex_frac": 0.5,        # arc phase past which a 1-cell hole is lethal (0.5 = the apex)
+    "hole_trap_kill_prob": 0.35,       # P(fall) once past it — device 6/20 = 30% (1.0 = deterministic)
+    # ONE-CELL CREVASSE share [DEVICE-MEASURED WAVE 14, n=409]: 67.5% of real crevasse structures are
+    # a single cell; the sim made them all 2-cell, which put every following obstacle outside the jump
+    # arc and made the airborne trap unreachable. 0 = off (all 2-cell, the pre-wave-14 behaviour).
+    "crevasse_single_cell_prob": 0.0,
+    # TURN-AWARE LOOKAHEAD [WAVE 15 PERCEPTION FIX, device-probed 2026-07-26, hook 17g `s.wp`]: the
+    # hook's neighbour walk used ONE fixed heading offset per step, so it died past every corner —
+    # 72% of on/near-junction device frames streamed next/next2 = -1 and NOBODY could see past a
+    # turn. A heading-aware walk resolves the full 6-cell horizon on 100% of the frames where the old
+    # walk fell short (56.8% of all frames, mean +3.46 cells further). With this ON, the lookahead
+    # only blanks at a genuine T-JUNCTION (both directions available = the continuation is not yet
+    # decided, 32.6% of device junction frames); a forced corner now streams true values.
+    # REQUIRES hook >= 17h on the device. Default OFF = the historical always-blind behaviour.
+    "turn_aware_lookahead": False,
+    # TIGHT OBSTACLE PAIRS [DEVICE-MEASURED WAVE 14, n=2684 must-jump pairs]: 19% of real consecutive
+    # must-jump obstacles sit CLOSER than min_space_between_obstacles(6) and 6.2% within the jump arc
+    # (<=3 cells). The sim's floor is hard, so only the bespoke compound tails ever break it — and
+    # they land at gap 3-4, one cell too generous for the airborne trap. 0 = off (hard floor).
+    # ★ THE GAME REPEATS THE SAME OBSTACLE TYPE [DEVICE-MEASURED 2026-07-27 night,
+    # scratchpad/pair_coverage.py over human 41 km + v92b + v104]. The device's two MOST COMMON
+    # consecutive-obstacle orderings are same-type slide pairs:
+    #     TreeSlide -> TreeSlide  9.8% of all pairs      Flame -> Flame  8.1%
+    # i.e. 17.9% of device pairs are a repeated slide, and 24.6% are a repeat of ANY type. An
+    # INDEPENDENT draw from the (device-matched) obstacle mix predicts only ~4% slide-repeat, so this
+    # is real clustering in the game's generator, not a mix artifact -- and the sim emits 2.9%.
+    # USER, watching v104: "The struggle is really when you have 3 obstacles in a row. It really
+    # handles it poorly ... you really have to randomize the obstacles that follow one another. You
+    # shall not skip the 2 obstacles in a row training!" -- the repeated-slide rhythm (slide, recover,
+    # slide) is the single most common device sequence the policy has never trained on.
+    # When a NEW obstacle is placed within pair_same_type_cells of the previous one, reuse the
+    # previous TYPE with this probability instead of drawing from the weight table. prob>0-first, so
+    # 0.0 draws no rng and leaves the stream bit-identical.
+    "pair_same_type_prob": 0.0,
+    "pair_same_type_cells": 4,
+    "pair_same_type_types": (5, 6),   # TreeSlide / FlameTower — see _sample_obstacle_type_paired
+    # ANTI-REPETITION for JUMP obstacles: device Hole->Hole is 6.1% against an INDEPENDENT 10.3%,
+    # so the game avoids repeating a hole while the sim draws i.i.d. and repeats at chance.
+    # Suppressing 41% of hole-after-hole draws maps 10.3% -> 6.1%. 0.0 = off (draws no rng).
+    # AIRBORNE INTO A SLIDE HAZARD: P(kill). 1.0 = the old always-fatal rule; the DEVICE measures
+    # 0.24 (23 fatal of 94 events over 45 captures). See the death rule for why this matters.
+    "airborne_slide_kill_prob": 1.0,
+    "pair_anti_repeat_prob": 0.0,
+    "pair_anti_repeat_types": (1, 4),   # Hole, TreeJump
+    # ★★★ DRAW-THEN-SUBSTITUTE OBSTACLE TYPES [READ FROM THE GAME 2026-07-28,
+    # il2cpp_work/output/dump.cs; spec docs/superpowers/specs/2026-07-28-obstacle-type-sampler-rewrite.md].
+    # The real generator is CONSTRAINT-FILTERED REJECTION SAMPLING, not an i.i.d. weight draw:
+    #     PathElement.ACertainTypeCheck(PathType currentType, PathType parentType)  @283485, 84 B
+    #         -- an explicit PAIRWISE admissibility rule, and only ~21 instructions, i.e. ONE special
+    #            case rather than a full matrix (so it is NOT a blanket anti-repeat: Flame->Flame is
+    #            ELEVATED on device at 8.1% while Hole->Hole is SUPPRESSED at 6.1%).
+    #     PathType OriginalPick 0x98 / PathType FinalPick 0x9C
+    #         -- the generator draws a type and then SUBSTITUTES it. One substitution, hence one
+    #            re-draw (type_reject_redraws 1).
+    # Confirmed ABSENT file-wide: any authored pattern/template collection, any ObstacleType[] /
+    # List<PathType>, and any per-type probability field. The obstacle numbers are compiled-in
+    # literals, so the SHAPE comes from the game and the NUMBERS are calibrated to the device.
+    #
+    # THE STRUCTURAL KEY: holes / narrows / flames / level-changes are PathType (the cell GEOMETRY)
+    # and must survive the pairwise + fit + spacing filters; TREES (TreeStumble/TreeJump/TreeSlide)
+    # are ObstacleType, dropped onto an already-chosen straight by a SEPARATE AddObstacle pass that
+    # those filters never touch (see _TREE_TYPES). One mechanism therefore predicts both device
+    # deviations: a filtered type is pushed BELOW chance, an unfiltered one sits ABOVE it.
+    #
+    # `type_reject` is {"prev,cur": p_reject} (JSON-friendly) or {(prev, cur): p_reject}; `prev` is
+    # the previously emitted HAZARD type (_last_obst_type), `cur` the freshly drawn one. An entry
+    # whose `cur` is a TREE is REJECTED AT PARSE TIME rather than silently ignored.
+    # MASTER SWITCH default False, and it is checked BEFORE any random() -> the OFF path draws
+    # nothing at all and every existing track stream / calibration stays bit-identical.
+    # ⚠️ When True the new model REPLACES pair_same_type_prob / pair_anti_repeat_prob in this
+    # sampler (they are two models of the same draw, not layers); both stay fully usable with
+    # type_reject_model False, which is what reproduces every pre-2026-07-28 result.
+    "type_reject_model": False,
+    "type_reject": {},
+    "type_reject_redraws": 1,
+    "tight_pair_prob": 0.0,
+    "tight_pair_min_cells": 1,         # closest allowed spacing when a tight pair fires (device min = 1)
     # CREVASSE APEX for ALL level-changes [DEVICE-MEASURED 2026-07-06, vel_y arcs + crevasse_clips.py].
     # The step-UP apex model only fired on level-UP crevasses; step-DOWN / high-ground crevasses used
     # the lenient airborne check -> the sim never penalised an EARLY crevasse jump, so v47 drifted to
@@ -365,6 +524,34 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # True, the apex check (+ stepup_clip_band graze->stumble) fires on EVERY crevasse ledge cell. OFF
     # by default (no-op -> equivalence green); enabled in the device-true / training config.
     "crevasse_apex_all": False,
+    # ★ STEP-DOWN TO LOW GROUND IS NOT A MUST-JUMP [DEVICE-MEASURED 2026-07-27, human 41 km + the
+    # v92b/v102 device sets, scratchpad/stepdown_forensic.py]. USER, watching v102: "The problem is
+    # also the mid to low transition when you have an obstacle right ahead. The policy learnt to jump
+    # when it goes from the mid to the low ground. It does not need to. When there is an obstacle,
+    # either you jump early or you don't jump, but the policy can't do that right now."
+    #
+    # MEASURED, split by the exact level transition (P(jump) is a free CHOICE for the human):
+    #     transition      HUMAN P(jump)   grounded crossings / deaths     v92b + v102
+    #     1->2  UP           100.0%              0  /  -                     100%
+    #     2->3  UP           100.0%              0  /  -                     100%
+    #     3->2  down          92.9%              1  /  0                     100%
+    #     3->1  down          44.4%              5  /  0                     100%
+    #     2->1  down          29.4%             12  /  0                     100%
+    # The human crosses 17 of 26 step-downs TO LOW GROUND on foot and NEVER dies; the step-UPs they
+    # jump 50/50. The sim collapses that asymmetry: the crevasse gap cell demands airborne in BOTH
+    # directions, so "always jump" is the only correct sim policy and the phone inherits it as a
+    # superstition. The device streams must_jump=True on 100% of crevasse structures INCLUDING mid->low
+    # (checked), so the observation is faithful and this is purely a DEATH-RULE gap -- the flag is HARD
+    # in the sim and SOFT on the phone.
+    # COST OF THE SUPERSTITION: with a hazard within 4 cells after the cap, the forced jump kills 50%
+    # (v102, n=4) and 16.7% (v92b, n=6) vs the human's 0% whether they jump or not -- the jump is both
+    # too late to clear the follower and too committed to react to it, which is exactly the user's
+    # "either you jump early or you don't jump".
+    # WHEN ON: a step-DOWN crevasse whose NEW level is <= stepdown_grounded_max_level may be crossed
+    # GROUNDED for free (jumping it stays legal and safe -- the human still does it 29%). Step-UPs and
+    # 3->2 are untouched. Bool knob, no rng draw -> the OFF stream is bit-identical (equivalence safe).
+    "stepdown_grounded_ok": False,
+    "stepdown_grounded_max_level": 1,
     # HIGH-GROUND CAP GRAZE — WORLD-Y model [DEVICE-DECODED 2026-07-07, hook 16y source-dig + arcs;
     # USER-confirmed live 2026-07-07: "mid->high transition, the policy does NOT die but takes a hit almost
     # every time"]. The mh(0.95)-proxy above is a NORMALISED-height threshold that ignores the cap's actual
@@ -410,13 +597,41 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # obstacle-type mix among the "real" obstacles (must sum to ~1; calibrated later).
     # Keys are ObstacleType enum values (SPEC §2): 1 Hole, 2 Narrow, 3 TreeStumble,
     # 4 TreeJump, 5 TreeSlide, 6 FlameTower. (0 None, 7 LevelChange handled separately.)
+    # [DEVICE-MEASURED 2026-07-27] pooled over 28,600 device cells / 4112 hazard structures across 6
+    # capture sets, structure-collapsed (a 2-cell HoleLong or a multi-cell narrow counts ONCE), and
+    # independently reproduced by the 41 km human set to within ~0.02 on every entry. Crevasses are
+    # EXCLUDED — they come from the zone/level-change path, not this table (13-14% of all structures).
+    # ⚠️ The OLD weights were badly off in composition even after total density was right: Narrow 0.08
+    # vs 0.173 measured (2.2x UNDER) while TreeJump 0.22 vs 0.103 and TreeSlide 0.22 vs 0.110 were each
+    # ~2x OVER. So the policy got half the strip practice it needed and double the tree practice --
+    # USER 2026-07-27: "not as great on the narrow"; v78 died on 2.47% of narrow encounters vs
+    # v90/v92 7.78% (p=0.028) and the human 0.95%. Total hazards/km was already correct (16.4 sim vs
+    # 15.2 device), which is exactly why a density-only audit missed this: the MIX is a separate axis.
+    # ⚠️ 2026-07-27 — REVERTED to the long-standing values after a MEASUREMENT ERROR of mine. I read the
+    # sim's narrow share as 8% vs the device's 17% and "corrected" Narrow 0.08 -> 0.186. BOTH halves were
+    # wrong:
+    #   (a) A REAL narrow strip in this sim is encoded as path_type 17..30 with obstacles LEFT AT 0
+    #       (see the narrow branch below, which sets ptype 19/22 and narrow_lane). Only the GENERIC
+    #       weight-table path emits obstacles == 2 — and that path cannot set narrow_lane, so
+    #       `_resolve_obstacle_on_enter` skips the band check (`if nl is not None`) and those cells are
+    #       HARMLESS DECORATION. Counting obstacles == 2 therefore counted ONLY the fake narrows and
+    #       missed every real strip. Counting path_type 17..30 as well: the sim emits ~41% narrows vs
+    #       the device's 14% — it OVER-serves them ~3x, the opposite of what I concluded.
+    #   (b) The narrow branch fires BEFORE this table is consulted, so raising the Narrow weight did not
+    #       change narrow frequency at all. It only replaced REAL hazards (TreeJump 0.22 -> 0.078) with
+    #       no-op cells — which is what regressed v94 (device 2193/2309/2305/1565, USER: "it strafes
+    #       randomly to the left"; L/R strafe ratio 0.75 -> 1.78 -> 2.74 across v90/v92b/v94).
+    # LESSON: verify that a generator knob actually MOVES the thing you measured before trusting the
+    # measurement — and check how a mechanic is ENCODED on both sides before comparing shares.
+    # The real narrow/hole/flame composition gap is still open; fix it via `narrow_prob` (the branch
+    # that makes LANED strips), not via this table, and re-measure with narrows counted correctly.
     "obstacle_type_weights": {
         1: 0.22,   # Hole         -> jump
         4: 0.22,   # TreeJump     -> jump
         5: 0.22,   # TreeSlide    -> slide
         6: 0.14,   # FlameTower   -> slide
         3: 0.12,   # TreeStumble  -> stumble (survivable)
-        2: 0.08,   # Narrow       -> strafe to center (survivable in v0)
+        2: 0.08,   # Narrow       -> generic no-lane cell (NOT a real strip; see the note above)
     },
     # piece PathType to emit for straight vs turn cells (obs path_type /37). [KNOWN enum]
     "path_type_straight": 1,           # StraightVert
@@ -432,6 +647,17 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # model distance in real units (real dist-rate/velocity ~0.10-0.116; vel 100 -> ~1.16/10Hz-step).
     # The sim emits a real-scale "distance" so its distance-delta reward matches the phone's units.
     "dist_per_velsec": 0.107,          # [CALIBRATED] real DistanceTraveled per (velocity*dt) model unit
+    # [DEVICE-MEASURED 2026-07-27] ...but the real rate is NOT constant: it rises linearly with speed.
+    # Pooled over 154 capture files / 770k frame pairs, dist_per_velsec/velocity is 8.56, 8.46, 8.47,
+    # 8.48 e-4 across v105..v215 -- one constant, no fitting freedom -- i.e. DistanceTraveled accrues
+    # as ~8.47e-4 * v^2 per second. Device and human captures agree to within 5% in every band.
+    # The flat 0.107 is right only near v=136 and understates distance ~1.4-1.5x at running speed, so
+    # the sim needs ~1.39x MORE CELLS to report the same distance as the phone. That single error made
+    # (a) every sim-vs-device distance comparison in this project off by ~1.5x, (b) the distance-keyed
+    # difficulty ramp fire ~1.4x too late in cell terms, and (c) hazards-per-km look 1.44x over-packed
+    # when hazards per CELL are actually correct (0.152 sim vs 0.146 device = 1.04). Set the slope to
+    # enable the measured law; 0.0 keeps the old flat scalar so historical runs stay reproducible.
+    "dist_per_velsec_slope": 0.0,      # [DEVICE-MEASURED] 8.47e-4 => dist rate = slope * velocity^2
     "start_distance": 5.3,             # [CALIBRATED] DistanceTraveled at run start (reset-frame offset)
     # HIGH-SPEED CURRICULUM: the runner accelerates (velocity 100->210 over ~4k distance), so the turn
     # window gets HARDER late (cprog steps faster per frame). To train the fast sections without first
@@ -450,6 +676,26 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # is_sliding median 7 = 0.70s. The old 0.6 made the runner airborne ~2x too little vs real (14% vs
     # 22-32%) AND made the 2-cell crevasse too harsh — a real 0.8s jump spans ~2.8 cells at top speed.
     "jump_duration": 0.8,             # [MEASURED] airtime — IsJumping true ~0.80s
+    # ★ AIRTIME SCALES WITH THE GROUND-HEIGHT CHANGE THE ARC CROSSES [DEVICE-MEASURED 2026-07-27,
+    # scratchpad/stepdown_arc.py]. Landing on LOWER ground means falling further, so the runner stays
+    # airborne LONGER and the arc spans 3 cells instead of 2; landing on RAISED ground cuts the fall
+    # short. Two INDEPENDENT capture pipelines agree on direction AND magnitude:
+    #                        flat            step-DOWN            step-UP
+    #     HUMAN  30 Hz   0.767 s / 2 cells  0.900 (1.17x) / 3   0.567 (0.74x) / 2
+    #     v92b   10 Hz   0.700 s / 2 cells  0.800 (1.14x) / 3   0.500 (0.71x) / 2
+    # The sim used ONE fixed jump_duration for all three. Consequence, measured: a step-down jump with
+    # a hazard within 4 cells kills 0.0% in-sim (n=41) but 50.0% on device (v102, n=4) and 16.7%
+    # (v92b, n=6) -- the sim's 2-cell arc lands short of the follower, the device's 3-cell arc lands
+    # ON it. That missing COST is why v103 (world fix) and v104 (world fix + reward gate) both left
+    # P(jump | step-down to low) at 98.5%: with no death and no bonus the choice became reward-NEUTRAL,
+    # and a habit already at ~100% has no gradient to move it.
+    # The step-UP scale matters for the OTHER long-standing complaint: if real step-up arcs are ~25%
+    # SHORTER than the sim's, the sim has been teaching a takeoff timing that does not land where the
+    # phone lands (the mid->high graze).
+    # Values are the HUMAN column (30 Hz = 0.033 s resolution; the 10 Hz policy sets quantise to 0.1 s
+    # and agree to within one frame). 1.0/1.0 = old fixed-duration behaviour, no rng draw.
+    "jump_dur_stepdown_scale": 1.0,
+    "jump_dur_stepup_scale": 1.0,
     # JUMP EXECUTION LATENCY (2026-07-05): the device fires a jump ~1-2 frames after the command (TCP +
     # obs-staleness + frame lag), the SAME control latency that kills turns — but the sim fired jumps
     # INSTANTLY, giving a too-forgiving ~6-frame survival window at ALL speeds (measured). So v14 learned a
@@ -549,11 +795,65 @@ _MUST_JUMP = frozenset({OBST_HOLE, OBST_TREE_JUMP, OBST_TREE_STUMBLE, OBST_LEVEL
 _MUST_SLIDE = frozenset({OBST_TREE_SLIDE, OBST_FLAME_TOWER})  # must_slide = Obstacles ∈ {5,6}
 _SURVIVABLE = frozenset({OBST_NARROW})                    # don't kill in v0 (strafe)
 
+# ★ THE UNFILTERED SECOND PASS [READ FROM THE GAME 2026-07-28]. Trees are `ObstacleType`, placed
+# onto an already-chosen straight by `AddObstacle`, which runs AFTER (and independently of) the
+# PathType admissibility / fit / spacing filters. Everything else in the weight table is `PathType`
+# = the cell geometry, and must pass those filters. See `type_reject_model`: Stage A (geometry) is
+# subject to the pairwise rejection test, Stage B (these) never is. That asymmetry is the whole
+# model -- it is what lets one mechanism push Hole->Hole BELOW chance while leaving the repeated
+# slides (the device's two most common consecutive orderings) ABOVE it.
+_TREE_TYPES = frozenset({OBST_TREE_STUMBLE, OBST_TREE_JUMP, OBST_TREE_SLIDE})
+
 # PathDirection enum (SPEC §0): None0 North1 East2 South3 West4.
 DIR_NONE, DIR_N, DIR_E, DIR_S, DIR_W = 0, 1, 2, 3, 4
 # left/right of a heading (turning relative to current facing).
 _LEFT_OF = {DIR_N: DIR_W, DIR_W: DIR_S, DIR_S: DIR_E, DIR_E: DIR_N}
 _RIGHT_OF = {DIR_N: DIR_E, DIR_E: DIR_S, DIR_S: DIR_W, DIR_W: DIR_N}
+
+
+_EMPTY_TYPE_REJECT: dict = {}
+
+
+def parse_type_reject(raw) -> dict:
+    """Normalise the ``type_reject`` config into ``{(prev, cur): p_reject}``.
+
+    Accepts the JSON-friendly ``{"prev,cur": p}`` form (what a ``--sim-config`` file carries, where
+    dict keys are always strings) and the Python ``{(prev, cur): p}`` tuple form.
+
+    Raises rather than ignoring anything it cannot honour — an inert knob that looks applied is the
+    single most expensive failure mode in this project (§5 of the spec; four measurements in one
+    session silently tested nothing). Specifically:
+      * a key that is not exactly two integers;
+      * a type outside 0..7 (the C++ port indexes a fixed 8x8 matrix);
+      * an entry whose CURRENT type is a TREE — trees are placed by the unfiltered second pass
+        (`_TREE_TYPES`) and are never rejected, so the entry could never fire.
+    Entries with p == 0 are dropped (that is the no-rejection default, and it keeps the parsed
+    table identical to the C++ side's zero-initialised matrix).
+    """
+    tbl: dict = {}
+    for k, v in (raw or {}).items():
+        if isinstance(k, (tuple, list)):
+            parts = list(k)
+        else:
+            parts = str(k).split(",")
+        if len(parts) != 2:
+            raise ValueError(f"type_reject key {k!r}: expected 'prev,cur' (two obstacle types)")
+        try:
+            a, b = int(parts[0]), int(parts[1])
+        except (TypeError, ValueError):
+            raise ValueError(f"type_reject key {k!r}: both sides must be integer obstacle types")
+        if not (0 <= a <= 7 and 0 <= b <= 7):
+            raise ValueError(f"type_reject key {k!r}: obstacle types must be in 0..7")
+        if b in _TREE_TYPES:
+            raise ValueError(
+                f"type_reject key {k!r}: the CURRENT type {b} is a TREE. Trees are placed by the "
+                f"game's separate AddObstacle pass, which the pairwise filter never touches, so "
+                f"this entry would be silently inert. Reject a geometry type instead (1 Hole, "
+                f"2 Narrow, 6 FlameTower).")
+        p = float(v)
+        if p != 0.0:
+            tbl[(a, b)] = p
+    return tbl
 
 
 def _element(type: int = 1, level: int = 2, obstacles: int = 0,
@@ -601,6 +901,9 @@ class TempleRunSimEnv(gym.Env):
         velocity_drop_penalty: float = 0.0,
         off_center_penalty: float = 0.0,
         slide_jump_penalty: float = 0.0,
+        turn_buffer_bonus: float = 0.0,
+        landing_hazard_penalty: float = 0.0,
+        turn_takeoff_penalty: float = 0.0,
         action_history_len: int = C.DEFAULT_ACTION_HISTORY_LEN,
         frame_stack: int = C.DEFAULT_FRAME_STACK,
         **_ignored: Any,
@@ -620,13 +923,20 @@ class TempleRunSimEnv(gym.Env):
             for k, v in config.items():
                 if k == "obstacle_type_weights" and isinstance(v, dict):
                     w = dict(DEFAULT_SIM_CONFIG["obstacle_type_weights"])
-                    w.update(v)
+                    # keys arrive as STRINGS from a JSON --sim-config; mixing them with the int
+                    # defaults yields a dict whose keys cannot be sorted (str vs int) and the torch
+                    # env dies building obst_types. Coerce so both spellings work.
+                    w.update({int(kk): vv for kk, vv in v.items()})
                     self.cfg[k] = w
                 else:
                     self.cfg[k] = v
         # Immutable base; `self.cfg` is re-derived from it each reset (domain randomization mutates
         # the per-episode copy, never the base).
         self._base_cfg = dict(self.cfg)
+        # Validate + cache the type_reject matrix HERE rather than at the first hazard draw, so a
+        # malformed table fails at construction (like the C++ backend does) instead of thousands of
+        # steps into a run -- or, worse, never, if that branch happens not to be reached.
+        self._type_reject_table()
         self._dr = bool(self.cfg.get("domain_rand", False))
         self._vel_scale = 1.0
 
@@ -650,6 +960,9 @@ class TempleRunSimEnv(gym.Env):
         self.velocity_drop_penalty = float(velocity_drop_penalty)
         self.off_center_penalty = float(off_center_penalty)
         self.slide_jump_penalty = float(slide_jump_penalty)
+        self.turn_buffer_bonus = float(turn_buffer_bonus)
+        self.landing_hazard_penalty = float(landing_hazard_penalty)
+        self.turn_takeoff_penalty = float(turn_takeoff_penalty)
 
         # Velocity curve (distance -> velocity) for fast interpolation in _advance.
         vc = self.cfg.get("velocity_curve") or []
@@ -727,6 +1040,10 @@ class TempleRunSimEnv(gym.Env):
         self._pending_jump_frames = 0     # >0 = a JUMP command buffered by jump_exec_lat_frames, fires at 0
         self._cliff_edge_frames = 0       # consecutive frames riding |lane|>=cliff_edge_lane on level>=3
         self._slide_t = 0.0
+        self._turn_debounce_t = 0.0          # hook anti-double-turn debounce (turn_drop_debounce_s)
+        self._frames_since_land = 99         # frames since the last jump touchdown (post_land_gap_rejump)
+        self._slide_air_rolled = -1          # cell index whose airborne-slide kill roll was made
+        self._jump_held_airborne = False     # JUMP pressed while airborne -> fires on touchdown (WAVE 16)
         self._strafe_t = 0.0
         self._stumble_t = 0.0
         # STUMBLE kill-window: time since the last stumble (counts UP ~dt/frame; reset to 0 on a stumble).
@@ -755,7 +1072,11 @@ class TempleRunSimEnv(gym.Env):
         self._b2b_obstacles = 0
         # wide-gap (2-cell long hole / zone change) continuation
         self._pending_gap = 0
+        self._pending_double = False
         self._pending_gap_stepup = False   # the pending crevasse's 2nd cell is a raised ledge (step-UP)
+        self._pending_gap_stepdown_low = False  # the pending crevasse drops to LOW ground (foot-crossable)
+        self._last_obst_type = 0     # type of the previous hazard (pair_same_type_prob)
+        self._cells_since_hazard = 99  # cells since that hazard was emitted
         self._pending_gap_obst = 0
         self._pending_gap_type = 1
         self._pending_gap_level = 2
@@ -765,6 +1086,11 @@ class TempleRunSimEnv(gym.Env):
         self._pending_narrow = 0
         self._pending_narrow_lane = 0
         self._pending_sequence: list[dict] = []   # compound stacked-obstacle queue (user blindspot)
+        # sDoubleObstaclePercent (device-read, ramps 0 -> 0.20): the NEXT cell after an emitted
+        # obstacle also carries one, bypassing min_space. Capped by max_back_to_back_obstacles(=2 on
+        # the real device). This is the mechanism behind the device's gap-1 hazard pairs, previously
+        # absent from the sim entirely.
+        self._pending_double = False
         self._pending_post_gap: list[dict] = []    # jump->slide tail (slide obstacle after a wide-gap)
         self._pending_narrow_type = 17
         # replay cursor (which injected element feeds the next generated cell)
@@ -789,7 +1115,18 @@ class TempleRunSimEnv(gym.Env):
     def _next_cell(self) -> dict:
         if self.track_source == "replay":
             return self._next_cell_replay()
-        return self._next_cell_procedural()
+        e = self._next_cell_procedural()
+        # track the previous HAZARD for pair_same_type_prob. Done here, at the single point every
+        # generated cell passes through, so the crevasse / pending-gap / compound early returns are
+        # all covered. Multi-cell structures keep resetting the counter, which is correct: the gap is
+        # measured from the END of the structure, matching how the device pairs were counted.
+        _o = int(e.get("obstacles", 0))
+        if _o in _MUST_JUMP or _o in _MUST_SLIDE:
+            self._last_obst_type = _o
+            self._cells_since_hazard = 0
+        else:
+            self._cells_since_hazard += 1
+        return e
 
     def _peek_next(self) -> dict:
         """The already-generated next cell (what the obs's ``next_*`` fields reflect). NOT ``_next_cell()``
@@ -896,15 +1233,59 @@ class TempleRunSimEnv(gym.Env):
         for _ in range(n_rep):
             for _ in range(max(0, int(cfg.get("jumpgap_gap_cells", 2)))):
                 seq.append(_element(type=int(cfg["path_type_straight"]), level=level, is_turn=False))
-            for _ in range(max(1, int(cfg.get("jumpgap_hole_cells", 2)))):
-                e = _element(type=12, level=level, obstacles=OBST_HOLE, is_turn=False)
-                e["wide_gap"] = True
+            n_hole = max(1, int(cfg.get("jumpgap_hole_cells", 2)))
+            for _ in range(n_hole):
+                # hole_cells==1 -> mirror NORMAL generation (OBST_HOLE on a straight cell, NON-wide) =
+                # the device-true form of the tight LevelChange->Hole pair (WAVE 14, n=21, the most
+                # common inside-the-arc pair); >1 -> pt12 HoleLong + wide_gap, the v62 gap->gap form.
+                # Same rule slidegap already uses. Default 2 -> unchanged (equivalence-safe).
+                e = _element(type=(12 if n_hole > 1 else int(cfg["path_type_straight"])),
+                             level=level, obstacles=OBST_HOLE, is_turn=False)
+                e["wide_gap"] = n_hole > 1
                 seq.append(e)
+        self._pending_post_gap.extend(seq)
+
+    def _queue_slidegap(self, level: int) -> None:
+        """Build a SLIDE->HOLE tail into _pending_post_gap: a couple clear cells then a HOLE, placed
+        after a SLIDE obstacle. The ~0.7s slide commit (jump refused while sliding) eats the jump window
+        unless the policy slides EARLY and jumps the INSTANT the slide ends — the human's survival recipe
+        (12/14 events, takeoff -0.33..+0.07s rel. hole entry; 2 deaths = the swipe came mid-fall).
+        Bypasses min_space (that's the point). Only ever called when slidegap_prob>0 (rng-gated)."""
+        cfg = self.cfg
+        seq: list[dict] = []
+        for _ in range(max(0, int(cfg.get("slidegap_gap_cells", 2)))):
+            seq.append(_element(type=int(cfg["path_type_straight"]), level=level, is_turn=False))
+        n_hole = max(1, int(cfg.get("slidegap_hole_cells", 1)))
+        for _ in range(n_hole):
+            # single hole mirrors normal generation exactly (OBST_HOLE on a straight cell, non-wide);
+            # hole_cells>1 -> a HoleLong (pt12 + wide_gap, landing model applies) like jumpgap.
+            e = _element(type=(12 if n_hole > 1 else int(cfg["path_type_straight"])),
+                         level=level, obstacles=OBST_HOLE, is_turn=False)
+            e["wide_gap"] = n_hole > 1
+            seq.append(e)
         self._pending_post_gap.extend(seq)
 
     @staticmethod
     def _narrow_ptype(lane: int) -> int:
         return 19 if lane == -1 else 22
+
+    def _ramp(self):
+        """Current row of the GAME'S OWN difficulty ramp, or None when the ramp is off.
+
+        Returns (min_space_obstacles, min_space_turns, double_obstacle_pct, narrows_on, flame_slide_on).
+        Device-read 2026-07-26 (hook 17j): the real game tightens min_space 6->2 and turn spacing
+        12->2 with distance while the sim held them flat, which is why the sim was ~1.5x too easy and
+        could not produce the tight hazard pairs that dominate device deaths past ~1.5 km.
+        """
+        if not self.cfg.get("device_difficulty_ramp"):
+            return None
+        row = None
+        for r in self.cfg["difficulty_ramp_table"]:
+            if self._distance_real >= float(r[0]):
+                row = r
+            else:
+                break
+        return row[1:] if row else None
 
     def _next_cell_procedural(self) -> dict:
         cfg = self.cfg
@@ -929,6 +1310,7 @@ class TempleRunSimEnv(gym.Env):
             e = _element(type=self._pending_gap_type, level=self._pending_gap_level,
                          obstacles=self._pending_gap_obst, is_turn=False)
             e["wide_gap"] = True
+            e["stepdown_low"] = bool(getattr(self, "_pending_gap_stepdown_low", False))
             # the LAST continuation cell of a zone crevasse is the RAISED LEDGE (apex check fires here)
             if self._pending_gap == 0 and getattr(self, "_pending_gap_stepup", False):
                 e["stepup"] = True
@@ -949,12 +1331,18 @@ class TempleRunSimEnv(gym.Env):
             return e
         wide = False         # this cell STARTS a 2-cell gap
         stepup = False       # this cell is a level-UP crevasse (raised far wall -> jump must be LATE)
+        stepdown_low = False  # this cell is a step-DOWN to low ground -> crossable on foot (device-true)
         narrow_lane = None   # if set (-1/0/+1), this cell is a narrow needing that lane (else Fall)
 
+        # ★ THE GAME'S OWN RAMP (device-read 2026-07-26). When on, the measured schedule REPLACES the
+        # flat constants + the lerp below: spacing, turn spacing, the double-obstacle rate and the
+        # narrows/flame-slide gates all come straight from the table. See DEFAULT_CONFIG.
+        ramp = self._ramp()
         # Difficulty-ramped turn spacing/probability (lerp baseline -> late by distance).
         diff = self._difficulty()
-        min_turns = (float(cfg["min_space_between_turns"]) * (1.0 - diff)
-                     + float(cfg["min_space_between_turns_late"]) * diff)
+        min_turns = (float(ramp[1]) if ramp else
+                     (float(cfg["min_space_between_turns"]) * (1.0 - diff)
+                      + float(cfg["min_space_between_turns_late"]) * diff))
         turn_p = (float(cfg["turn_prob"]) * (1.0 - diff)
                   + float(cfg["turn_prob_late"]) * diff)
 
@@ -984,7 +1372,8 @@ class TempleRunSimEnv(gym.Env):
         obstacle = OBST_NONE
         if (not is_turn
                 and self._cells_since_turn >= int(cfg["min_clear_after_turn"])
-                and self._cells_since_obstacle >= int(cfg["min_space_between_obstacles"])
+                and self._cells_since_obstacle >= (ramp[0] if ramp
+                                                   else int(cfg["min_space_between_obstacles"]))
                 and self._cells_since_zone >= int(cfg["zone_change_every_cells"])
                 and self._distance_real >= float(cfg.get("zone_after_distance", 0.0))):
             obstacle = OBST_LEVEL_CHANGE
@@ -1008,14 +1397,43 @@ class TempleRunSimEnv(gym.Env):
             # check must fire on the 2nd cell (the ledge), and the runner must reach it near the jump
             # apex. Model it as a 2-cell gap: cell1 = plain gap (airborne needed), cell2 = the ledge
             # (apex check, flagged `stepup`).
-            self._pending_gap = 1          # -> 1 continuation cell = the raised ledge
+            # ONE-CELL CREVASSES [DEVICE-MEASURED WAVE 14, 2026-07-25, n=409 LevelChange structures
+            # over the v70/v74/v78 captures]: **67.5% of real crevasses are ONE cell**, only 32.5%
+            # are two — the sim generated 100% two-cell. That extra cell pushes everything downstream
+            # one cell further out, BEYOND the ~2.5-3.3-cell jump arc, so the AIRBORNE TRAP (reach the
+            # next obstacle still descending from the crevasse jump) was geometrically UNREACHABLE
+            # in-sim while it is ~80% of the device hole deaths. A 1-cell crevasse is the cap cell
+            # itself and carries the apex check directly. Gated prob>0-first (0 = no rng draw ->
+            # the 2-cell-only stream is untouched -> equivalence baseline safe).
+            _p1 = float(cfg.get("crevasse_single_cell_prob", 0.0))
             self._pending_gap_obst = OBST_LEVEL_CHANGE
             self._pending_gap_type = 35    # ~ real SingleLevelStepDownCap path_type (obs match)
             self._pending_gap_level = int(self._zone_level)
-            self._pending_gap_stepup = bool(self._zone_level > prev_zone)  # ledge cell = step-UP
             ptype = 35
-            wide = True
-            stepup = False                 # cell 1 is the GAP (airborne), not the ledge; ledge is cell 2
+            if _p1 > 0.0 and self._rng.random() < _p1:
+                # ONE-cell crevasse. DEVICE-MEASURED OUTCOME (scratchpad/crevasse_cells_outcome.py,
+                # n=827 structures): the 1-cell form is ~6x SAFER than the 2-cell one — 1.1% deaths
+                # and ZERO grazes vs 7.0% / 33.7%. So it is a plain short gap: airborne-at-entry is
+                # the whole requirement, with NO raised-ledge apex check and no cap graze. Modelled
+                # by leaving it NON-wide: `wide` gates the apex/graze branch, the wide-gap landing
+                # model and the gap-lip jump refusal, all of which are 2-cell-ledge physics. It stays
+                # must-jump (OBST_LEVEL_CHANGE is in _MUST_JUMP) so the runner must still clear it.
+                self._pending_gap = 0
+                stepup = False
+                wide = False
+            else:
+                self._pending_gap = 1      # -> 1 continuation cell = the raised ledge
+                self._pending_gap_stepup = bool(self._zone_level > prev_zone)  # ledge cell = step-UP
+                stepup = False             # cell 1 is the GAP (airborne), not the ledge; ledge is cell 2
+                wide = True
+            # STEP-DOWN TO LOW GROUND: device-measured survivable on foot (see stepdown_grounded_ok).
+            # Marked on every cell of the structure so both the gap and the ledge accept a grounded
+            # crossing. Direction is decided here, where prev_zone is still in scope.
+            stepdown_low = bool(
+                self.cfg.get("stepdown_grounded_ok")
+                and self._zone_level < prev_zone
+                and self._zone_level <= int(self.cfg.get("stepdown_grounded_max_level", 1)))
+            self._pending_gap_stepdown_low = stepdown_low
 
         # POST-TURN OBSTACLE [DEVICE-MEASURED 2026-07-08, 72 must-jump/slide onsets ~1 cell after a
         # junction across 6 captures]: the real game DOES place obstacles on the first post-junction cell;
@@ -1028,15 +1446,50 @@ class TempleRunSimEnv(gym.Env):
         if (obstacle == OBST_NONE and not is_turn and self._cells_since_turn == 1
                 and float(cfg.get("turnobstacle_prob", 0.0)) > 0.0
                 and self._rng.random() < float(cfg.get("turnobstacle_prob", 0.0))):
-            obstacle = self._sample_obstacle_type()
+            obstacle = self._sample_obstacle_type_paired()
+            self._cells_since_obstacle = 0
+        # ★ THE DEVICE CONCENTRATES POST-TURN HAZARDS AT +3, NOT +1 [DEVICE-MEASURED 2026-07-27 night,
+        # scratchpad/postturn_reconcile.py over 1446 junctions, hazard = must-jump OR must-slide,
+        # any-frame cell attribution]:
+        #     offset   +1     +2     +3     +4     +5
+        #     device  3.2%   9.5%  36.6%  18.9%   9.4%
+        #     sim     7.4%   0.0%  11.2%   8.1%   7.6%   (v107: min_clear_after_turn 3, turnobst .08)
+        # More than one junction in THREE is followed by a hazard exactly 3 cells later -- that is the
+        # user's v107 death ("it took a turn with an obstacle... you have to jump before the obstacle
+        # or during the turn"), and turnobstacle_prob cannot produce it because it only ever fills +1.
+        # A separate offset-3 dose is therefore its own knob, not a re-dose of the existing one.
+        # ⚠️ The +2 hole was NOT a device fact: wave-15 measured device +2 at 0.7% and set
+        # min_clear_after_turn 2 -> 3 on that basis, but that 0.7% is an artifact of first-frame cell
+        # attribution (`obst.setdefault`) against WINDOW-PRESENTED device flags. Re-measured any-frame
+        # it is 5.3-9.5% on the SAME captures. Both capture eras agree at every definition level, so
+        # this is methodology, not a change in the game.
+        elif (obstacle == OBST_NONE and not is_turn and self._cells_since_turn == 3
+                and float(cfg.get("turnobstacle3_prob", 0.0)) > 0.0
+                and self._rng.random() < float(cfg.get("turnobstacle3_prob", 0.0))):
+            obstacle = self._sample_obstacle_type_paired()
             self._cells_since_obstacle = 0
 
         # A turn cell carries no obstacle (the player must turn here); the cell right after a junction
         # is also kept clear (min_clear_after_turn) — a must-jump obstacle there is unclearable (you
         # can't turn AND jump on one crossing).
+        # TIGHT PAIRS [DEVICE-MEASURED WAVE 14, n=2684 consecutive must-jump pairs over the v66-v78
+        # captures]: the real game places 19% of them CLOSER than the sim's HARD min_space floor of 6
+        # (gap 1:23, 2:49, 3:95, 4:74, 5:272) and 6.2% within the ~2.5-3.3-cell jump arc (<=3 cells).
+        # The sim's floor made that impossible outside the bespoke compound tails, which only ever
+        # produce gap 3-4 -- one cell too generous to form the airborne trap. With prob, allow a
+        # placement at a SHORT spacing. Gated prob>0-first (default 0 -> no rng draw -> the track
+        # stream and equivalence baseline are untouched).
+        _tp = float(cfg.get("tight_pair_prob", 0.0))
+        _tight = (_tp > 0.0 and obstacle == OBST_NONE and not is_turn
+                  and self._cells_since_turn >= int(cfg["min_clear_after_turn"])
+                  and int(cfg.get("tight_pair_min_cells", 1)) <= self._cells_since_obstacle
+                  < int(cfg["min_space_between_obstacles"])
+                  and self._rng.random() < _tp)
         if (obstacle == OBST_NONE and not is_turn
                 and self._cells_since_turn >= int(cfg["min_clear_after_turn"])
-                and self._cells_since_obstacle >= int(cfg["min_space_between_obstacles"])):
+                and (self._cells_since_obstacle >= (ramp[0] if ramp
+                                                    else int(cfg["min_space_between_obstacles"]))
+                     or _tight or self._pending_double)):
             place = self._rng.random() < float(cfg["obstacle_prob"])
             # honor max back-to-back: if we've hit the cap, force a gap.
             if self._b2b_obstacles >= int(cfg["max_back_to_back_obstacles"]):
@@ -1044,8 +1497,16 @@ class TempleRunSimEnv(gym.Env):
             if place:
                 self._cells_since_obstacle = 0
                 self._b2b_obstacles += 1
-                if (self._distance_real >= float(cfg["narrows_after_distance"])
-                        and self._rng.random() < float(cfg["narrow_prob"])):
+                # arm the DOUBLE: prob>0-first so the default (0) draws no rng and leaves the stream
+                # untouched. The cap is checked when it is consumed, mirroring the device's b2b limit.
+                _dbl = (ramp[2] if ramp else float(cfg.get("double_obstacle_percent", 0.0)))
+                self._pending_double = bool(
+                    _dbl > 0.0
+                    and self._b2b_obstacles < int(cfg["max_back_to_back_obstacles"])
+                    and self._rng.random() < _dbl)
+                _narrows_ok = (ramp[3] if ramp
+                               else self._distance_real >= float(cfg["narrows_after_distance"]))
+                if (_narrows_ok and self._rng.random() < float(cfg["narrow_prob"])):
                     # NARROW: a multi-cell one-lane SIDE strip with a RANDOM safe lane; runner falls off
                     # elsewhere. The policy must read narrow_target_lane (not the subtype) and HOLD it
                     # across the strip. [DEVICE-MEASURED 2026-07-02, Region2D bands narrow_calib2]: EVERY
@@ -1075,13 +1536,16 @@ class TempleRunSimEnv(gym.Env):
                         self._pending_narrow_lane = narrow_lane
                         self._pending_narrow_type = ptype
                 else:
-                    obstacle = self._sample_obstacle_type()
+                    obstacle = self._sample_obstacle_type_paired()
                     # a HOLE is sometimes a 2-cell LONG hole (path_type 12/13/15/16 on device).
                     if obstacle == OBST_HOLE and self._rng.random() < float(cfg["wide_gap_prob"]):
                         self._pending_gap = int(cfg["wide_gap_extra_cells"])
                         self._pending_gap_obst = OBST_HOLE
                         self._pending_gap_type = 12   # ~ real HoleLong path_type (obs match)
                         self._pending_gap_level = level
+                        # this pending slot is now a HOLE, not a crevasse: clear the crevasse-only
+                        # step-down mark so it cannot leak onto the hole's continuation cell.
+                        self._pending_gap_stepdown_low = False
                         ptype = 12
                         wide = True
             else:
@@ -1111,6 +1575,15 @@ class TempleRunSimEnv(gym.Env):
                 and self._distance_real >= float(cfg.get("jumpgap_after_distance", 0.0))
                 and self._rng.random() < float(cfg.get("jumpgap_prob", 0.0))):
             self._queue_jumpgap(level)
+            queued_tail = True
+        # SLIDE->HOLE compound [WAVE 9 HUMAN-DEMO]: a hole a couple clear cells after a SLIDE obstacle —
+        # the slide commit eats the jump window (killed the human twice; never generated -> free in-sim).
+        # Same prob>0-first rng gating; only fires on a MUST-SLIDE obstacle cell (not wide-gaps).
+        if (obstacle in _MUST_SLIDE and not queued_tail
+                and float(cfg.get("slidegap_prob", 0.0)) > 0.0
+                and self._distance_real >= float(cfg.get("slidegap_after_distance", 0.0))
+                and self._rng.random() < float(cfg.get("slidegap_prob", 0.0))):
+            self._queue_slidegap(level)
 
         # --- coin / bonus cell (gated) --------------------------------------
         is_coin = False
@@ -1124,14 +1597,128 @@ class TempleRunSimEnv(gym.Env):
                      can_turn_left=can_l, can_turn_right=can_r, is_coin=is_coin)
         e["wide_gap"] = wide
         e["stepup"] = stepup
+        e["stepdown_low"] = stepdown_low
         e["narrow_lane"] = narrow_lane
         return e
+
+    def _type_reject_table(self) -> dict:
+        """Parsed ``{(prev, cur): p_reject}``, cached on the identity of the raw config value.
+
+        ``self.cfg`` is re-derived from ``_base_cfg`` on every reset but ``type_reject`` is not a
+        domain-randomised key, so the raw object is stable and the parse happens once per env.
+        """
+        raw = self.cfg.get("type_reject") or _EMPTY_TYPE_REJECT
+        if getattr(self, "_tr_raw", None) is not raw:
+            self._tr_raw = raw
+            self._tr_tbl = parse_type_reject(raw)
+        return self._tr_tbl
+
+    def _sample_obstacle_type_reject(self) -> int:
+        """DRAW-THEN-SUBSTITUTE, the game's own shape (see ``type_reject_model``).
+
+        Stage A — a GEOMETRY type (Hole / Narrow / FlameTower) is tested against the previously
+        emitted hazard type by the pairwise admissibility rule; on rejection it is re-drawn
+        (`OriginalPick` -> `FinalPick`). ONE re-draw by default: that single substitution is what
+        the game models, and it is what makes the suppression FLOOR reachable rather than zero.
+
+        Stage B — a TREE is returned untouched, because the game places trees in a later pass that
+        the filter never sees. This is the half that produces the elevated slide clustering for
+        free, and it is why the rule is not a blanket anti-repeat.
+
+        RNG DRAW ORDER (the whole risk; `cpp_sim/sim.cpp:sample_obstacle_type_reject` must match
+        value-for-value): one draw for the pick, then per re-draw round at most one rejection roll
+        and at most one further pick. The rejection roll is skipped entirely when the pair carries
+        no rejection probability, mirroring the house "check prob > 0 FIRST" rule, so a table that
+        does not mention the drawn pair costs exactly the same draws as the i.i.d. sampler.
+        """
+        t = self._sample_obstacle_type()          # OriginalPick
+        prev = int(self._last_obst_type)
+        if not prev:
+            return t                              # nothing emitted yet -> no pair to judge
+        tbl = self._type_reject_table()
+        for _ in range(max(0, int(self.cfg.get("type_reject_redraws", 1)))):
+            if t in _TREE_TYPES:
+                break                             # Stage B: the second pass is unfiltered
+            p = tbl.get((prev, t), 0.0)
+            if p <= 0.0:
+                break                             # admissible pair -> no roll, no draw
+            if self._rng.random() >= p:
+                break                             # accepted
+            t = self._sample_obstacle_type()      # FinalPick (the substitute)
+        return t
+
+    def _sample_obstacle_type_paired(self) -> int:
+        """Draw an obstacle type, sometimes REPEATING the previous one (see pair_same_type_prob).
+
+        Device-measured clustering: repeated slides are the game's two most common consecutive
+        orderings. Gated prob>0-FIRST so the default draws no rng and the stream is untouched.
+        """
+        # ★ MODEL SELECT, and it is checked BEFORE any random(): with type_reject_model False this
+        # costs zero draws, so every pre-2026-07-28 track stream and calibration is reproduced
+        # bit-for-bit.
+        #
+        # ⚠️ CORRECTED 2026-07-28: the first spec said this model REPLACES pair_same_type_prob. That
+        # was WRONG, and measurement caught it -- turning the model on DROPPED slide clustering from
+        # 7.9% to 3.8% (device 17.9%). The two are STAGE A and STAGE B of the same generator, not
+        # competing models:
+        #   Stage A  geometry (Hole/Narrow/Flame) -- drawn, then pairwise-REJECTED and substituted.
+        #            Rejection can only ever SUPPRESS, which is why it reproduces the device's
+        #            Hole->Hole 6.1% (below its 10.3% independent rate) and nothing else.
+        #   Stage B  trees (Stumble/Jump/Slide) -- placed by the game's separate AddObstacle pass,
+        #            which the pairwise filter never sees. The device's TreeSlide->TreeSlide is 9.8%
+        #            against a 1.5% independent rate: 6.5x ELEVATED. No rejection rule can raise a
+        #            rate, so that elevation must come from repetition inside the tree pass, which
+        #            is exactly what pair_same_type_prob models.
+        # So Stage A runs first, then Stage B may override with a repeat. Draw order is fixed and
+        # mirrored value-for-value by cpp_sim/sim.cpp.
+        if self.cfg.get("type_reject_model"):
+            t = self._sample_obstacle_type_reject()
+            p = float(self.cfg.get("pair_same_type_prob", 0.0))
+            if (p > 0.0 and self._last_obst_type
+                    and int(self._last_obst_type) in tuple(self.cfg.get("pair_same_type_types", (5, 6)))
+                    and self._cells_since_hazard <= int(self.cfg.get("pair_same_type_cells", 4))
+                    and self._rng.random() < p):
+                return int(self._last_obst_type)
+            return t
+        p = float(self.cfg.get("pair_same_type_prob", 0.0))
+        # SLIDES ONLY by default. Type-agnostic repetition is the WRONG model: on device 73% of all
+        # same-type pairs are repeated slides (TreeSlide->TreeSlide 9.8%, Flame->Flame 8.1%), which is
+        # 6.5x and 2.3x their independent rates -- while Hole->Hole is 6.1% against an independent
+        # 10.3%, i.e. holes repeat LESS than chance. Repeating every type overshoots total same-type
+        # (28.3% vs the device's 24.6%) long before the slide rhythm gets anywhere near 17.9%.
+        _types = self.cfg.get("pair_same_type_types", (5, 6))
+        if (p > 0.0 and self._last_obst_type and int(self._last_obst_type) in tuple(_types)
+                and self._cells_since_hazard <= int(self.cfg.get("pair_same_type_cells", 4))
+                and self._rng.random() < p):
+            return int(self._last_obst_type)
+        t = self._sample_obstacle_type()
+        # ★ ANTI-REPETITION FOR JUMP OBSTACLES [2026-07-28]. The comment above records the other half
+        # of the same device measurement and nothing ever implemented it: Hole->Hole is 6.1% on
+        # device against an INDEPENDENT 10.3%, i.e. the game actively AVOIDS repeating a hole, while
+        # the sim draws types i.i.d. and repeats them at chance. Consequence, measured on 148 sim
+        # chains: `Hole->Hole->Hole` is the sim's most common 3-chain (n=15) and does not appear in
+        # the device's top five at all -- so the policy over-trains jump-land-jump and under-trains
+        # the slide-led chains the device actually serves (50.7% vs the sim's 39.5%).
+        # Suppressing 41% of hole-after-hole draws takes 10.3% -> 6.1%, so the dose is READ OFF THE
+        # DEVICE, not fitted. Gated prob>0-FIRST so the default draws no rng and the stream is
+        # bit-identical when off.
+        q = float(self.cfg.get("pair_anti_repeat_prob", 0.0))
+        if (q > 0.0 and self._last_obst_type and int(t) == int(self._last_obst_type)
+                and int(t) in tuple(self.cfg.get("pair_anti_repeat_types", (1, 4)))
+                and self._cells_since_hazard <= int(self.cfg.get("pair_same_type_cells", 4))
+                and self._rng.random() < q):
+            return self._sample_obstacle_type()      # one re-draw; may legitimately land on t again
+        return t
 
     def _sample_obstacle_type(self) -> int:
         weights = dict(self.cfg["obstacle_type_weights"])
         # Slides (TreeSlide=5, FlameTower=6) only appear past slides_after_distance — the baseline
         # statics have sAllowTreeSlide/FlameTowers = False, so early runs are jump/stumble only.
-        if self._distance_real < float(self.cfg["slides_after_distance"]):
+        # With the device ramp on, the game's OWN sAllowTreeSlide/sAllowFlameTowers gate decides
+        # (device-read: both switch on at ~507 m), instead of the hand-calibrated distance constant.
+        _ramp = self._ramp()
+        _slides_ok = _ramp[4] if _ramp else (self._distance_real >= float(self.cfg["slides_after_distance"]))
+        if not _slides_ok:
             weights = {t: w for t, w in weights.items() if t not in (5, 6)}
         types = list(weights.keys())
         probs = np.array([weights[t] for t in types], dtype=float)
@@ -1228,6 +1815,9 @@ class TempleRunSimEnv(gym.Env):
             velocity_drop_penalty=self.velocity_drop_penalty,
             off_center_penalty=self.off_center_penalty,
             slide_jump_penalty=self.slide_jump_penalty,
+            turn_buffer_bonus=self.turn_buffer_bonus,
+            landing_hazard_penalty=self.landing_hazard_penalty,
+            turn_takeoff_penalty=self.turn_takeoff_penalty,
             prev_velocity=float(self._prev_state.get("velocity", 0.0)),
             velocity=float(state.get("velocity", 0.0)),
             lane=float(self._prev_state.get("lane", 0.0)),
@@ -1266,7 +1856,14 @@ class TempleRunSimEnv(gym.Env):
     def _apply_action(self, a: int) -> None:
         """Translate the action byte into a flag transition / lane shift / turn (SPEC §3)."""
         cfg = self.cfg
+        if a != int(C.Action.JUMP):
+            self._jump_held_airborne = False      # the button was released
         if a == int(C.Action.JUMP):
+            # HELD-JUMP BOOKKEEPING (WAVE 16): a JUMP pressed while ALREADY AIRBORNE is dropped by the
+            # guard below -- free in-sim, but on device the still-held press fires on touchdown. Record
+            # it so the landing can honour it. See DEFAULT_CONFIG held_jump_rejump_*.
+            if self._jump_t > 0.0:
+                self._jump_held_airborne = True
             # only meaningful from the ground; sets IsJumping for jump_duration.
             if self._jump_t <= 0.0 and self._slide_t <= 0.0:
                 # JUMP-BYTE DROP [2026-07-05, v14_freshphone ep6 @108m]: on device the game can silently
@@ -1291,7 +1888,16 @@ class TempleRunSimEnv(gym.Env):
                 _cell_now = self._track[self._cell_index]
                 if _cell_now.get("wide_gap") and \
                         self._cell_progress() > float(cfg.get("gap_jump_lip_cp", 0.2)):
-                    return
+                    # POST-LANDING GAP RE-JUMP [WAVE 12 DEVICE-MEASURED 2026-07-09, landing_lock_
+                    # forensic context split]: a jump within ~1 frame of TOUCHDOWN on a wide-gap cell
+                    # fires 46% on device (41/90) — the hole-chain RECOVERY affordance (the human's
+                    # wave-9 ep10 pattern) — while the lip rule alone refuses 100% in-sim, making the
+                    # recovery UNLEARNABLE. With the knob on, a fresh landing bypasses the lip refusal
+                    # at the measured rate (prob>0-first rng gating; default 0 = unchanged).
+                    plr = float(cfg.get("post_land_gap_rejump_prob", 0.0))
+                    if not (plr > 0.0 and self._frames_since_land <= 1
+                            and self._rng.random() < plr):
+                        return
                 lat = int(cfg.get("jump_exec_lat_frames", 0))
                 if lat > 0 and self._pending_jump_frames <= 0:
                     # DEVICE JUMP LATENCY: don't fire now — schedule the takeoff `lat` (+/- jitter) frames
@@ -1299,12 +1905,17 @@ class TempleRunSimEnv(gym.Env):
                     jit = int(cfg.get("jump_exec_lat_jitter", 0))
                     self._pending_jump_frames = max(1, lat + (self._rng.integers(-jit, jit + 1) if jit > 0 else 0))
                 elif lat <= 0:
-                    self._jump_t = float(cfg["jump_duration"])
+                    self._jump_t = self._jump_airtime()
                     # record WHERE this jump took off (longitudinal pos) — the step-up crevasse checks the
                     # runner jumped late enough (near the gap edge) so an early jump fails on the raised wall.
                     self._jump_takeoff_pos = self._long_pos()
         elif a == int(C.Action.SLIDE):
             if self._slide_t <= 0.0 and self._jump_t <= 0.0:
+                # NOTE [WAVE 13 2026-07-14]: a slide_send_lat_frames knob was prototyped here (flame
+                # late-slide fix) but MEASURED INERT — the sim already forces the pre-slide because the
+                # must_slide death resolves during the cell crossing in _advance, before the next step's
+                # must_slide obs updates (an on-cell reaction is already fatal in-sim; survivors pre-slide
+                # on next_must_slide). Flame late-slide is NOT a sim gap. Reverted to keep this path clean.
                 self._slide_t = float(cfg["slide_duration"])
         elif a == int(C.Action.STRAFE_LEFT):
             # ANALOG TILT (device-measured 2026-07-02, lateral-accel-15a): byte0 = HOLD LEFT — sets a
@@ -1345,6 +1956,16 @@ class TempleRunSimEnv(gym.Env):
         if self._post_turn_linger > 0:
             self._stumble()
             return
+        # HOOK DEBOUNCE [WAVE 10, hook-measured 2026-07-05 drop path 'debounce 0.3s']: the gadget drops
+        # any turn byte within turn_drop_debounce_s of the previous one. Modeled so turn-byte SPAM keeps
+        # its real device price when turn_offjunction_drop makes off-junction turns non-fatal: a junk
+        # turn just before a junction EATS the real swipe -> missed turn -> Fall. Every processed turn
+        # byte (incl. dropped ones) arms the timer. Default 0 = off (stream/replay unchanged).
+        deb = float(self.cfg.get("turn_drop_debounce_s", 0.0))
+        if deb > 0.0:
+            if self._turn_debounce_t > 0.0:
+                return                       # eaten by the hook's anti-double-turn debounce
+            self._turn_debounce_t = deb
         want_left = a == int(C.Action.TURN_LEFT)
         cell = self._current_cell()
         cp = self._cell_progress()
@@ -1398,6 +2019,17 @@ class TempleRunSimEnv(gym.Env):
         # gave free turns anywhere (stumble), the device kills each one. A turn with NO junction context
         # (not on a turn cell, not approaching one) -> Fall. Only a MISTIMED turn AT/NEAR a junction
         # (right place, wrong cprog/side) is a survivable stumble.
+        # OFF-JUNCTION DROP [WAVE 10 2026-07-09]: the fatal rule below was measured 2026-07-02 under the
+        # OLD direct fn.TurnLeft execution. Hook 16o (2026-07-04) reroutes turn bytes through the game's
+        # HandleDelayedTurning, and the 2026-07-05 probe MEASURED the hook DROPPING off-junction bytes
+        # (debounce / invalid-dir CanTurn=false / not-near-junction; pre-onset writes: 0 in all captures)
+        # -> on TODAY'S device an off-junction turn byte is a harmless no-op. With the knob on (+
+        # hook_turn_buffer) the sim matches that: silent drop instead of kill/stumble — which also removes
+        # the exploration kill-barrier around the approach-latch (the turn dead-letter fix needs the
+        # policy to DISCOVER the pre-swipe). Pair with turn_drop_debounce_s so spam still costs (a junk
+        # turn eats the next real swipe). Default off = v70-era behavior unchanged.
+        if self.cfg.get("turn_offjunction_drop") and self.cfg.get("hook_turn_buffer"):
+            return
         near_junction = bool(cell.get("is_turn")) or bool(self._peek_next().get("is_turn"))
         if near_junction:
             self._stumble()      # mistimed at a junction -> survivable wobble (2nd too soon -> Fall)
@@ -1503,12 +2135,31 @@ class TempleRunSimEnv(gym.Env):
         if self._pending_jump_frames > 0:
             self._pending_jump_frames -= 1
             if self._pending_jump_frames == 0 and self._jump_t <= 0.0 and self._slide_t <= 0.0:
-                self._jump_t = float(cfg["jump_duration"])
+                self._jump_t = self._jump_airtime()
                 self._jump_takeoff_pos = self._long_pos()
 
         # tick down transient flags.
+        _was_airborne = self._jump_t > 0.0
         self._jump_t = max(0.0, self._jump_t - dt)
+        # post_land_gap_rejump support: track frames since the jump TOUCHDOWN (this decay crossing 0).
+        if _was_airborne and self._jump_t <= 0.0:
+            self._frames_since_land = 0
+            # HELD-JUMP -> LANDING RE-JUMP (WAVE 16): the button was still down at touchdown, so the
+            # device fires a fresh jump the policy never chose. Context-dependent rate (device-
+            # measured: gap cells convert far more often than solid ground). prob>0-first gating.
+            _hj_s = float(cfg.get("held_jump_rejump_solid", 0.0))
+            _hj_g = float(cfg.get("held_jump_rejump_gap", 0.0))
+            if self._jump_held_airborne and (_hj_s > 0.0 or _hj_g > 0.0) and not self._is_dead:
+                _c = self._track[self._cell_index] if self._cell_index < len(self._track) else {}
+                _p = _hj_g if _c.get("wide_gap") else _hj_s
+                if _p > 0.0 and self._rng.random() < _p:
+                    self._jump_t = self._jump_airtime()
+                    self._jump_takeoff_pos = self._long_pos()
+            self._jump_held_airborne = False
+        else:
+            self._frames_since_land = min(99, self._frames_since_land + 1)
         self._slide_t = max(0.0, self._slide_t - dt)
+        self._turn_debounce_t = max(0.0, self._turn_debounce_t - dt)
         self._strafe_t = max(0.0, self._strafe_t - dt)
 
         # STRAFE-COMMAND LATENCY (strafe_exec_lat_frames): the commanded tilt (_lat_cmd) reaches the
@@ -1570,9 +2221,17 @@ class TempleRunSimEnv(gym.Env):
             moved_cells = max(0.0, float(ext_distance) - self._last_ext_distance)
             self._last_ext_distance = float(ext_distance)
             self._distance_real = float(ext_distance)
-            cell_len = float(cfg["cell_length_real"])
+            # Same 2026-07-27 correction on the REPLAY side: the device's distance between adjacent
+            # PathElements is not the constant 6.4 either -- measured 5.4 @v100 rising to 10.2 @v215,
+            # i.e. slope*cell_length*v (0.0508*v, which reproduces the measured 9.13 at v180). The
+            # flat cell_length_real only holds near v=136 and desynchronises a replay at speed.
+            _dslope = float(cfg.get("dist_per_velsec_slope", 0.0))
+            cell_len = (_dslope * float(cfg["cell_length"]) * self._velocity if _dslope > 0.0
+                        else float(cfg["cell_length_real"]))
         else:
-            self._distance_real += self._velocity * dt * float(cfg["dist_per_velsec"])
+            _dslope = float(cfg.get("dist_per_velsec_slope", 0.0))
+            _dpv = (_dslope * self._velocity) if _dslope > 0.0 else float(cfg["dist_per_velsec"])
+            self._distance_real += self._velocity * dt * _dpv
             cell_len = float(cfg["cell_length"])
 
         # velocity = calibrated curve(distance) — the real AccCurve is distance-gated, not linear
@@ -1617,10 +2276,26 @@ class TempleRunSimEnv(gym.Env):
         # model only checked "not sliding" ON ENTRY, so a jump issued DURING the slide cell was
         # survivable in-sim but FATAL on device (the "slid then jumped and died" the user reported).
         # Check every tick while airborne on a must-slide cell.
+        # ★ DEVICE-CALIBRATED 2026-07-28: this killed 100% of the time, the DEVICE kills 24%
+        # (23 of 94 events over 45 captures). The gap matters more than its size: these takeoffs are
+        # 100% FORCED (a must_jump demanded them -- 0 discretionary in BOTH sim and device), and in
+        # sim NO takeoff timing survives (15/15 fatal across cp 0.11..0.76). So the world presented a
+        # situation with no survivable action, punished the one correct jump, and taught nothing --
+        # while accounting for ~33% of the champion's deaths (flame 88% airborne, TreeSlide 50%).
+        # Probabilistic rather than a threshold, following hole_trap_kill_prob; a sharp cutoff was
+        # the v55 mistake. prob >= 1.0 short-circuits BEFORE the draw so the old stream is exact.
         if not self._is_dead and self._jump_t > 0.0:
             _oc = int(self._current_cell().get("obstacles", 0))
             if _oc in _MUST_SLIDE:
-                self._kill(5 if _oc == OBST_FLAME_TOWER else 3)
+                _pk = float(self.cfg.get("airborne_slide_kill_prob", 1.0))
+                if _pk >= 1.0:
+                    self._kill(5 if _oc == OBST_FLAME_TOWER else 3)
+                elif self._slide_air_rolled != self._cell_index:
+                    # ONE roll per cell. This check runs every tick, so re-rolling here turned a
+                    # 24% device rate into ~75% (1 - 0.76^n over n ticks on the cell).
+                    self._slide_air_rolled = self._cell_index
+                    if self._rng.random() < _pk:
+                        self._kill(5 if _oc == OBST_FLAME_TOWER else 3)
 
         # wide-gap LIP deadline: entered a wide-gap cell grounded (survivable lip) — still grounded
         # past gap_entry_grace of the cell -> fell in. A takeoff (or leaving the cell) clears it.
@@ -1691,6 +2366,12 @@ class TempleRunSimEnv(gym.Env):
                 and obst == OBST_LEVEL_CHANGE and cell.get("wide_gap"):
             nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
             apex_cell = not nxt.get("wide_gap")   # the LAST crevasse cell (next cell solid)
+        # A step-DOWN TO LOW GROUND has NO raised cap to clear, so it is not an apex cell at all: the
+        # apex branch would otherwise kill a grounded runner (jump_t <= 0) before the soft-flag check
+        # below ever runs, and crevasse_graze_worldy promotes every last-crevasse cell into it. The
+        # graze model itself is a no-op here anyway (cap height is 0 below level 3).
+        if cell.get("stepdown_low"):
+            apex_cell = False
         if obst in _MUST_JUMP and apex_cell:
             # STEP-UP = VELOCITY-DEPENDENT APEX model [device-MEASURED, human_calib_v2 v210 probe
             # 2026-07-03]: the raised far ledge must be reached NEAR the jump APEX (still high). The jump
@@ -1702,9 +2383,16 @@ class TempleRunSimEnv(gym.Env):
             # LATE takeoff; the human jumps EARLIER the faster they go). No lip-grace (a raised ledge, not
             # a hole edge). step-down / holes are UNAFFECTED (handled below).
             if self._jump_t <= 0.0 or self._jump_takeoff_pos is None:
-                self._kill(2)       # not airborne at the step-up ledge -> fell in the gap
+                self._kill(4)       # not airborne at the step-up ledge -> clip the raised wall -> Ledge
                 return
-            span = float(self.cfg["jump_duration"]) * self._velocity / float(self.cfg["cell_length"])
+            # AIRTIME-CONSISTENT SPAN [2026-07-27 night]: this is a step-UP ledge, and a step-up jump
+            # is device-measured ~26% SHORTER (jump_dur_stepup_scale) because landing on raised ground
+            # cuts the fall short. The apex parabola must be evaluated over the arc the runner is
+            # ACTUALLY flying, not over the flat nominal duration -- otherwise the model says "you are
+            # mid-arc" when the runner is already coming down, which is exactly the mid->high graze
+            # the user has reported for weeks. Scale 1.0 (default) reproduces the old span exactly.
+            span = (float(self.cfg["jump_duration"]) * float(self.cfg.get("jump_dur_stepup_scale", 1.0))
+                    * self._velocity / float(self.cfg["cell_length"]))
             # evaluate at the ledge cell's ENTRY (not the current mid-cell frame pos): at 10Hz the first
             # frame on the cell is up to ~0.3 cells past the lip, which skewed frac by up to +0.13 and
             # made the device-fit mh (entry-referenced, 2026-07-05) effectively stricter than measured.
@@ -1729,7 +2417,7 @@ class TempleRunSimEnv(gym.Env):
                 cap_h = float(self.cfg["crevasse_cap_height_hi"]) if int(cell.get("level", 2)) >= 3 else 0.0
                 band = float(self.cfg["crevasse_graze_band"])
                 if arc_y < cap_h - band:
-                    self._kill(2)    # arc well below the raised cap top -> deep clip -> Ledge
+                    self._kill(4)    # arc well below the raised cap top -> deep clip -> Ledge
                 elif arc_y < cap_h:
                     self._stumble()  # arc just below the cap top -> chronic graze slowdown (x0.85)
                 return
@@ -1741,7 +2429,7 @@ class TempleRunSimEnv(gym.Env):
                 if band > 0.0 and height >= mh - band:
                     self._stumble()
                 else:
-                    self._kill(2)   # not high enough at the raised ledge -> clip it -> Fall
+                    self._kill(4)   # not high enough at the raised ledge -> clip it -> Ledge
             return
         if obst in _MUST_JUMP:
             # Non-step-up wide gap (long hole / step-DOWN) or 1-cell hole: must be AIRBORNE crossing in.
@@ -1749,10 +2437,18 @@ class TempleRunSimEnv(gym.Env):
             # 0.98-1.02 still cleared). 1-cell holes keep the strict on-entry check.
             need = float(self.cfg["wide_gap_min_airtime"]) if cell.get("wide_gap") else 0.0
             if self._jump_t <= need:
+                # STEP-DOWN TO LOW GROUND: crossing it ON FOOT is device-measured FREE (17 human
+                # grounded crossings of a 2->1 / 3->1 drop, ZERO deaths), so the must_jump flag is SOFT
+                # here. Without this the sim kills every grounded crossing, "always jump" is the only
+                # correct sim policy, and the phone inherits a superstition that then collides with
+                # whatever follows the cap. See DEFAULT_SIM_CONFIG stepdown_grounded_ok.
+                if cell.get("stepdown_low"):
+                    return
                 if cell.get("wide_gap") and float(self.cfg["gap_entry_grace"]) > 0.0:
                     self._gap_grace_cell = self._cell_index
                 else:
-                    self._kill(1 if obst == OBST_HOLE else 2)   # Fall(hole) / LevelChange/Tree
+                    self._kill(1 if obst == OBST_HOLE else
+                               (4 if obst == OBST_LEVEL_CHANGE else 2))  # Fall / Ledge / Tree
                 return
             # WIDE-GAP LANDING MODEL: airborne here, but does the arc actually LAND past the gap?
             # Fires only on the LAST gap cell (next cell solid). A short arc lands in the far gap cell
@@ -1771,13 +2467,89 @@ class TempleRunSimEnv(gym.Env):
                         + float(self.cfg["wide_gap_span_b"])
                     d = float(self._cell_index) - self._jump_takeoff_pos   # cells from takeoff to here
                     if span < d + 1.0 - float(self.cfg["wide_gap_land_grace"]):
-                        self._kill(2)   # arc lands inside the gap -> clip the far wall (Ledge)
+                        self._kill(4)   # arc lands inside the gap -> clip the far wall (Ledge)
                         return
+            # SINGLE-HOLE AIRBORNE TRAP [WAVE 14]: the wide-gap branch above skips a 1-cell hole (not
+            # wide_gap), leaving the binary airborne test as its ONLY gate. Device: reaching the hole
+            # PAST THE ARC APEX (descending) kills ~30%; reaching it rising/at apex is free. See
+            # DEFAULT_CONFIG hole_landing_model. prob>0-first gating -> model off draws NO rng.
+            _hp = float(self.cfg.get("hole_trap_kill_prob", 0.0))
+            if _hp > 0.0 and self.cfg.get("hole_landing_model") and obst == OBST_HOLE \
+                    and not cell.get("wide_gap") and self._jump_takeoff_pos is not None:
+                span = float(self.cfg["wide_gap_span_a"]) * self._velocity \
+                    + float(self.cfg["wide_gap_span_b"])
+                frac = (float(self._cell_index) - self._jump_takeoff_pos) / max(1e-6, span)
+                if frac > float(self.cfg["hole_trap_apex_frac"]) \
+                        and (_hp >= 1.0 or self._rng.random() < _hp):
+                    self._kill(1)   # descending into a 1-cell hole -> Fall (device dt1)
+                    return
         elif obst in _MUST_SLIDE:
-            # die if NOT sliding OR AIRBORNE (jumped into the low bar — device-fatal, 2026-07-03).
-            if self._slide_t <= 0.0 or self._jump_t > 0.0:
-                self._kill(5 if obst == OBST_FLAME_TOWER else 3)  # Burnt / Slide
+            # Two DIFFERENT failures were conflated here, and only one is a skill failure:
+            #   GROUNDED and not sliding = the policy simply missed the slide -> always fatal.
+            #   AIRBORNE                 = it was mid-jump, and could not have slid. On DEVICE this
+            #     kills only 24% (23 of 94 over 45 captures); in sim it killed 100%, and those
+            #     takeoffs are 100% FORCED by a must_jump (0 discretionary, measured both sides).
+            #     15/15 were fatal across takeoff cp 0.11..0.76 -- no action survived, so the world
+            #     taught nothing and punished the one correct jump. ~33% of the champion's deaths.
+            if self._jump_t > 0.0:
+                _pk = float(self.cfg.get("airborne_slide_kill_prob", 1.0))
+                if _pk >= 1.0:
+                    self._kill(5 if obst == OBST_FLAME_TOWER else 3)  # Burnt / Slide
+                elif self._slide_air_rolled != self._cell_index:
+                    self._slide_air_rolled = self._cell_index      # one roll per cell
+                    if self._rng.random() < _pk:
+                        self._kill(5 if obst == OBST_FLAME_TOWER else 3)
+            elif self._slide_t <= 0.0:
+                self._kill(5 if obst == OBST_FLAME_TOWER else 3)
         # OBST_NARROW / OBST_NONE: no death here (narrow handled above; LevelChange is in _MUST_JUMP).
+
+    def _dist_next_hazard(self, kinds) -> float:
+        """Cells from the current cell to the next hazard in `kinds`, capped at OBS horizon.
+
+        0 = the CURRENT cell carries one. Returns the cap when nothing is visible, which the obs
+        encodes as 1.0 ("clear as far as I can see"), NOT as certainty of clear.
+        """
+        from .obs import HORIZON_CELLS
+        i0 = self._cell_index
+        for d in range(0, HORIZON_CELLS + 1):
+            j = i0 + d
+            if j >= len(self._track):
+                break
+            c = self._track[j]
+            if d > 0 and c.get("can_turn_left") and c.get("can_turn_right"):
+                break          # true T-junction: the continuation is undecided -> blind past it
+            if int(c.get("obstacles", 0)) in kinds:
+                return float(d)
+        return float(HORIZON_CELLS)
+
+    def _jump_airtime(self) -> float:
+        """Airtime for a jump starting NOW, scaled by the ground-height change its arc will cross.
+
+        DEVICE-MEASURED (see DEFAULT_SIM_CONFIG jump_dur_stepdown_scale): landing on LOWER ground
+        means falling further, so the runner stays airborne longer and the arc spans 3 cells instead
+        of 2; landing on RAISED ground cuts the fall short (~0.74x). The sim used one fixed duration
+        for all three, so a step-down jump cleared its follower in-sim while sailing into it on the
+        phone.
+
+        The landing level is read at the NOMINAL span (the unscaled arc), which is what decides where
+        the runner is heading at the moment of takeoff. Both scales at 1.0 -> the old constant, and no
+        rng is drawn either way, so the OFF stream stays bit-identical.
+        """
+        base = float(self.cfg["jump_duration"])
+        ds = float(self.cfg.get("jump_dur_stepdown_scale", 1.0))
+        us = float(self.cfg.get("jump_dur_stepup_scale", 1.0))
+        if ds == 1.0 and us == 1.0:
+            return base
+        span = base * self._velocity / float(self.cfg["cell_length"])
+        i0 = self._cell_index
+        j = min(len(self._track) - 1, i0 + max(1, int(span + 0.5)))
+        lvl0 = int(self._track[i0].get("level", 2))
+        lvl1 = int(self._track[j].get("level", 2))
+        if lvl1 < lvl0:
+            return base * ds
+        if lvl1 > lvl0:
+            return base * us
+        return base
 
     def _stumble(self) -> None:
         """Hit a side wall (mistimed swipe/turn OR over-tilt past the edge). Device-measured: the FIRST
@@ -1861,6 +2633,28 @@ class TempleRunSimEnv(gym.Env):
         nxt = self._track[self._cell_index + 1] if self._cell_index + 1 < len(self._track) else {}
         nxt2 = self._track[self._cell_index + 2] if self._cell_index + 2 < len(self._track) else {}
         nxt3 = self._track[self._cell_index + 3] if self._cell_index + 3 < len(self._track) else {}
+        # ---- LOOKAHEAD BLOCKING (WAVE 15 PERCEPTION FIX, device-probed 2026-07-26) ----------------
+        # The hook walks the PathElement neighbour chain with ONE fixed heading offset per step, so the
+        # walk dies the moment the track turns: 72% of device frames on/approaching a junction stream
+        # next/next2_path_level = -1, i.e. NOBODY can see past a corner. The sim faithfully reproduced
+        # that blindness. Device probe (hook 17g, `s.wp`): a HEADING-AWARE walk resolves the full
+        # 6-cell horizon on 100% of the frames where the plain walk falls short (56.8% of all frames,
+        # mean +3.46 cells) — the game exposes the data, the hook simply was not following it.
+        # WHY THIS MATTERS: 61-70% of every policy's WASTED jumps sit within 3 cells of a junction, and
+        # they are ~7% lethal on device while the human (who can SEE past the corner) hedges 2.4x MORE
+        # and never dies from it. The blindness is the cause; it does not exist in-sim, which is why no
+        # amount of sim training ever fixed the user-reported "random jump after a turn".
+        # THE ONE CASE THAT MUST STAY BLIND: a real T-junction where BOTH directions exist (32.6% of
+        # device junction frames). There the continuation depends on a decision not yet made, so the
+        # walk must REFUSE rather than feed a confidently WRONG lookahead. Gated (default off = the
+        # old always-blind behaviour, so equivalence baselines and obs62/63 policies are untouched).
+        if self.cfg.get("turn_aware_lookahead"):
+            def _blocked(c: dict) -> bool:
+                return bool(c.get("is_turn")) and bool(c.get("can_turn_left")) and bool(c.get("can_turn_right"))
+        else:
+            def _blocked(c: dict) -> bool:
+                return bool(c.get("is_turn"))
+        _blk0, _blk1, _blk2 = _blocked(cell), _blocked(nxt), _blocked(nxt2)
         nobst = int(nxt.get("obstacles", 0))
 
         on_ground = self._jump_t <= 0.0 and not self._is_dead
@@ -1894,6 +2688,20 @@ class TempleRunSimEnv(gym.Env):
             "next_must_jump": nobst in _MUST_JUMP,
             "next_must_slide": nobst in _MUST_SLIDE,
             "next_wide_gap": bool(nxt.get("wide_gap")),   # a wide gap ahead (long hole OR zone crevasse)
+            # SOFT must-jump = a step-DOWN to low ground, crossable ON FOOT (stepdown_grounded_ok).
+            # NOT part of the observation (obs.py builds from explicit field lists, so OBS_LEN is
+            # unchanged and no model needs re-surgery) -- it exists so the REWARD can tell a required
+            # jump from an optional one. The device streams must_jump=True here too, so the policy's
+            # INPUT stays faithful; only the shaping learns the difference.
+            # HORIZON (WAVE 17): cells to the next must-JUMP / must-SLIDE within HORIZON_CELLS.
+            # The scan stops at a TRUE T-junction (both directions available) because the
+            # continuation is genuinely undecided there -- that is exactly what the hook's
+            # turn-aware neighbour walk refuses to resolve (17h), so the sim must be blind in the
+            # same place or the policy would train on information the phone cannot give it.
+            "dist_next_must_jump": self._dist_next_hazard(_MUST_JUMP),
+            "dist_next_must_slide": self._dist_next_hazard(_MUST_SLIDE),
+            "soft_stepdown": bool(cell.get("stepdown_low")),
+            "next_soft_stepdown": bool(nxt.get("stepdown_low")),
             # ZONE-CREVASSE ahead: the next cell is an altitude transition (LevelChange) -> jump LATE (a
             # step-UP needs it, a step-down tolerates it); a 2-cell LONG HOLE (OBST_HOLE) needs an EARLIER
             # takeoff to span it. The policy distinguishes the two jump timings via this. DEPLOYABLE: the
@@ -1908,25 +2716,32 @@ class TempleRunSimEnv(gym.Env):
             # The sim MUST reproduce this: obs30 policies fine-tuned on always-valid sim levels got a
             # junction-frame input spike on device -> 1-frame swipe hesitation (cp~0.6 > CanTurn end
             # 0.56) -> the v26/v27/v30 missed-turn deaths v14 (zero-init cols) was immune to.
-            "next_path_level": -1 if cell.get("is_turn") else int(nxt.get("level", -1)),
-            "next2_path_level": -1 if (cell.get("is_turn") or nxt.get("is_turn"))
+            "next_path_level": -1 if _blk0 else int(nxt.get("level", -1)),
+            "next2_path_level": -1 if (_blk0 or _blk1)
                                 else int(nxt2.get("level", -1)),
             # 2-cell OBSTACLE lookahead (chained-obstacle fix): the obstacle class of cell+2 (the cell a
             # jump over cell+1 LANDS the runner airborne into). SAME junction dropout as next2_path_level —
             # the hook's PE neighbor walk breaks through turns, so both read False on/through a junction.
-            "next2_must_jump": False if (cell.get("is_turn") or nxt.get("is_turn"))
+            "next2_must_jump": False if (_blk0 or _blk1)
                                else int(nxt2.get("obstacles", 0)) in _MUST_JUMP,
-            "next2_must_slide": False if (cell.get("is_turn") or nxt.get("is_turn"))
+            "next2_must_slide": False if (_blk0 or _blk1)
                                 else int(nxt2.get("obstacles", 0)) in _MUST_SLIDE,
             # 3-cell OBSTACLE lookahead (hedge-jump fix 2026-07-08): a jump spans ~2.8 cells, so 2-cell
             # lookahead is SHORTER than one jump — the policy can't know whether a jump launched now lands
             # clear. next3 extends the horizon past the span. SAME junction-dropout CHAIN (any turn cell
             # between here and cell+3 nulls the read — the hook's PE walk breaks through turns).
-            "next3_must_jump": False if (cell.get("is_turn") or nxt.get("is_turn") or nxt2.get("is_turn"))
+            "next3_must_jump": False if (_blk0 or _blk1 or _blk2)
                                else int(nxt3.get("obstacles", 0)) in _MUST_JUMP,
-            "next3_must_slide": False if (cell.get("is_turn") or nxt.get("is_turn") or nxt2.get("is_turn"))
+            "next3_must_slide": False if (_blk0 or _blk1 or _blk2)
                                 else int(nxt3.get("obstacles", 0)) in _MUST_SLIDE,
             "narrow_target_lane": nxt.get("narrow_lane"),  # safe lane for the upcoming narrow (else None)
+            # 2-ahead NARROW SIDE (WAVE 9, obs 62->63): the jump->narrow mid-air tilt fix. The human tilts
+            # DURING the jump toward the coming strip (sees it 3+ cells out); narrow_target_lane fires only
+            # 1 cell ahead -> at a jump takeoff the policy was structurally BLIND to the side and strafed
+            # last-second (USER-observed). SAME junction dropout as next2_path_level (the hook's PE walk
+            # breaks through turns -> None on/through a junction).
+            "next2_narrow_lane": None if (_blk0 or _blk1)
+                                 else nxt2.get("narrow_lane"),
             # NN perception (replaces the host-side assists): cell_progress to TIME turns, the CONTINUOUS
             # lane (real device units) so obs.lane_to_obs maps sim/real identically (incl. near-edge).
             "cell_progress": self._cell_progress(),

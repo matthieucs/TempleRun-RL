@@ -41,6 +41,8 @@ const OFF = {
   TutorialID: 0x48, GamePlayer: 0x70, IsGameOver: 0xDE,
   IsTutorialMode: 0x104, NearestElement: 0x88, RecordManager: 0xB0,
   DistanceTraveled: 0x124, // GameController.DistanceTraveled (float) — clean distance, no score multiplier
+  GC_TimeSinceLastCoin: 0x248, // GameController.TimeSinceLastCoin (float) — resets ~0 on every coin pickup
+                               // (17d human-demo: coin-seeking explains many human tilts; pair with score)
   GameInput: 0x78,  // GameController.GameInput (the live TouchInput) — the DELAYED-TURN buffer state
   // GameInput fields (the HandleDelayedTurning buffer — swipe is queued, executes at the corner,
   // TimeSinceShouldTurn counts up until it EXPIRES): the real turn-execution mechanic.
@@ -189,7 +191,10 @@ let cachedCanLeft = false, cachedCanRight = false, cachedIsTurn = false; // turn
 // 1-cell lookahead: the same queries on the forward-neighbor cell (anticipation).
 let cachedNextIsTurn = false, cachedNextCanLeft = false, cachedNextCanRight = false;
 let cachedNextMustJump = false, cachedNextMustSlide = false;
-const HOOK_VERSION = 'clean-17a'; // 17a = + 3-ahead obstacle lookahead (next3_must_jump/next3_must_slide) for the hedge-jump obs (obs 60->62; a jump spans ~2.8 cells > the old 2-cell horizon). 16z = + 2-ahead obstacle lookahead (next2_must_jump/next2_must_slide) for the chained-obstacle obs (obs 58->60). 16y = + precise hit/arc ground-truth (time_since_stumble/stumble_duration/stumble_kill_vel_pct/is_falling/time_since_fall/death_run_velocity/world_y). 16x = + Velocity Vec3 (vel_x/y/z). 16t = 30 Hz state broadcast + 16s turn-write diag
+const HOOK_VERSION = 'clean-17k';  // 17k = HORIZON SCALARS dist_next_must_jump/slide (obs 65->67, the 3-obstacle-chain fix; derived from the existing turn-aware 6-cell walk, no new traversal). MUST match a policy trained with obs.HORIZON_OBS=True.
+const HOOK_VERSION_17J = 'clean-17j'; // 17h = TURN-AWARE LOOKAHEAD (wave-15 perception fix): the neighbour walk now follows the track THROUGH a forced corner instead of dying on a fixed heading offset (72% of near-junction frames used to stream next/next2 = -1; probe showed +3.46 cells on 56.8% of frames). Refuses at true T-junctions. MUST match the policy's sim turn_aware_lookahead.
+const HOOK_VERSION_17G = 'clean-17g'; // 17g = + READ-ONLY walk probe (s.wp = [plain, turn-aware] cells resolved): the lookahead walk uses ONE fixed heading offset for every step, so it dies past a junction (72% of on-junction frames stream next/next2_path_level = -1). No obs change.
+const HOOK_VERSION_PREV = 'clean-17f'; // 17f = FIX the 17e breakage (readS32 was UNDEFINED -> snapshot threw every frame -> ZERO state stream, 'device degraded'; now readI32 + renamed coin_count_total so the per-cell coin_count from PE_CoinRunCount is not clobbered) + next2_narrow_lane (2-ahead narrow SIDE for the jump->narrow mid-air tilt: the human tilts DURING the jump toward the coming strip; the policy was structurally blind to the side until 1 cell out -> last-second strafe, USER-observed 2026-07-09; obs 62->63). 17e = + coin_count (CharacterPlayer.CoinCountTotal @0x148 — clean per-run coin count; t_last_coin @0x248 was monotonic/wrong on this build). 17d = + t_last_coin. 17c = + human-demo fields: gi_* (the game's swipe-intent buffer = raw human inputs incl. refused ones), accel_x (real tilt, human mode), track_ahead (6-cell [type,obst,level] = what the human sees). 17b = + HUMAN MODE (byte 10: revert the accel replacement -> native tilt for human-demonstration recording). 17a = + 3-ahead obstacle lookahead (next3_must_jump/next3_must_slide) for the hedge-jump obs (obs 60->62; a jump spans ~2.8 cells > the old 2-cell horizon). 16z = + 2-ahead obstacle lookahead (next2_must_jump/next2_must_slide) for the chained-obstacle obs (obs 58->60). 16y = + precise hit/arc ground-truth (time_since_stumble/stumble_duration/stumble_kill_vel_pct/is_falling/time_since_fall/death_run_velocity/world_y). 16x = + Velocity Vec3 (vel_x/y/z). 16t = 30 Hz state broadcast + 16s turn-write diag
 const DIAG_TURN = true;             // emit the lane / cell-progress diagnostic in state (calibration)
 let cachedDbg = null;               // raw junction structure for diagnosis
 let cachedTurnDiag = null;          // lane offset + cell progress, for calibration
@@ -228,6 +233,13 @@ const LATERAL_ACCEL = true;     // the deploy mode (flip false only for legacy-p
 const TILT_FORCE = 0.60;        // |accel force| a held tilt commands (probe: tune so reach ~ lane ±7)
 const TILT_LEFT_SIGN = -1.0;    // sign of force X that moves the runner LEFT (verify via probe; flip if wrong)
 let tiltCmd = 0.0;              // commanded accelerometer force X (0 = level phone)
+let humanMode = false;          // 17b: byte 10 reverts the accel replacement (human tilt passthrough)
+let fnAccelOrig = null;         // 17c: NativeFunction to the ORIGINAL accel read (valid after the revert)
+let cachedAccelX = 0.0;         // 17c: the human's real tilt force X (read on the main thread each Update)
+let genDumped = false, genStatics = null, genTick = 1;  // 17i: the game's own generation law, read once
+let cachedWalkProbe = [-1, -1, -1]; // 17g PROBE: [plain-walk cells, turn-aware-walk cells] — read-only
+let cachedTrackAhead = [];      // 17c: up to 6 cells ahead as [pe_type, obstacles, level] triplets — what
+                                // the HUMAN can see on screen (the walk still breaks through turns)
 const TURN_FIRE_PROG = 0.40;        // fire a buffered turn once cell_progress crosses this (cell-center)
 const TURN_PENDING_MAX_AGE = 20;    // drop a buffered turn if it can't fire within N Update frames
 let giPtr = null;                  // GameController.GameInput* cached each Update (native delayed-turn write)
@@ -302,6 +314,7 @@ let cachedPathType = -1;            // nearest cell PE_Type
 let cachedNextPathType = -1;        // forward-neighbor cell PE_Type
 let cachedNextPathLevel = -1;       // forward-neighbor cell PE_Level (readable, 16q-verified)
 let cachedNext2PathLevel = -1;      // 2-ahead cell PE_Level — direction = sign(next2_path_level - path_level) (10/10)
+let cachedNext2PathType = -1;       // 2-ahead cell PE_Type (17f: feeds next2_narrow_lane — the jump->narrow mid-air tilt fix)
 let cachedNext2MustJump = false;    // 2-ahead cell obstacle ∈ MUST_JUMP (chained-obstacle fix, 2026-07-07)
 let cachedNext2MustSlide = false;   // 2-ahead cell obstacle ∈ MUST_SLIDE — a jump over +1 lands airborne into +2
 let cachedNext3MustJump = false;    // 3-ahead cell obstacle ∈ MUST_JUMP (17a hedge-jump fix — see the walk)
@@ -600,6 +613,11 @@ function installHooks() {
       try {
         const gi = gcInstance.add(OFF.GameInput).readPointer();
         giPtr = gi;   // cache the GameInput* for the action dispatch (native delayed-turn write)
+        // 17c HUMAN MODE: sample the human's REAL tilt (the original accel read, main thread) each
+        // Update -> streamed as accel_x. The analog lateral INTENT for demonstration analysis.
+        if (humanMode && fnAccelOrig !== null && !gi.isNull()) {
+          try { cachedAccelX = fnAccelOrig(gi, NULLPTR); } catch (_) {}
+        }
         if (nativeTurnCd > 0) nativeTurnCd--;   // tick down the anti-double-turn debounce
         // HOLD the turn intent across the junction window: re-write the game's ShouldTurn flag each Update
         // (60Hz) so a command that arrived a hair late still fires when the runner hits the corner. Clears
@@ -724,8 +742,41 @@ function installHooks() {
               qLo: !!fn.CanTurnLeft(pe, OPP, NULLPTR), qRo: !!fn.CanTurnRight(pe, OPP, NULLPTR),
             };
             // 1-cell lookahead: the forward neighbor in the player's heading.
+            // ---- 17h TURN-AWARE WALK (WAVE 15 PERCEPTION FIX) -------------------------------------
+            // The walk below used ONE fixed offset (FWD_NEIGHBOR[facing]) for EVERY step, so it read
+            // NULL the moment the track turned: 72% of device frames on/approaching a junction streamed
+            // next/next2_path_level = -1 and NOTHING could be seen past a corner. Device probe (`s.wp`)
+            // showed a heading-aware walk resolves the full 6-cell horizon on 100% of the frames where
+            // the old walk fell short (56.8% of all frames, mean +3.46 cells) — the game exposes the
+            // data, this hook simply was not following it. That blindness is the leading cause of the
+            // user-reported post-turn "random jump" (61-70% of every policy's wasted jumps sit within 3
+            // cells of a junction, ~7% lethal, while the HUMAN who can see the screen hedges 2.4x more
+            // and never dies from it).
+            // stepAhead() follows forward, else the single available turn, updating the heading — and
+            // REFUSES at a genuine T-junction (both directions available, 32.6% of junction frames),
+            // where the continuation depends on a decision not yet made and a confident-but-wrong
+            // lookahead is worse than none. `walkH` carries the heading across the whole walk.
+            // ⚠️ MUST MATCH THE POLICY: a model trained with sim `turn_aware_lookahead` FALSE (v78 and
+            // everything earlier) expects the OLD always-blind stream — set this false to deploy those.
+            const TURN_AWARE_LOOKAHEAD = true;
+            const LEFT_OF_DIR = { 1: 4, 2: 1, 3: 2, 4: 3 };
+            const RIGHT_OF_DIR = { 1: 2, 2: 3, 3: 4, 4: 1 };
+            let walkH = facing;
+            function stepAhead(cur) {
+              if (!cur || cur.isNull()) return NULL;
+              const f = cur.add(FWD_NEIGHBOR[walkH]).readPointer();
+              if (f && !f.isNull()) return f;
+              if (!TURN_AWARE_LOOKAHEAD) return NULL;
+              const l = cur.add(LEFT_NEIGHBOR[walkH]).readPointer();
+              const r = cur.add(RIGHT_NEIGHBOR[walkH]).readPointer();
+              const lOk = l && !l.isNull(), rOk = r && !r.isNull();
+              if (lOk && rOk) return NULL;              // T-junction: refuse to guess
+              if (lOk) { walkH = LEFT_OF_DIR[walkH]; return l; }
+              if (rOk) { walkH = RIGHT_OF_DIR[walkH]; return r; }
+              return NULL;
+            }
             const noff = FWD_NEIGHBOR[facing];
-            const nxt = noff ? pe.add(noff).readPointer() : NULL;
+            const nxt = stepAhead(pe);
             if (nxt && !nxt.isNull()) {
               cachedNextIsTurn = !!fn.IsTurn(nxt, NULLPTR);
               cachedNextCanLeft = neighborExists(nxt, LEFT_NEIGHBOR[facing]);
@@ -740,14 +791,16 @@ function installHooks() {
               // stops blindly jumping every cap. next_path_level = +1 cell, next2_path_level = +2 cells.
               cachedNextPathLevel = nxt.add(OFF.PE_Level).readS32();
               cachedNext2PathLevel = -1;
+              cachedNext2PathType = -1;
               cachedNext2MustJump = false;
               cachedNext2MustSlide = false;
               cachedNext3MustJump = false;
               cachedNext3MustSlide = false;
               try {
-                const nxt2 = noff ? nxt.add(noff).readPointer() : NULL;
+                const nxt2 = stepAhead(nxt);
                 if (nxt2 && !nxt2.isNull()) {
                   cachedNext2PathLevel = nxt2.add(OFF.PE_Level).readS32();
+                  cachedNext2PathType = nxt2.add(OFF.PE_Type).readS32();
                   // 2-ahead OBSTACLE (chained-obstacle fix): the cell a jump over +1 lands airborne into.
                   // Same PE-walk dropout as next2_path_level — through a junction nxt2 is NULL -> stays false.
                   const n2obs = nxt2.add(OFF.PE_Obstacles).readS32();
@@ -756,12 +809,116 @@ function installHooks() {
                   // 3-ahead OBSTACLE (17a, hedge-jump fix): a jump spans ~2.8 cells — 2-cell lookahead is
                   // SHORTER than one jump, so the policy hedges. One more neighbor step, same dropout
                   // (through a junction nxt3 is NULL -> stays false).
-                  const nxt3 = nxt2.add(noff).readPointer();
+                  const nxt3 = stepAhead(nxt2);
                   if (nxt3 && !nxt3.isNull()) {
                     const n3obs = nxt3.add(OFF.PE_Obstacles).readS32();
                     cachedNext3MustJump = MUST_JUMP_TYPES.indexOf(n3obs) !== -1;
                     cachedNext3MustSlide = MUST_SLIDE_TYPES.indexOf(n3obs) !== -1;
                   }
+                }
+              } catch (_) {}
+              // 17c TRACK-AHEAD (human-demonstration recording): the human SEES ~6 cells ahead on
+              // screen — record [pe_type, obstacles, level] for cells +1..+6 so their EARLY reactions
+              // can be attributed to the distant obstacle they saw. Same PE-walk (breaks through turns:
+              // the array just ends there — itself informative).
+              // ===== 17i: READ THE GAME'S OWN GENERATION LAW, ONCE (READ-ONLY) =====================
+              // USER: "isn't it things you can find in the source code instead of collecting data on
+              // the phone?" — yes. PathElement keeps its whole generation law in STATIC fields
+              // (dump.cs:283287). Exact values beat fitting distributions over thousands of captured
+              // cells, and it costs one frame. An IL2CPP object's first word is its Il2CppClass*, and
+              // static_fields sits at klass+0xB8 (64-bit Unity 2019+), so a live PathElement gets us
+              // there without any exported symbol (libil2cpp.so exports are stripped).
+              if (--genTick <= 0) {
+                genTick = 20;   // ~2s at 10Hz: sample the ramp, not just t=0
+                try {
+                  const kl = pe.readPointer();
+                  const sf = kl.add(0xB8).readPointer();
+                  if (!sf.isNull()) {
+                    genStatics = {
+                      minSpaceObstacles: sf.add(0x34).readS32(),   // sim: min_space_between_obstacles
+                      maxB2BObstacles:   sf.add(0x30).readS32(),   // sim: max_back_to_back_obstacles
+                      minSpaceTurns:     sf.add(0x2C).readS32(),   // sim: min_space_between_turns
+                      doubleObstaclePct: sf.add(0x38).readFloat(), // ** NOT MODELLED IN THE SIM **
+                      minSpacesBonus:    sf.add(0x18).readS32(),
+                      minSpacesCoinRuns: sf.add(0x3C).readS32(),
+                      maxCoinsPerRun:    sf.add(0x40).readS32(),
+                      allowTurns:        !!sf.add(0x07).readU8(),
+                      allowHoles:        !!sf.add(0x08).readU8(),
+                      allowNarrows:      !!sf.add(0x09).readU8(),
+                      allowFlame:        !!sf.add(0x0A).readU8(),
+                      allowTreeStumble:  !!sf.add(0x0B).readU8(),
+                      allowTreeJump:     !!sf.add(0x0C).readU8(),
+                      allowTreeSlide:    !!sf.add(0x0D).readU8(),
+                      allowTurnAfterObst:!!sf.add(0x0E).readU8(),
+                      allowSidePaths:    !!sf.add(0x0F).readU8(),
+                      fastTurnSection:   !!sf.add(0x48).readU8(),
+                    };
+                    if (!genDumped) { genDumped = true; log('GEN STATICS ' + JSON.stringify(genStatics)); }
+                  }
+                } catch (_) {}
+              }
+              // ===== 17g PROBE (READ-ONLY, streams a diagnostic only — no obs/behaviour change) =====
+              // WHY: 72% of device frames on/approaching a junction stream next/next2_path_level = -1,
+              // because this whole walk uses ONE fixed offset (FWD_NEIGHBOR[facing]) for EVERY step.
+              // Past a corner the track has turned, so that offset reads NULL and the lookahead dies —
+              // nobody can see past a junction, which is the leading explanation for the user-reported
+              // post-turn hedge-jump (61-70% of every policy's WASTED jumps, and the human's too).
+              // A heading-AWARE walk should see through: at each step follow forward, else left, else
+              // right, updating the running heading. This probe just measures how many cells each walk
+              // resolves so the fix can be justified BEFORE any obs change. `wp` = [plain, turnAware].
+              try {
+                const FWDN = { 1: 0x50, 2: 0x58, 3: 0x68, 4: 0x60 };
+                const LFTN = { 1: 0x60, 2: 0x50, 3: 0x58, 4: 0x68 };
+                const RGTN = { 1: 0x58, 2: 0x68, 3: 0x60, 4: 0x50 };
+                const LEFT_OF = { 1: 4, 2: 1, 3: 2, 4: 3 };
+                const RIGHT_OF = { 1: 2, 2: 3, 3: 4, 4: 1 };
+                let plain = 0, cur = pe;
+                for (let k = 0; k < 6; k++) {
+                  const nx = cur.add(noff).readPointer();
+                  if (!nx || nx.isNull()) break;
+                  cur = nx; plain++;
+                }
+                let aware = 0, c2 = pe, h = facing;
+                for (let k = 0; k < 6; k++) {
+                  let nx = c2.add(FWDN[h]).readPointer();
+                  let nh = h;
+                  if (!nx || nx.isNull()) {
+                    nx = c2.add(LFTN[h]).readPointer(); nh = LEFT_OF[h];
+                    if (!nx || nx.isNull()) { nx = c2.add(RGTN[h]).readPointer(); nh = RIGHT_OF[h]; }
+                  }
+                  if (!nx || nx.isNull()) break;
+                  c2 = nx; h = nh; aware++;
+                }
+                // SAFE variant: walk through a corner ONLY when the continuation is UNIQUE. At a real
+                // T-junction (both left and right exist -- 32.6% of junction frames) the runner's path
+                // depends on a decision not yet made, so guessing would feed the policy a confidently
+                // WRONG lookahead. Declining there keeps today's dropout for that case only.
+                let safe = 0, c3 = pe, h3 = facing;
+                for (let k = 0; k < 6; k++) {
+                  const f = c3.add(FWDN[h3]).readPointer();
+                  let nx = f, nh = h3;
+                  if (!f || f.isNull()) {
+                    const l = c3.add(LFTN[h3]).readPointer();
+                    const r = c3.add(RGTN[h3]).readPointer();
+                    const lOk = l && !l.isNull(), rOk = r && !r.isNull();
+                    if (lOk && rOk) break;                 // ambiguous -> refuse to guess
+                    if (lOk) { nx = l; nh = LEFT_OF[h3]; }
+                    else if (rOk) { nx = r; nh = RIGHT_OF[h3]; }
+                    else break;
+                  }
+                  if (!nx || nx.isNull()) break;
+                  c3 = nx; h3 = nh; safe++;
+                }
+                cachedWalkProbe = [plain, aware, safe];
+              } catch (_) { cachedWalkProbe = [-1, -1, -1]; }
+              cachedTrackAhead = [];
+              try {
+                let cur = nxt;
+                for (let k = 1; k <= 6 && cur && !cur.isNull(); k++) {
+                  cachedTrackAhead.push([cur.add(OFF.PE_Type).readS32(),
+                                         cur.add(OFF.PE_Obstacles).readS32(),
+                                         cur.add(OFF.PE_Level).readS32()]);
+                  cur = stepAhead(cur);
                 }
               } catch (_) {}
               if (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(cachedNextPathType) !== -1) cachedNextMustJump = true;
@@ -809,6 +966,7 @@ function installHooks() {
               cachedNextHasCoins = false; cachedNextCoinStart = 0; cachedNextCoinEnd = 0;
               cachedNextPathType = -1;
               cachedNextPathLevel = cachedNext2PathLevel = -1;
+              cachedNext2PathType = -1;
               cachedNarrowBandLo = cachedNarrowBandHi = null;
             }
             // Fire one well-timed jump for an upcoming crevasse (after lane/prog are known this frame).
@@ -824,6 +982,7 @@ function installHooks() {
             cachedIsLevelChange = cachedNextIsLevelChange = false;
             cachedPathType = cachedNextPathType = -1;
             cachedNextPathLevel = cachedNext2PathLevel = -1;
+            cachedNext2PathType = -1;
             cachedMustJump = cachedMustSlide = false; cachedObst = 0;
           }
         } catch (_) {}
@@ -1051,6 +1210,23 @@ function dispatchAction(a, gc, cp) {
         fn.OnPlayClicked(mmInstance, NULLPTR); dbg('play_from_menu');
       } else { dbg('play_from_menu_skip', updateTicks - mmSeenAtTick); }
       break;
+    case 10: // HUMAN MODE (17b, human-demonstration recording): revert the accelerometer replacement so
+      // the HUMAN's real phone tilt drives the lateral again (the replacement returns tiltCmd, which
+      // deadens a human hand). Swipes (jump/slide/turn) were never intercepted — they already work.
+      // One-way per injection (a fresh inject restores the policy tilt). State streaming is unaffected,
+      // so the recorder captures full 30 Hz state while the human plays.
+      if (!humanMode) {
+        humanMode = true;
+        try {
+          Interceptor.revert(base.add(RVA.GetAccelerometerForceX_Touch));
+          // 17c: after the revert the address holds the ORIGINAL code again — callable to sample the
+          // human's real tilt each Update (main thread) -> streamed as accel_x (the analog lateral intent).
+          fnAccelOrig = new NativeFunction(base.add(RVA.GetAccelerometerForceX_Touch),
+                                           'float', ['pointer', 'pointer']);
+          log('HUMAN MODE: accelerometer replacement reverted — native tilt restored');
+        } catch (e) { log('human mode revert failed: ' + e); }
+      }
+      break;
     default: log('unknown action ' + a);
   }
 }
@@ -1071,7 +1247,7 @@ function snapshot() {
     next_must_jump: false, next_must_slide: false, next_wide_gap: false, next_path_type: -1,
     next2_must_jump: false, next2_must_slide: false,   // 2-ahead obstacle lookahead (chained-obstacle fix)
     next3_must_jump: false, next3_must_slide: false,   // 3-ahead obstacle lookahead (17a hedge-jump fix)
-    lane: 0.0, cell_progress: 0.0, narrow_target_lane: null,
+    lane: 0.0, cell_progress: 0.0, narrow_target_lane: null, next2_narrow_lane: null,
     // --- Phase-0 PROBE fields (read-only; confirm semantics vs the failure modes) ---
     player_x_offset: 0.0, is_over_ground: false, ground_height: 0.0, ground_change_higher: false,
     stumble_kill_timer: 0.0, did_stumble: false, death_type: 0,
@@ -1081,6 +1257,7 @@ function snapshot() {
     dist_remainder: 0.0, stumble_count: 0, over_turn_area: false,
     // coins (disambiguate a tilt = coins vs narrow; model coin placement in the sim)
     has_coins: false, coin_loc_start: 0, coin_loc_end: 0, coin_in_air: false, coin_count: 0,
+    coin_count_total: 0,
     next_has_coins: false, next_coin_loc_start: 0, next_coin_loc_end: 0,
   };
   if (gcInstance === null || gcInstance.isNull()) return s;
@@ -1088,6 +1265,8 @@ function snapshot() {
   s.is_game_over = readBool(gcInstance, OFF.IsGameOver);
   // DistanceTraveled is the real run distance (no challenge multiplier) -> the reward signal.
   s.distance = readF32(gcInstance, OFF.DistanceTraveled);
+  s.t_last_coin = readF32(gcInstance, OFF.GC_TimeSinceLastCoin);  // 17d: ~0 right after a coin pickup —
+                                              // pickup events at 30Hz = why the human tilts (coin lines)
   // --- PROBE: GameController metric distance signals (pure reads) ---
   s.dist_to_turn = readF32(gcInstance, OFF.DistanceToTurnSection);          // metres to next turn stretch
   s.dist_to_turn_end = readF32(gcInstance, OFF.DistanceToTurnSectionEnd);
@@ -1132,6 +1311,13 @@ function snapshot() {
     s.time_since_fall = readF32(cp, 0xF4);       // timer accumulating toward the fatal Fall
     s.death_run_velocity = readF32(cp, 0xE8);    // velocity at the instant of death (forensics)
     s.world_y = readF32(cp, 0x80);               // CommonPlayer.PreviousLocation.y = arc height source
+    s.coin_count_total = readI32(cp, 0x148);     // 17f: CharacterPlayer.CoinCountTotal — the RUN coin count
+                                                 // (increments +1 per pickup, resets each run). The CLEAN
+                                                 // coin signal (t_last_coin @0x248 was monotonic/wrong).
+                                                 // Coin-seeking explains many human tilts (USER 2026-07-08).
+                                                 // (17e wrote this to s.coin_count via an UNDEFINED readS32
+                                                 // -> the snapshot threw every frame -> zero state stream;
+                                                 // s.coin_count stays the PER-CELL count below.)
     // --- PROBE: CharacterPlayer fields (pure reads) ---
     s.player_x_offset = readF32(cp, OFF.PlayerXOffset);   // the game's own lateral offset (candidate real lane)
     s.is_over_ground = readBool(cp, OFF.IsOverGround);
@@ -1184,6 +1370,47 @@ function snapshot() {
   s.next2_must_slide = cachedNext2MustSlide;  // 2-ahead obstacle ∈ MUST_SLIDE (jump over +1 lands airborne into +2)
   s.next3_must_jump = cachedNext3MustJump;    // 3-ahead obstacle ∈ MUST_JUMP (17a hedge-jump fix)
   s.next3_must_slide = cachedNext3MustSlide;  // 3-ahead obstacle ∈ MUST_SLIDE (horizon past the jump span)
+  // ===== 17k HORIZON SCALARS (obs 65->67) — THE 3-OBSTACLE-CHAIN FIX ==========================
+  // USER (2026-07-27, watching v104 then v107): "The struggle is really when you have 3 obstacles in
+  // a row. It really handles it poorly." MEASURED on the device captures: 3-obstacle chains kill
+  // 14.3% per encounter (both deaths on the THIRD obstacle) vs 0/45 for the human — and 100% of
+  // chains, device AND human, have that third obstacle OUTSIDE the +3 boolean horizon at the moment
+  // the first jump must be committed. At v210 a jump lasts 0.8 s and +3 cells is 0.86 s, so the
+  // policy could see barely one jump ahead while the human sees the whole screen.
+  // This is the ONE field of the wave-17 set that is NOT host-derivable: the stream carried
+  // obstacles only to +3. The 6-cell neighbour walk already exists (17c track_ahead) and is
+  // turn-aware (17h stepAhead), breaking at a true T-junction — which is exactly where the sim's
+  // _dist_next_hazard also stops, so device and sim are blind in the same place.
+  {
+    const HZ = 6;                              // obs.HORIZON_CELLS
+    let dj = HZ, ds = HZ;
+    if (s.must_jump) dj = 0;
+    if (s.must_slide) ds = 0;
+    for (let k = 0; k < cachedTrackAhead.length && k < HZ; k++) {
+      const t = cachedTrackAhead[k][0], o = cachedTrackAhead[k][1], d = k + 1;
+      const mj = MUST_JUMP_TYPES.indexOf(o) !== -1
+                 || (SMALL_NARROW_JUMP && SMALL_NARROW_TYPES.indexOf(t) !== -1);
+      if (dj === HZ && mj) dj = d;
+      if (ds === HZ && MUST_SLIDE_TYPES.indexOf(o) !== -1) ds = d;
+      if (dj < HZ && ds < HZ) break;
+    }
+    s.dist_next_must_jump = dj;
+    s.dist_next_must_slide = ds;
+  }
+  // 17c HUMAN-DEMONSTRATION fields (cheap for policy sessions too — the GI buffer doubles as a turn diag):
+  s.track_ahead = cachedTrackAhead;           // [pe_type, obstacles, level] for cells +1..+6 (walk-limited)
+  s.accel_x = cachedAccelX;                   // the human's REAL tilt force X (0.0 until human mode)
+  try {                                       // the game's OWN swipe-intent buffer = the human's raw inputs
+    if (giPtr !== null && !giPtr.isNull()) {  // (incl. swipes the game later refuses — inference can't see those)
+      s.gi_should_jump = giPtr.add(OFF.GI_ShouldJump).readU8() !== 0;
+      s.gi_t_should_jump = giPtr.add(OFF.GI_TimeSinceShouldJump).readFloat();
+      s.gi_should_turn_l = giPtr.add(OFF.GI_ShouldTurnLeft).readU8() !== 0;
+      s.gi_should_turn_r = giPtr.add(OFF.GI_ShouldTurnRight).readU8() !== 0;
+      s.gi_t_should_turn = giPtr.add(OFF.GI_TimeSinceShouldTurn).readFloat();
+      s.gi_t_last_turn = giPtr.add(OFF.GI_TimeSinceLastTurn).readFloat();
+      s.gi_just_turned = giPtr.add(OFF.GI_JustTurned).readU8() !== 0;
+    }
+  } catch (_) {}
   s.turn_write = lastTurnWrite;               // 16s: one-shot turn-byte verdict (null when none since last poll)
   lastTurnWrite = null;
   // narrow_target_lane: PERCEPTION for the NN — which lane (-1 L/0 C/+1 R, runner-relative) the upcoming
@@ -1191,6 +1418,13 @@ function snapshot() {
   // null if no narrow ahead. The NN reads it and decides the strafe (no hook action).
   s.narrow_target_lane = (cachedNextPathType >= 17 && cachedNextPathType <= 30)
     ? narrowStrafeDirFor(cachedNextPathType, cachedFacing) : null;
+  // next2_narrow_lane (17f, obs 62->63): the SAME map applied to the 2-ahead cell — the jump->narrow
+  // mid-air tilt fix. The human tilts DURING the jump toward the coming strip (sees it 3+ cells out);
+  // narrow_target_lane fires only 1 cell ahead -> the policy was structurally BLIND to the side at
+  // takeoff and strafed last-second (USER-observed 2026-07-09). Junction dropout automatic (nxt2 NULL
+  // through a turn -> cachedNext2PathType -1 -> null), mirroring next2_path_level.
+  s.next2_narrow_lane = (cachedNext2PathType >= 17 && cachedNext2PathType <= 30)
+    ? narrowStrafeDirFor(cachedNext2PathType, cachedFacing) : null;
   // REGION-SAMPLED band (game's own Region2D polygons, lane units + = right of travel): the true
   // safe lateral extent of the upcoming narrow. Candidate replacement for narrow_target_lane's
   // guessed map — validate against sweep outcomes, then feed the obs.
@@ -1208,6 +1442,8 @@ function snapshot() {
   s.lane = cachedLane;               // signed lateral offset from path center (+ = right of travel)
   s.cell_progress = cachedCellProg;  // longitudinal position within the nearest cell, 0..1
   s.over_turn_area = cachedOverTurnArea; // PROBE: game's real turn-window test (IsPointOverTurnArea2D)
+  s.wp = cachedWalkProbe;
+  if (genStatics) s.gen = genStatics;
   s._hv = HOOK_VERSION;
   s._dbg = cachedDbg;
   if (DIAG_TURN) s._turn = cachedTurnDiag;
@@ -1261,7 +1497,7 @@ function startActionServer() {
             for (let i = 0; i < bytes.length; i++) {
               let b = bytes[i];
               if (b >= 0x30 && b <= 0x39) b -= 0x30; // ASCII '0'..'9'
-              if (b >= 0 && b <= 9) pendingActions.push(b);
+              if (b >= 0 && b <= 10) pendingActions.push(b);  // 10 = HUMAN MODE (17b)
             }
           }
         } catch (e) { dbg('read_err', String(e)); }
