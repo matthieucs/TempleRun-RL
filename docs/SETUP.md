@@ -58,7 +58,7 @@ install unknown apps; choose "install anyway" past any scan warning).
 
 ## 5. Bring the device up
 ```
-python scripts/setup_device.py            # add --serial <id> if more than one device
+python scripts/device/setup_device.py            # add --serial <id> if more than one device
 ```
 This forwards `27042/9999/9998` and injects `frida/temple_run_hook.js`. Leave it running; wait for:
 ```
@@ -69,7 +69,7 @@ Open the game and **start a run** (the env's `reset()` restarts from a run or th
 ## 6. Validate (no training)
 ```
 pip install -e .
-python scripts/smoke_test.py
+python scripts/device/smoke_test.py
 ```
 A pass means the env is usable to train. Then see the README for `train.py` / `evaluate.py`.
 

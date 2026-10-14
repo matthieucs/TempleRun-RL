@@ -11,7 +11,7 @@ from enum import IntEnum
 
 # --- Network -----------------------------------------------------------------
 # The Frida gadget listens on these ports *inside the phone*; `adb forward` maps
-# them to 127.0.0.1 on the host (see scripts/setup_device.py).
+# them to 127.0.0.1 on the host (see scripts/device/setup_device.py).
 STATE_HOST = "127.0.0.1"
 STATE_PORT = 9999          # newline-delimited JSON state, broadcast ~10 Hz
 ACTION_PORT = 9998         # one action byte per command
@@ -125,7 +125,11 @@ INT_FIELDS = ("score", "path_type", "path_level", "facing")
 FLOAT_FIELDS = ("velocity", "distance")
 
 LOOKAHEAD_FIELDS = ("next_is_turn", "next_can_turn_left", "next_can_turn_right",
-                    "next_must_jump", "next_must_slide")
+                    "next_must_jump", "next_must_slide",
+                    # 2-cell obstacle lookahead (2026-07-07, chained-obstacle fix) — same junction dropout.
+                    "next2_must_jump", "next2_must_slide",
+                    # 3-cell obstacle lookahead (2026-07-08, hedge-jump fix) — horizon past the jump span.
+                    "next3_must_jump", "next3_must_slide")
 
 # Default values used when a field is missing from a (possibly truncated) JSON line.
 STATE_DEFAULTS = {f: False for f in BOOL_FIELDS}
@@ -134,6 +138,7 @@ STATE_DEFAULTS.update({"score": 0, "path_type": -1, "path_level": -1, "facing": 
                        "velocity": 0.0, "distance": 0.0,
                        "cell_progress": 0.0, "lane": 0.0,  # lane default = center (tilt-controlled model)
                        "next_wide_gap": False, "narrow_target_lane": None,
+                       "next2_narrow_lane": None,   # 2-ahead narrow side (WAVE 9 2026-07-09, obs 62->63)
                        "next_ground_change_higher": False,   # zone-crevasse-ahead flag (gates predicted_jump)
                        "next_path_level": -1, "next2_path_level": -1,  # upcoming altitude 2-cell lookahead (16q)
                        "stumble_kill_timer": 0.0, "stumble_count": 0})

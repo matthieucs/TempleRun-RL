@@ -19,7 +19,7 @@ def _conn_error(host: str, port: int, what: str) -> RuntimeError:
     return RuntimeError(
         f"Cannot reach {what} at {host}:{port}. "
         f"Make sure the phone is connected, the gadget is injected, and the ports are forwarded:\n"
-        f"  python scripts/setup_device.py\n"
+        f"  python scripts/device/setup_device.py\n"
         f"(which runs `adb forward tcp:{port} tcp:{port}` and injects frida/temple_run_hook.js)."
     )
 

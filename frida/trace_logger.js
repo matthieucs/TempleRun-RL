@@ -6,7 +6,7 @@
  * the 9999 state stream), but on EVERY tick it ALSO emits, via Frida send(), a rich
  * "trace frame" carrying the data needed to REPLAY a run deterministically through the
  * headless sim. See docs/SIM_CONTRACT.md §1 for the canonical JSONL schema; the host
- * recorder (scripts/record_traces.py) reads these send() frames and writes the JSONL.
+ * recorder (scripts/device/record_traces.py) reads these send() frames and writes the JSONL.
  *
  * Each trace frame (message {tr_frame: {...}}) contains:
  *   - state : the 22 canonical raw fields (constants.STATE_FIELDS) — identical to snapshot()
