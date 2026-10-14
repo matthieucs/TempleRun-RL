@@ -1,9 +1,9 @@
 # Sim/Fidelity Contract — shared interface for logger ↔ sim ↔ harness
 
 Three components are built against THIS contract so they integrate cleanly:
-A) `frida/trace_logger.js` + `scripts/record_traces.py` — record real phone play.
+A) `frida/trace_logger.js` + `scripts/device/record_traces.py` — record real phone play.
 B) `src/templerun_rl/sim_env.py` (`TempleRunSim-v0`) — the headless sim.
-C) `scripts/sim_fidelity.py` — replay traces through the sim, diff, report.
+C) `scripts/validate/sim_fidelity.py` — replay traces through the sim, diff, report.
 
 The canonical raw-state field names are in `src/templerun_rl/constants.py` (the 22 `STATE_FIELDS`).
 Use those EXACT names everywhere. The sim reuses `obs.py:state_to_obs` and the env reward (score-delta) verbatim.
@@ -56,8 +56,8 @@ set_state(raw_state:dict, hidden:dict)                # force sim to a given rea
 - **Procedural mode**: RNG-generate the track per `config` (for training). Must match the real generator's
   distributions (validated by the statistical test).
 
-## 3. FIDELITY harness (`scripts/sim_fidelity.py`)
-`python scripts/sim_fidelity.py <trace.jsonl>` →
+## 3. FIDELITY harness (`scripts/validate/sim_fidelity.py`)
+`python scripts/validate/sim_fidelity.py <trace.jsonl>` →
 - For each episode: build `TempleRunSim-v0(track_source=ep.track)`, `set_state(ep.first.state, ep.first.hidden)`,
   then `step()` with the episode's recorded action sequence; collect sim `raw_state()` each step.
 - Diff sim vs real per field, in TIERS:
@@ -67,5 +67,5 @@ set_state(raw_state:dict, hidden:dict)                # force sim to a given rea
 - Output a REPORT (human-readable, the user reads THIS not the code):
   per-field `%match` + first N divergence locations (episode, step, real vs sim) + an overall PASS/FAIL per tier.
 - Exit non-zero if any EXACT-tier field < 100% (so it works as a unit/CI test).
-Also stub `scripts/sim_gen_fidelity.py` (statistical: compare obstacle-spacing / turn-rate / piece-type
+Also stub `scripts/validate/sim_gen_fidelity.py` (statistical: compare obstacle-spacing / turn-rate / piece-type
 distributions between many real episodes and many procedural sim episodes via histograms + KS-test).

@@ -45,7 +45,7 @@ before the median is quoted.
 
 ## How they were trained
 
-- v120 = `scratchpad/train_v120_chaincoast.sh` + `scratchpad/_v120_cfg.json`
+- v120 = `configs/train_v120.sh` + `configs/v120_world.json`
   (= the v111 recipe + `chain_coast_kill_prob 0.5`).
 - v133 = v120's exact world + `--stepdown-jump-penalty 8.0 --stepdown-explore-prob 0.5`.
 
@@ -55,8 +55,8 @@ Both are 10M steps, `--num-envs 256 --n-steps 16`, ~6 min on a GTX 1080.
 ## Deploying
 
 ```
-python scripts/setup_device.py                      # forwards 27042 / 9999 / 9998, injects the gadget
-python scripts/capture_calib.py models/ppo_v133_sdonly_10002432_steps.zip --episodes 8 --turn-cooldown 0
+python scripts/device/setup_device.py                      # forwards 27042 / 9999 / 9998, injects the gadget
+python scripts/device/capture_calib.py models/ppo_v133_sdonly_10002432_steps.zip --episodes 8 --turn-cooldown 0
 ```
 
 Run exactly one injector and keep its host process alive — if it exits, the in-phone

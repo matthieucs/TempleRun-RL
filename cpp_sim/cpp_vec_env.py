@@ -4,7 +4,7 @@ Two entry points:
 
 ``CppTempleRunVecEnv``
     Drop-in replacement for ``templerun_rl.sim_env_torch.TorchTempleRunVecEnv``
-    as ``scripts/train_fast.py`` uses it: ``reset_tensor()``, ``step_tensor()``,
+    as ``scripts/train/train_fast.py`` uses it: ``reset_tensor()``, ``step_tensor()``,
     ``approach_turn_hint()``, ``observation_space``/``action_space``/``num_envs``,
     plus the SB3 ``VecEnv`` methods.  The simulation runs on the CPU; the tensors
     handed back live on whatever ``device`` you ask for.
@@ -12,7 +12,7 @@ Two entry points:
 ``CppSimGymAdapter``
     Single-env ``gymnasium.Env`` with the same contract as
     ``templerun_rl.sim_env.TempleRunSimEnv`` (``info["raw_state"]`` dicts,
-    ``terminated``/``truncated``), which is what ``scripts/sim_equivalence.py``
+    ``terminated``/``truncated``), which is what ``scripts/validate/sim_equivalence.py``
     drives for the deterministic tier.
 
 NOTE ON GLOBAL CONFIG: the shared library keeps ONE global config block.  Each
@@ -379,7 +379,7 @@ class _Base:
 
 # ======================================================================= vec ==
 class CppTempleRunVecEnv(_Base, _VecEnvBase):
-    """Batched CPU sim behind the interface ``scripts/train_fast.py`` uses."""
+    """Batched CPU sim behind the interface ``scripts/train/train_fast.py`` uses."""
 
     def __init__(self, num_envs: int, config: Optional[dict] = None,
                  device: str = "cpu", seed: int = 0,

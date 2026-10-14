@@ -73,7 +73,7 @@ OBS_EXTRA_FIELDS = ("cell_progress", "lane", "narrow_target_lane", "predicted_la
                     "predicted_turn",
                     # landing_hazard (WAVE 16, obs 64->65): WHERE MY JUMP ARC PUTS ME DOWN, and whether
                     # something is there. THE measured death mode: a behavioural audit of 44 device
-                    # deaths (scripts/death_behaviour.py) found 55% "COMPOUND TRAP" (airborne into the
+                    # deaths (scripts/analysis/death_behaviour.py) found 55% "COMPOUND TRAP" (airborne into the
                     # fatal hazard from a jump that WAS needed) + 5% "RANDOM-JUMP TRAP" = 60% of all
                     # deaths are "my arc landed me somewhere fatal", and the takeoff->fatal distance
                     # clusters at 2.0-3.5 cells = exactly the jump span. 84% of deaths had another
@@ -182,11 +182,11 @@ LANE_RIGHT_MIN = 1.85
 # dt/cell_len 0.1/60; one shared constant keeps sim-training and device-deploy consistent (<5% on the
 # device cell_len, absorbed by DR).
 # LANDING-ARC span (cells) — WHERE a jump taken now comes down. Used by landing_hazard.
-# ⚠️ 2026-07-27 CORRECTION. The wave-8 value (0.0204*v - 0.94, scratchpad/jump_arc.py) is WRONG: it
+# ⚠️ 2026-07-27 CORRECTION. The wave-8 value (0.0204*v - 0.94, experiments/jump_arc.py) is WRONG: it
 # over-states the span by 13-17% at running speed. Three independent measurements agree against it:
 #   * HUMAN captures at 30 Hz (the finest sampling available), continuous takeoff->touchdown over
 #     n=428 jumps: span = 0.0143*v - 0.11  (2.06 / 2.31 / 2.59 / 2.86 cells at v150/170/190/210)
-#   * the SIM under the SAME estimator (scratchpad/jump_span_compare.py): 0.0147*v + 0.06 -- i.e. the
+#   * the SIM under the SAME estimator (experiments/jump_span_compare.py): 0.0147*v + 0.06 -- i.e. the
 #     sim's own arc was faithful all along, and it was the fit that disagreed
 #   * direct AIRTIME: 0.800 s median on device AND human (n=1687), exactly the sim's jump_duration,
 #     which forces span = jump_duration*v/cell_length = v/75 = 0.0133*v with ~zero intercept
@@ -224,7 +224,7 @@ PJ_NONE = 1.0          # sentinel when no step-up crevasse is imminent (far from
 #   a FIXED learned threshold r means frac = 0.5 + r/span -> as speed (span) grows the SAME obs value
 #   sits CLOSER TO 0.5, i.e. the safety margin SHRINKS exactly when the arc is longest. Solving for the
 #   chosen takeoff: cp = LEDGE_CELLS_AHEAD - 0.5*span - r, which FALLS ~0.4 from v150 to v210.
-#   MEASURED ON DEVICE (scripts/takeoff_timing.py): the policy's takeoff cp falls 0.81 -> 0.49 over that
+#   MEASURED ON DEVICE (scripts/analysis/takeoff_timing.py): the policy's takeoff cp falls 0.81 -> 0.49 over that
 #   range (slope -0.0054) while the HUMAN RISES 0.53 -> 0.85 (slope +0.0054). The observation itself was
 #   teaching the inversion, so no amount of reward shaping or death modelling could fix it.
 # The flag emits the DIMENSIONLESS arc fraction instead, so one threshold = one physical margin at all
@@ -433,7 +433,7 @@ def state_to_obs(state: dict) -> np.ndarray:
     # clear, 0.5 = beyond the 3-cell lookahead (genuinely unknown -- do not fake certainty).
     _span = max(0.0, LAND_SPAN_A * v + LAND_SPAN_B)
     # ★ THE ARC IS LONGER OVER A DROP AND SHORTER OVER A RISE [DEVICE-MEASURED 2026-07-27,
-    # scratchpad/stepdown_arc.py; two independent pipelines]:
+    # experiments/stepdown_arc.py; two independent pipelines]:
     #                      flat            step-DOWN         step-UP
     #     HUMAN 30 Hz  0.767 s / 2 cells  0.900 (1.17x)/3   0.567 (0.74x)/2
     #     v92b  10 Hz  0.700 s / 2 cells  0.800 (1.14x)/3   0.500 (0.71x)/2

@@ -1,7 +1,7 @@
 """RNG DRAW-ORDER ASSERTION for the C++ port.
 
 WHY THIS EXISTS
-    ``scripts/sim_equivalence.py``'s deterministic tier INJECTS fixed tracks, so
+    ``scripts/validate/sim_equivalence.py``'s deterministic tier INJECTS fixed tracks, so
     procedural generation and every rng consumer are invisible to it.  The
     statistical tier only compares distributions.  Neither can catch a draw-order
     slip -- and a draw-order slip is exactly the failure mode the codebase's
@@ -27,6 +27,9 @@ WHAT IT DOES
 """
 from __future__ import annotations
 
+import sys as _sys, pathlib as _pl  # repo bootstrap: src/, cpp_sim/, scripts/*/, experiments/
+_R = next(p for p in _pl.Path(__file__).resolve().parents if (p / "pyproject.toml").exists())
+_sys.path[:0] = [str(_R / "src"), str(_R / "cpp_sim"), *(str(d) for d in sorted((_R / "scripts").iterdir()) if d.is_dir()), str(_R / "experiments")]
 import ctypes
 import math
 import os

@@ -7,16 +7,16 @@
 | the port | `cpp_sim/sim.cpp` (~1750 lines) + `cpp_sim/sim.h` |
 | build | `cpp_sim/build.sh` |
 | ctypes front-end | `cpp_sim/cpp_vec_env.py` — `CppTempleRunVecEnv`, `CppSimGymAdapter` |
-| third backend in the gate | `scripts/sim_equivalence.py --backend cpp` (additive; default stays `torch`) |
+| third backend in the gate | `scripts/validate/sim_equivalence.py --backend cpp` (additive; default stays `torch`) |
 | draw-order test | `cpp_sim/test_rng_order.py` |
 | benchmark | `cpp_sim/bench.py` |
 
 ## Results
 
-    python scripts/sim_equivalence.py --backend cpp --det-only
+    python scripts/validate/sim_equivalence.py --backend cpp --det-only
     -> DETERMINISTIC: 5616/5616 pass      (24 tracks x 18 variants x 13 policies)
 
-    python scripts/sim_equivalence.py --backend cpp --stats-only --stats-eps 120
+    python scripts/validate/sim_equivalence.py --backend cpp --stats-only --stats-eps 120
     -> all 8 bands PASS (median 1.021, mean 0.991, event rates 0.890-1.070)
 
     python cpp_sim/test_rng_order.py            # 60 eps, shared random stream
@@ -96,7 +96,7 @@ where none straddles one. That is a property of the harness, not of the port.
 
 ## Switching `train_fast.py` over (NOT done — the user's call)
 
-Two lines in `scripts/train_fast.py`:
+Two lines in `scripts/train/train_fast.py`:
 
 ```python
 # line 31

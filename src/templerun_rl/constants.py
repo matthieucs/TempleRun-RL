@@ -11,7 +11,7 @@ from enum import IntEnum
 
 # --- Network -----------------------------------------------------------------
 # The Frida gadget listens on these ports *inside the phone*; `adb forward` maps
-# them to 127.0.0.1 on the host (see scripts/setup_device.py).
+# them to 127.0.0.1 on the host (see scripts/device/setup_device.py).
 STATE_HOST = "127.0.0.1"
 STATE_PORT = 9999          # newline-delimited JSON state, broadcast ~10 Hz
 ACTION_PORT = 9998         # one action byte per command

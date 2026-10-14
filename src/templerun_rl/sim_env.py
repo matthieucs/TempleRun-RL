@@ -143,7 +143,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "jumpgap_chain_max": 1,             # RHYTHM CHAIN: repeat [clear,hole] up to n times (uniform 1..max);
                                         # 1 = single tail, no extra rng (v62-compatible). Device: high-ground
                                         # zones chain long-holes every ~4 cells (ab_v62_r1 ep0, ab_v60_r2 ep4)
-    # SLIDE->HOLE compound [WAVE 9 HUMAN-DEMO 2026-07-09, `scratchpad/slidegap_survival.py`]: a HOLE a couple
+    # SLIDE->HOLE compound [WAVE 9 HUMAN-DEMO 2026-07-09, `experiments/slidegap_survival.py`]: a HOLE a couple
     # clear cells after a SLIDE obstacle. The slide COMMITS ~0.73s (device-measured; sim slide_duration 0.7 +
     # jump-while-sliding already refused, sim_env.py _apply_action) — if the hole arrives inside the commit
     # the jump window is EATEN. Killed the HUMAN twice (ep2 @3604 / ep3 @686: sliding when the gap arrived,
@@ -206,7 +206,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # straight run-out too. >=2 -> the player turns, gets 1 clean cell, then the next may be an obstacle
     # (visible via the lookahead while on the clean cell).
     "min_clear_after_turn": 2,         # [CALIBRATED] cells after a junction kept obstacle-free
-    # TURN EXECUTION [DEVICE-MEASURED 2026-07-02, scripts/probe_turn_exec.py — one swipe at controlled
+    # TURN EXECUTION [DEVICE-MEASURED 2026-07-02, scripts/probes/probe_turn_exec.py — one swipe at controlled
     # cprog, 40 turns]: the turn executes INSTANTLY (facing flips next frame; the game's HandleDelayed-
     # Turning buffer is NOT used) and the runner LANDS at a lateral offset ~ (swipe_cprog - CENTER) *
     # SCALE. Swipe at cprog 0.44 -> land centered (lane ~0); swipe at the is_turn flash (0.15-0.23) ->
@@ -290,7 +290,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # refuses it 100% in-sim = unlearnable. Per-attempt draw at the measured rate. Default 0 = off.
     "post_land_gap_rejump_prob": 0.0,
     # ★★ HELD-JUMP -> LANDING RE-JUMP [WAVE 16, USER-reported ~50 times: "on the high-ground it jumps
-    # for no reason just after having jumped over a crevasse"]. MEASURED (scripts/detect_patterns.py):
+    # for no reason just after having jumped over a crevasse"]. MEASURED (scripts/analysis/detect_patterns.py):
     # the policy holds JUMP through its whole arc 10.7 times per km; the HUMAN does it ZERO times in
     # 41 km -- they tap. In the sim, a JUMP pressed while airborne is simply DISCARDED by the airborne
     # guard, so holding the button is completely FREE and nothing ever teaches the policy to release
@@ -425,7 +425,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "wide_gap_span_a": 0.0143,         # [DEVICE-MEASURED, human 30 Hz n=428] cells of span per velocity
     "wide_gap_span_b": -0.11,          # span intercept (cells)
     # SINGLE-HOLE AIRBORNE TRAP [WAVE 14, DEVICE-MEASURED 2026-07-25,
-    # scratchpad/hole_landing_forensic.py over 1065 hole crossings / 4 policies]. A 1-cell hole is NOT
+    # scripts/analysis/hole_landing_forensic.py over 1065 hole crossings / 4 policies]. A 1-cell hole is NOT
     # wide_gap, so the wide-gap landing model above skips it and the ONLY test is binary `_jump_t > 0`
     # -> an almost-expired arc crosses a hole FOR FREE in-sim. On device it does not, and this is
     # ~80% of the device hole deaths (v78 ep3 @612 + ep0 @12779, v74 ep3 @1722, r2 ep0/ep1/ep3): the
@@ -459,7 +459,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # (<=3 cells). The sim's floor is hard, so only the bespoke compound tails ever break it — and
     # they land at gap 3-4, one cell too generous for the airborne trap. 0 = off (hard floor).
     # ★ THE GAME REPEATS THE SAME OBSTACLE TYPE [DEVICE-MEASURED 2026-07-27 night,
-    # scratchpad/pair_coverage.py over human 41 km + v92b + v104]. The device's two MOST COMMON
+    # experiments/pair_coverage.py over human 41 km + v92b + v104]. The device's two MOST COMMON
     # consecutive-obstacle orderings are same-type slide pairs:
     #     TreeSlide -> TreeSlide  9.8% of all pairs      Flame -> Flame  8.1%
     # i.e. 17.9% of device pairs are a repeated slide, and 24.6% are a repeat of ANY type. An
@@ -484,7 +484,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "pair_anti_repeat_prob": 0.0,
     "pair_anti_repeat_types": (1, 4),   # Hole, TreeJump
     # ★★★ DRAW-THEN-SUBSTITUTE OBSTACLE TYPES [READ FROM THE GAME 2026-07-28,
-    # il2cpp_work/output/dump.cs; spec docs/superpowers/specs/2026-07-28-obstacle-type-sampler-rewrite.md].
+    # il2cpp_work/output/dump.cs; spec docs/design/2026-07-28-obstacle-type-sampler-rewrite.md].
     # The real generator is CONSTRAINT-FILTERED REJECTION SAMPLING, not an i.i.d. weight draw:
     #     PathElement.ACertainTypeCheck(PathType currentType, PathType parentType)  @283485, 84 B
     #         -- an explicit PAIRWISE admissibility rule, and only ~21 instructions, i.e. ONE special
@@ -525,7 +525,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # by default (no-op -> equivalence green); enabled in the device-true / training config.
     "crevasse_apex_all": False,
     # ★ STEP-DOWN TO LOW GROUND IS NOT A MUST-JUMP [DEVICE-MEASURED 2026-07-27, human 41 km + the
-    # v92b/v102 device sets, scratchpad/stepdown_forensic.py]. USER, watching v102: "The problem is
+    # v92b/v102 device sets, scripts/analysis/stepdown_forensic.py]. USER, watching v102: "The problem is
     # also the mid to low transition when you have an obstacle right ahead. The policy learnt to jump
     # when it goes from the mid to the low ground. It does not need to. When there is an obstacle,
     # either you jump early or you don't jump, but the policy can't do that right now."
@@ -677,7 +677,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     # 22-32%) AND made the 2-cell crevasse too harsh — a real 0.8s jump spans ~2.8 cells at top speed.
     "jump_duration": 0.8,             # [MEASURED] airtime — IsJumping true ~0.80s
     # ★ AIRTIME SCALES WITH THE GROUND-HEIGHT CHANGE THE ARC CROSSES [DEVICE-MEASURED 2026-07-27,
-    # scratchpad/stepdown_arc.py]. Landing on LOWER ground means falling further, so the runner stays
+    # experiments/stepdown_arc.py]. Landing on LOWER ground means falling further, so the runner stays
     # airborne LONGER and the arc spans 3 cells instead of 2; landing on RAISED ground cuts the fall
     # short. Two INDEPENDENT capture pipelines agree on direction AND magnitude:
     #                        flat            step-DOWN            step-UP
@@ -734,7 +734,7 @@ DEFAULT_SIM_CONFIG: dict[str, Any] = {
     "slide_duration": 0.7,            # [MEASURED] SlideDuration ~0.70s
     "strafe_duration": 0.25,          # [INFERRED] strafe lane-shift dur@0x12C
     # [DEVICE-MEASURED 2026-06-26] a strafe is a GRADUAL lateral glide, not an instant lane jump: one
-    # [DEVICE-CALIBRATED 2026-07-01, controlled strafe probe scripts/probe_strafe.py, 8 runs] ONE strafe
+    # [DEVICE-CALIBRATED 2026-07-01, controlled strafe probe scripts/probes/probe_strafe.py, 8 runs] ONE strafe
     # byte drives the lane a LONG way and HOLDS: from ~-2.5, StrafeLeft glided to the -7 EDGE over ~6
     # frames; StrafeRight to ~+4.8 over ~5 frames; then held (no recenter). => a strafe reaches ~7 units
     # (`strafe_reach`, clamped to the edge), NOT one 3.7 lane-step, over ~0.6 s. The OLD model (3.7 over
@@ -1411,7 +1411,7 @@ class TempleRunSimEnv(gym.Env):
             self._pending_gap_level = int(self._zone_level)
             ptype = 35
             if _p1 > 0.0 and self._rng.random() < _p1:
-                # ONE-cell crevasse. DEVICE-MEASURED OUTCOME (scratchpad/crevasse_cells_outcome.py,
+                # ONE-cell crevasse. DEVICE-MEASURED OUTCOME (experiments/crevasse_cells_outcome.py,
                 # n=827 structures): the 1-cell form is ~6x SAFER than the 2-cell one — 1.1% deaths
                 # and ZERO grazes vs 7.0% / 33.7%. So it is a plain short gap: airborne-at-entry is
                 # the whole requirement, with NO raised-ledge apex check and no cap graze. Modelled
@@ -1449,7 +1449,7 @@ class TempleRunSimEnv(gym.Env):
             obstacle = self._sample_obstacle_type_paired()
             self._cells_since_obstacle = 0
         # ★ THE DEVICE CONCENTRATES POST-TURN HAZARDS AT +3, NOT +1 [DEVICE-MEASURED 2026-07-27 night,
-        # scratchpad/postturn_reconcile.py over 1446 junctions, hazard = must-jump OR must-slide,
+        # experiments/postturn_reconcile.py over 1446 junctions, hazard = must-jump OR must-slide,
         # any-frame cell attribution]:
         #     offset   +1     +2     +3     +4     +5
         #     device  3.2%   9.5%  36.6%  18.9%   9.4%

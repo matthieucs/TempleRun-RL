@@ -2,9 +2,25 @@
 
 Goal: an RL policy that reaches **10,000 m** on real **Temple Run** (`com.imangi.templerun` v1.39.0),
 trained in a headless sim, deployed on a physical Android phone via **Frida** (read game state + inject
-actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/CLAUDE_FULL_HISTORY.md`.
+actions over TCP — no screen-scraping, no synthetic input). Full history: `docs/archive/CLAUDE_FULL_HISTORY.md`.
 
-## ⚡ CURRENT STATE (2026-07-31) — START HERE
+## ⚡ CURRENT STATE (2026-10-14) — START HERE
+
+- **NEW DEVICE RECORD 16,782 m (v120 `models/ppo_v120_obs67_base.zip`, hook clean-17k, phone e4de25a1 =
+  Redmi Note 12 `topaz`).** 20-attempt record session, one run per scrcpy recording, keep-best:
+  2252..9668 m then 16,782 (10 km crossed at frame 3102, ~5 min). Died Burnt-type 7 on a flame tower at v210.
+  README GIF = `assets/demo_10k.gif` (overlay video around the 10 km banner).
+- **REPO REORGANIZED (branch `repo-cleanup`):** `scratchpad/` (research) -> `experiments/`;
+  `scripts/` -> `scripts/{device,train,validate,analysis,probes}/`; recipes + world -> `configs/`
+  (`_v120_cfg.json` -> `configs/v120_world.json`); AGENTS.md / OVERNIGHT_LOG / CLAUDE_FULL_HISTORY ->
+  `docs/archive/`. Paths below were rewritten accordingly. Scripts find siblings via a 3-line
+  "repo bootstrap" `sys.path` header. `scratchpad/` is now local-only (gitignored).
+- **⚠️ PRE-EXISTING (found during cleanup, NOT caused by it): the C++/Python equivalence gate is RED at
+  4dfe4db** — `sim_equivalence --backend cpp --det-only` 0/7488, `test_rng_order` 0/60, all on
+  `dist_next_must_jump` (Python streams it, C++ returns 0). Fix before trusting a new C++-trained arm.
+- **USB on e4de25a1 drops (cable/port, not vibration).** Temple Run's VIBRATE appop set to `ignore`.
+
+## ⚡ CURRENT STATE (2026-07-31)
 
 - **★★★★★ THE DEVICE MEDIANS IN THIS FILE ARE RIGHT-CENSORED, AND IT HID A NEW ALL-TIME RECORD.
   `capture_calib` ends an episode at 4000 LOGGED FRAMES. Re-audited every w18/w19 capture
@@ -51,8 +67,8 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **⚠️ IT READ PARITY IN SIM (+1.2%, t=0.73). That verdict was WORTHLESS because the sim
     reproduces this killer at 2.2% vs the device's 24.3%. ⇒ WHEN THE SIM DOES NOT REPRODUCE THE
     DEATH MODE AN ARM TARGETS, ITS SIM VERDICT CARRIES NO INFORMATION — go to the phone.**
-  - **RECIPE: v111's exact recipe + `chain_coast_kill_prob` 0.5 (`scratchpad/_v120_cfg.json`,
-    `scratchpad/train_v120_chaincoast.sh`). v111 stays the obs65 fallback.**
+  - **RECIPE: v111's exact recipe + `chain_coast_kill_prob` 0.5 (`configs/v120_world.json`,
+    `configs/train_v120.sh`). v111 stays the obs65 fallback.**
   - **⚠️ CAPTURE HYGIENE, cost me a false "2/8": never leave two `capture_calib` processes on one
     stream -- they double-log the SAME physical runs (batch B eps1-3 were identical to batch A
     eps5-7 to the decimal). And `death_type` persists on the trailing frames, so aggregate on
@@ -68,7 +84,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **⚠️ DO NOT chase the apparent density gap (198.7 vs 157.6 hazards/1k cells) without settling the
     basis: the ONSET measure on the SAME captures says exposure MATCHES (must_jump 31.2/1k frames sim
     vs 30.4 device). Device `must_jump` is WINDOW-PRESENTED, so a per-cell census can undercount it.**
-  - **v125 = v120's recipe + the flattened world (`scratchpad/_v125_cfg.json`: compounds x0.5,
+  - **v125 = v120's recipe + the flattened world (`experiments/_v125_cfg.json`: compounds x0.5,
     tight_pair 0, pair_same_type 0 -> chains 22.68). Strictly more device-like at NO sim cost
     (median 1280 vs 1238) and the best training curve of any hardened arm (ep_dist 1707 @10M).
     DEVICE-TESTED (USER: "the phone is fine") -- n=10, median 4290, max 11740, >=8km 1/10,
@@ -249,10 +265,10 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **`obstacle` WAS NEVER EXPOSED in the C++ raw state, so every device forensic silently fell back
     to window-presented must_jump/must_slide flags and produced a DIFFERENT chain segmentation than
     the device (a 20x disagreement in tight-chain lethality that was pure basis mismatch). Now
-    exposed; RAW_LEN 37 -> 42, aligned both sides. NEW `scratchpad/cpp_rollout_dump.py` dumps C++
+    exposed; RAW_LEN 37 -> 42, aligned both sides. NEW `experiments/cpp_rollout_dump.py` dumps C++
     rollouts in DEVICE CAPTURE FORMAT, so every forensic runs on 192 episodes in ~2 min instead of
     24 episodes in 25 min via the CPU ref.**
-  - **⚠️ `scratchpad/sim_patterns.py` merges `DEVICE_TRUE_CFG` UNDER the passed config, so it scores a
+  - **⚠️ `experiments/sim_patterns.py` merges `DEVICE_TRUE_CFG` UNDER the passed config, so it scores a
     DIFFERENT WORLD than the trainer. Do not compare its output to a C++ rollout.**
 
 - **★★ v120 = tight-chain coast death model (`chain_coast_kill_prob`, NEW, default off). Device
@@ -306,7 +322,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **⚠️ Do not compare CPU-ref rollouts to C++ ones without checking the config: `sim_patterns.py`
     merges `DEVICE_TRUE_CFG` UNDER the passed config, so it scores a DIFFERENT world (it read
     tight-chain lethality 36.4% at n=22 where the C++ trainer reads 2.2% at n=180).**
-  - **⚠️ DETECTOR BUG FIXED EN ROUTE: `scripts/detect_patterns.py` computed BLIND_LANDING_JUMP with
+  - **⚠️ DETECTOR BUG FIXED EN ROUTE: `scripts/analysis/detect_patterns.py` computed BLIND_LANDING_JUMP with
     the RETIRED span fit `0.0204*v - 0.94`, over-stating the arc 13-17% and flagging the WRONG
     landing cell. Corrected to the shipped law (+ height scaling), the pattern goes from "11 events,
     45% lethal" to "38 events, 11% lethal" against the HUMAN's 28 / 18% ⇒ v111 is at PARITY-OR-BETTER
@@ -326,7 +342,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     TreeSlide, which rides a STRAIGHT cell with the obstacle in a field the C++ raw state does not
     expose — the same trap the narrows census hit in July. On the ENCODING-INDEPENDENT basis
     (`must_jump`/`must_slide` onsets, booleans defined identically both sides,
-    `scratchpad/slide_exposure.py`): must_jump 31.2/1k sim vs 30.4 device, must_slide 11.4 vs 12.3,
+    `experiments/slide_exposure.py`): must_jump 31.2/1k sim vs 30.4 device, must_slide 11.4 vs 12.3,
     slide share 26.8% vs 28.8%. HAZARD EXPOSURE MATCHES TO WITHIN 7%.**
   - **⇒ THREE headline claims in one session, all dissolved. THE RULE, restated: compute BOTH sides
     with the SAME code AND the same attribution rule AND on an encoding-independent quantity before
@@ -383,12 +399,12 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     sank slide_jump_penalty. The held-jump and landing_hazard wins both priced a DISCRETIONARY action.
     ⇒ When the action is forced and only its TIMING is free, a flat per-event penalty cannot tell the
     good instance from the bad one. See [[weak-signal-needs-amplifier]] (boundary condition added).**
-  - **KEEP: the obs66 column (learned, free, no erosion), `scripts/cue_response.py`, the guard fix,
+  - **KEEP: the obs66 column (learned, free, no erosion), `scripts/analysis/cue_response.py`, the guard fix,
     the death-type relabelling. DO NOT deploy v117 or v118.**
 
 
 - **★★★★★ THE SIM IS 2.5-7.7x TOO LETHAL PER HAZARD ENCOUNTER, AND THAT IS THE AXIS SIX FAILED ARMS
-  NEVER TOUCHED. `scratchpad/per_encounter.py`, identical encounter definition on both sides
+  NEVER TOUCHED. `experiments/per_encounter.py`, identical encounter definition on both sides
   (a TRANSITION onto a hazard kind), v111 in its own world vs 176 device captures:**
   ```
   hazard      SIM encounters/deaths/rate      DEVICE encounters/deaths/rate     sim is
@@ -419,7 +435,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     trained policy was ever affected. The damage is purely diagnostic — and total: the sim reported
     0.0% Ledge deaths against the device's 36%.**
   - **DEATH MIX after the fix, matched basis (sim started at distance 0 like the device, both
-    bucketed by distance at death, `scratchpad/deathmix_basis.py`):**
+    bucketed by distance at death, `experiments/deathmix_basis.py`):**
     ```
     band        source   Fall    Tree   Slide   Ledge   Burnt
     0-1000      SIM      59.7%   15.1%   7.5%    3.4%   14.3%
@@ -434,7 +450,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 - **★★★ v117 = `slide_landing_hazard` (obs 65->66). THE CUE IS LEARNED — AND IT DOES NOT MOVE THE
   OUTCOME. v111 REMAINS CHAMPION.**
   - **THE CUE, measured with the SHIPPED encoder over 26,854 device takeoffs
-    (`scratchpad/slh_device_check.py`): cue=1.0 -> 8 slide deaths in 51 takeoffs = 15.69%;
+    (`experiments/slh_device_check.py`): cue=1.0 -> 8 slide deaths in 51 takeoffs = 15.69%;
     cue=0.0 -> 80 in 26,803 = 0.30%. A 52.6x LIFT, and takeoff cp is 0.50 when it fires vs 0.28
     when it does not — the policy takes off LATE exactly when its arc will end on a slide hazard.
     89% of the victims DID press slide and were still airborne; the takeoffs are 100% forced by a
@@ -452,14 +468,14 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **⚠️ MY OWN SPEC SAID THE CEILING WAS ~33%. IT IS ~3%: over 1077 pooled device deaths the cue
     flags 32 (3.0%) one jump ahead. The 33% came from a SIM rollout whose flame-death share (33%) is
     nothing like the device's (7.1%) — i.e. it was an artifact of the very lethality bug above.**
-  - **⚠️ EXPOSURE WAS NEVER THE GAP, measured BEFORE spending steps (`scratchpad/slh_exposure.py`):
+  - **⚠️ EXPOSURE WAS NEVER THE GAP, measured BEFORE spending steps (`experiments/slh_exposure.py`):
     the sim already fires this cue on 1.12% of takeoffs vs the device's 0.19% = 6x OVER-served. A
     jumpslide drill moved it 1.12% -> 1.06% = INERT, and was cancelled. This also explains v116's
     null: it drilled a situation already over-served. ⇒ ADDING PRACTICE FOR AN OVER-SERVED SITUATION
     IS NOT A LEVER; the user's "specific episodes" framing needs the exposure CHECKED first.**
   - **KEEP the obs66 column (learned, free, no erosion) but do NOT crown v117.
     Artifacts: `runs/ppo_v111_obs66_slh.zip` (surgery base, 0/400), `runs/ppo_v117_slh_*.zip`.**
-  - **NEW TOOL `scripts/cue_response.py` — flips ONE obs column on states the policy actually visits
+  - **NEW TOOL `scripts/analysis/cue_response.py` — flips ONE obs column on states the policy actually visits
     and reports dP(action). This is the kill criterion the horizon obs never had. Validated against
     a known value (v111 landing_hazard reads -0.01335 vs -0.01163 on record). Reference scale:
     v111 landing_hazard -0.01163 | eroded -0.0005 | horizon obs (dead) -0.00005; bar |dP| >= 0.0005.
@@ -493,7 +509,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **This is why the 256x16 geometry is back: 1024x4 was only ever a workaround for the launch-bound
     torch sim, and it COST US (v101 was 25x worse on held-jump). C++ makes the CORRECT geometry the
     fastest one. `--num-envs 256 --n-steps 16`.**
-  - **GATES: `python scripts/sim_equivalence.py --backend cpp --det-only` → 6552/6552, plus
+  - **GATES: `python scripts/validate/sim_equivalence.py --backend cpp --det-only` → 6552/6552, plus
     `python cpp_sim/test_rng_order.py` → 60/60 lockstep (the deterministic tier injects fixed tracks,
     so it CANNOT see the generator — the RNG test is what covers generation).**
   - **⚠️ THE GATE EARNED ITS KEEP: it caught that landing_hazard_penalty was wired into reward.py and
@@ -509,7 +525,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     (junction cells carry no obstacles, so the excess was diluting hazard density).**
   - **OBSTACLE MIX, in STRUCTURE units (a 2-cell crevasse/HoleLong is ONE obstacle): crevasse was
     2.12x OVER (34.2% vs 16.1%), flame 0.46x UNDER (8.5% vs 18.7%). Recalibrated via
-    `scratchpad/calib_mix.py` (iterative: weights are NOT the emitted share). This also corrects the
+    `experiments/calib_mix.py` (iterative: weights are NOT the emitted share). This also corrects the
     2026-07-27 claim that the mix was "within 3 points" — that check used per-CELL counts on
     non-crevasse obstacles and missed both the crevasse share and the density.**
   - **THE GAME REPEATS THE SAME OBSTACLE TYPE, and only for SLIDES: device's two most common
@@ -573,20 +589,20 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     (v116) did not recover it. USER's framing is the right one and is now tested: a faithful base
     AND specific drills — but the drills as built are not the lever.**
 - **★★★★★ THE C++ EVALUATOR CUT PAIRED VARIANCE 11x — THE MEASUREMENT PROBLEM IS SOLVED.
-  `scripts/eval_cpp.py` scores both policies in the C++ trainer with MATCHED env seeds; paired s.d.
+  `scripts/validate/eval_cpp.py` scores both policies in the C++ trainer with MATCHED env seeds; paired s.d.
   falls from 1237 m (torch evaluator) to 108 m. At 8 seeds that resolves a 2.5% effect instead of
   ~30%, in ~3 minutes. This is the common-random-numbers win that the abandoned track-injection
   attempt was chasing — it came for free from evaluating where the policies train.
-  ⇒ JUDGE EVERY ARM WITH `scripts/eval_paired.py` (which now calls eval_cpp), 8+ seeds.**
+  ⇒ JUDGE EVERY ARM WITH `scripts/validate/eval_paired.py` (which now calls eval_cpp), 8+ seeds.**
   - **CHECKPOINT RULE, fixed in advance to stop post-hoc cherry-picking: take the checkpoint with
     the best training `ep_dist`, ties to the LATER one. v113/v114/v115 all peaked at 8M and dipped
     at 10M; v116 rose monotonically so its 10M final is the pick.**
-- **★★★★★ EVERY SIM VERDICT WAS MEASURED IN THE WRONG SIMULATOR. `scripts/eval_ckpt_torch.py`
+- **★★★★★ EVERY SIM VERDICT WAS MEASURED IN THE WRONG SIMULATOR. `scripts/validate/eval_ckpt_torch.py`
   evaluates in `TorchTempleRunVecEnv` — the RETIRED torch sim, which is NOT gated and silently
   lacks anything added to the C++/CPU sims since. It has ZERO implementation of
   `airborne_slide_kill_prob`, so v115 (trained WITH that death rule) was judged in a world WITHOUT
   it. v113, v114 and v115 were all called on measurements taken somewhere the policies never
-  trained. ⇒ USE `scripts/eval_cpp.py` (NEW): same output format, runs the C++ TRAINER.**
+  trained. ⇒ USE `scripts/validate/eval_cpp.py` (NEW): same output format, runs the C++ TRAINER.**
   - **⚠️ AND THE TRAINER'S CONFIG IS NOT JUST `--sim-config`. train_fast.py builds a BASE cfg first
     — `domain_rand`, `turn_approach_buffer`, `turn_linger_frames`, `curriculum_max_start_dist` —
     then merges the JSON on top. An evaluator that passes only the JSON runs a DIFFERENT WORLD:
@@ -599,7 +615,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   across five eval seeds = a spread of 49% OF ITS OWN MEAN. So two EQUAL policies can read anywhere
   from -37% to +68% on one seed, and they did: v114 read +29.6% on seed 0 and -28.9% on seed 1.
   Over five seeds the honest answer was +2.7%, t=0.14 — INDISTINGUISHABLE.**
-  - **⇒ USE `scripts/eval_paired.py` (NEW). Statistic = MEAN OF PER-SEED MEDIANS with a s.e. across
+  - **⇒ USE `scripts/validate/eval_paired.py` (NEW). Statistic = MEAN OF PER-SEED MEDIANS with a s.e. across
     seeds, plus a paired t against the baseline. Paired s.d. is ~1240 m on a ~3000 m mean, so
     seeds ~= (1240 / (0.5 * effect * 3000))^2:  50% -> 3 seeds (~6 min), 30% -> 8 (~16 min),
     20% -> 17 (~35 min), 10% -> 68 (~2.3 h). 35 min to resolve 20% is nothing next to a 10M arm.**
@@ -615,7 +631,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     different action sequence shifts the draws and the worlds diverge. Worth another attempt: it
     would cut evaluation cost ~10x.**
 - **★★★ v114 = THE OBSTACLE MIX IS NOW DEVICE-CALIBRATED (keep the WORLD, the POLICY is parity).
-  `scratchpad/_v114_cfg.json`, weights {1:0.2872, 2:0.1349, 3:0.1009, 4:0.0484, 5:0.1681, 6:0.2605},
+  `experiments/_v114_cfg.json`, weights {1:0.2872, 2:0.1349, 3:0.1009, 4:0.0484, 5:0.1681, 6:0.2605},
   fitted as weight *= device/emitted from REAL ROLLOUTS (weights are NOT the emitted share — holes
   also arrive via wide-gap/compound paths that bypass the type draw).**
   - **FIDELITY, measured on the device's own basis (structure units, types 1-6), TOTAL ABSOLUTE
@@ -645,7 +661,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 - **⚠️ `sim_probe_cells` (new C++ export) CANNOT measure anything DISTANCE-GATED: `distance_real`
   only advances when the sim is STEPPED, so a bare generator loop always sees 0 and never reaches
   the late ramp (slides stay off, mix reads Hole-heavy). Use a POLICY ROLLOUT
-  (`scratchpad/sim_patterns.py`) for any mix/pair calibration.**
+  (`experiments/sim_patterns.py`) for any mix/pair calibration.**
 - **⚠️⚠️⚠️ THE PAIR-STATISTIC TARGETS IN THIS FILE ARE ON AN UNSTATED BASIS AND MUST NOT BE USED
   UNTIL IT IS PINNED DOWN. Re-measured 2026-07-28 on a STRICTLY MATCHED basis (obstacle types 1-6,
   STRUCTURE units, ALL consecutive pairs, 15 device captures / 3316 structures / 3315 pairs) —
@@ -737,7 +753,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     0.05 (v104 sim median 3464 @0.04 / 3764 @0.08 vs its device 3249; 0.12 cliffs to 1358).**
 
 - **⚠️⚠️ TWO MEASUREMENT BUGS FOUND TODAY — both had already corrupted conclusions:**
-  - **THE EVAL HARNESS WAS CENSORED. `scratchpad/hole_landing_sim.py` passed `max_episode_steps`
+  - **THE EVAL HARNESS WAS CENSORED. `scripts/analysis/hole_landing_sim.py` passed `max_episode_steps`
     through `gym.make()`, which the registered env IGNORES → every distance capped at ~2607 m, so
     every world looked identical for hours and difficulty comparisons were meaningless. Fixed +
     asserted. ⇒ If two configs give the SAME median to the metre, suspect the harness.**
@@ -746,7 +762,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     frame wins, against WINDOW-PRESENTED device flags. Re-measured any-frame on the SAME captures:
     5.3-9.5%. Its "+3 = 21.7%" vs my 36.6% was simply MUST_SLIDE being excluded. Both capture eras
     agree at every definition level ⇒ methodology, not a change in the game.
-    `scratchpad/postturn_reconcile.py` runs all four definitions side by side.**
+    `experiments/postturn_reconcile.py` runs all four definitions side by side.**
 
 - **★★ THE TWO REMAINING BOTTLENECKS (USER-identified, both measured):**
   1. **OBSTACLE CASCADES — "the only thing that really prevents it going far". 5 of v111's ~6 device
@@ -765,7 +781,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
      landing_hazard_penalty, which just worked), or make the landing prediction follow the turn the
      way the hook's turn-aware walk already does for the level fields.**
 
-- **NEW TRAINER KNOBS (all default-off, all in `scripts/train_fast.py`): `--backend torch|cpp`,
+- **NEW TRAINER KNOBS (all default-off, all in `scripts/train/train_fast.py`): `--backend torch|cpp`,
   `--landing-hazard-penalty`, `--stepdown-bonus-gate`, `--ent-coef-final` + `--ent-schedule`,
   `--gae-lambda-final` + `--gae-schedule`, `--cascade-explore-prob` + `--cascade-explore-anneal-frac`.**
   - **`--gae-lambda-final` exists because n_steps is the WRONG dial for a growing credit horizon:
@@ -773,7 +789,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     num_envs*n_steps = updates per DATA COLLECTION (the invariant that gave 1036 vs 3262). Ramp
     lambda instead — episode length triples during a run (ep_len ~260 → 800+).**
 
-- **NEW TOOLS: `scratchpad/chain3_forensic.py` (3-obstacle chains, STRUCTURE units),
+- **NEW TOOLS: `scripts/analysis/chain3_forensic.py` (3-obstacle chains, STRUCTURE units),
   `pair_coverage.py` (what follows what, device vs sim), `calib_mix.py`, `calib_pairs.py`,
   `stepdown_forensic.py`, `stepdown_arc.py`, `stepdown_sim.py`, `postturn_reconcile.py`.**
 
@@ -822,7 +838,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     hedging means TAKING OFF EARLY = the user's mid->high complaint. (Caveat: 10 Hz sampling resolves
     jitter only to 100 ms; sub-frame jitter would not show — but is far less harmful.)**
   - **v98 = v96 world + `jump_exec_lat_jitter` 1 -> 0. JUDGE ON: takeoff cp must RISE with speed
-    (`scripts/takeoff_timing.py`, which now regresses on ALL crossings with a standard error).**
+    (`scripts/analysis/takeoff_timing.py`, which now regresses on ALL crossings with a standard error).**
 - **⚠️ TWO MEASUREMENT ERRORS OF MINE TODAY, both corrected — read before trusting any earlier entry:**
   - **THE SLOPE ESTIMATOR was a fit through 3 bucket medians whose top bucket held n~7. On that basis I
     reported v93/v94 "improvements" that DO NOT EXIST. Rebuilt to regress on every crossing with a
@@ -834,7 +850,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     = ~3x OVER. My "fix" also could not change narrow frequency at all (the narrow branch fires BEFORE
     the weight table) — it only swapped real hazards for no-op cells, which regressed v94 (USER: "it
     strafes randomly to the left"; L/R strafe 0.75 -> 1.78 -> 2.74 across v90/v92b/v94). REVERTED, and
-    `scratchpad/hazard_density.py` now normalises both encodings.**
+    `experiments/hazard_density.py` now normalises both encodings.**
 - **DEPLOY STATUS: v92b (`runs/ppo_v92b_corrected_final.zip`) is the only model to ship today — it fixed
   the user's #1 complaint on DEVICE (held-jump 10.67 -> 3.64/km, user-confirmed). v94..v97 REJECTED.**
 
@@ -842,7 +858,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 - **★★★★★ THE USER'S #1 COMPLAINT IS FIXED, ON DEVICE, USER-CONFIRMED. v92b
   (`runs/ppo_v92b_corrected_final.zip`, obs65, 512-net, hook 17j). USER, live: "it's our best policy!
   The jump after a crevasse jump problem is now fixed!"**
-  - **DEVICE-MEASURED (`scripts/detect_patterns.py`, 8 eps / 31 km): HELD_JUMP_SPAM 10.67/km (v90)
+  - **DEVICE-MEASURED (`scripts/analysis/detect_patterns.py`, 8 eps / 31 km): HELD_JUMP_SPAM 10.67/km (v90)
     -> 3.64/km (v92b) = 2.9x fewer, POST_CREVASSE_REJUMP 0% lethal. The sim predicted 3.55/km — the
     fix transferred almost exactly. Device distances 971/1814/1893/1930/3412/3593/7501/9243
     (median 2671, 34-39C) — but n=8 has ~11% power, so do NOT read the median as a ranking.**
@@ -885,7 +901,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     -0.0035, graze 27.9% = WORSE. Pricing the hit was NECESSARY (the user was right that it was
     unpriced) but is NOT SUFFICIENT while the cue points the wrong way. Keep the low dose, drop 0.03.**
   - **v94 IN FLIGHT = v93a's world + the corrected obs law (the only change). Judge with
-    `scripts/takeoff_timing.py`: the slope MUST turn POSITIVE.**
+    `scripts/analysis/takeoff_timing.py`: the slope MUST turn POSITIVE.**
 - **★★★ THE MID->HIGH CREVASSE — the USER DIAGNOSED THE REWARD HALF CORRECTLY.**
   - **USER: "The mid to high transition is not fixed. The policy jumps way too early... Is it because
     it has no penalty to do so in the sim? Have you modelled the case when the character takes a hit
@@ -896,7 +912,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     NO recipe has ever used it. The sim models the wall-clip (Stumble x0.85) and already grazes
     HARDER than the device, so the physics was never the gap: a graze costs a few units of distance,
     i.e. the SAME weak-signal failure as the held jump. NOW WIRED (`--velocity-drop-penalty`).**
-  - **NEW DETECTOR `scripts/takeoff_timing.py` — names the defect as a SLOPE, which is the whole
+  - **NEW DETECTOR `scripts/analysis/takeoff_timing.py` — names the defect as a SLOPE, which is the whole
     story (a jump spans 0.0143*v cells, so takeoff must be DELAYED as speed rises to still be near
     apex over a raised cap):**
     ```
@@ -906,7 +922,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     ```
     **Equal and opposite. The policy takes off EARLIER the faster it runs — the exact inversion.**
 - **★★★ THE NARROW REGRESSION IS REAL AND THE USER SPOTTED THE RIGHT BASELINE ("v78 didn't die on
-  narrows like v92"). `scripts/narrow_forensic.py`, per-ENCOUNTER (high power):**
+  narrows like v92"). `scripts/analysis/narrow_forensic.py`, per-ENCOUNTER (high power):**
   ```
                  narrow deaths/encounter     strafe reversals off-narrow
   v78 (pooled)        2.47%  (4/162)                 ~0.1 /km
@@ -1021,7 +1037,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   events per rollout and separate cleanly where medians cannot.**
 - **THREE ARMS IN FLIGHT (7M each, compressed cosine 8e-5 -> 5e-6, consolidation from
   `runs/ppo_v66_obs65_land.zip` = v90's own base, NOT a finetune off v90b):**
-  - **v91a `scratchpad/train_v91a_heldjump.sh` — v90's exact recipe + held-jump at the DEVICE rate.**
+  - **v91a `experiments/train_v91a_heldjump.sh` — v90's exact recipe + held-jump at the DEVICE rate.**
   - **v91b `train_v91b_matched.sh` — the EVENT-matched dose 0.065/0.18 (= device rate x 10.7/16.5), the
     control that separates "reproduce the device MECHANISM" from "reproduce the device EVENT RATE".**
   - **v91c `train_v91c_distfix.sh` — v91a + the distance-unit fix (so also the corrected ramp timing).**
@@ -1032,9 +1048,9 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     pure no-op in-sim, and the next lever is the wave-13 pattern (make the counterfactual SAMPLED),
     NOT more reward shaping (v58/v60/v61 all failed/were gamed).**
 - **JUDGE v91 ON: (1) sim HELD_JUMP_SPAM per km (must fall from 16.5 toward the human's 0) and its
-  lethality; (2) per-ENCOUNTER death rate (`scripts/device_compare.py`, n=400-800 encounters/batch);
+  lethality; (2) per-ENCOUNTER death rate (`scripts/analysis/device_compare.py`, n=400-800 encounters/batch);
   NOT the 8-episode device median (11% power to see a 20% gain).**
-- **NEW TOOL: `scratchpad/hazard_density.py` — hazards per km AND per cell, banded by distance. This
+- **NEW TOOL: `experiments/hazard_density.py` — hazards per km AND per cell, banded by distance. This
   is the leg the wave-15 audit missed: that audit matched the spacing SHAPE (share of pairs inside the
   jump arc), which is CONDITIONAL on a pair existing and says nothing about how many there are.**
 
@@ -1042,7 +1058,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 - **★★★★ THE USER'S #1 COMPLAINT IS SOLVED AT THE MECHANISM LEVEL (built, gated, NOT yet trained).**
   - **USER, ~50 times: "on the high-ground it jumps for no reason just after having jumped over a
     crevasse". Also: "how do you analyze the logs to detect them? Can't you build a script?"**
-  - **`scripts/detect_patterns.py` (NEW — build named-pattern detectors, not just aggregates. Every
+  - **`scripts/analysis/detect_patterns.py` (NEW — build named-pattern detectors, not just aggregates. Every
     prior analysis was an AGGREGATE, which averages away a specific recurring mistake: a pattern that
     fires 6x/run and kills once is invisible at 1.5%/encounter but is what the user sees EVERY run.)**
   - **THE ANSWER (v90 device 37 km vs HUMAN 41 km): `HELD_JUMP_SPAM` = the policy holds JUMP through
@@ -1071,7 +1087,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   5191/5249/5510/6677 = MEDIAN 5116, mean 4629, zero sub-1000 — the BEST median measured this week
   (v78 4424) but NOT separable at n=8 (see the protocol correction below). Weights
   `runs/ppo_v90b_final_final.zip` (11M + a 2M annealing tail at LR 3.66e-5 -> 5e-6).**
-  - Built from the behavioural death budget (`scripts/death_behaviour.py`, 44 deaths): 55% COMPOUND
+  - Built from the behavioural death budget (`scripts/analysis/death_behaviour.py`, 44 deaths): 55% COMPOUND
     TRAP + 5% RANDOM-JUMP TRAP = **60% of deaths are "my arc landed me somewhere fatal"**, with the
     takeoff->fatal distance clustering at 2.0-3.5 cells = exactly the jump span; 84% of deaths had
     another hazard within 5 cells behind the fatal one (33/37 at gap 1-2 = the user's "combinations").
@@ -1107,11 +1123,11 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     statistically resolvable. They were coin flips presented as conclusions.**
   - **POWER at n=8 to detect a TRUE 20% median improvement: 11%. A genuinely 20%-better model is
     MISSED 9 times out of 10. 80% power needs ~48 episodes/arm (~2.5 h phone time each).**
-  - **Per-ENCOUNTER rates (`scripts/device_compare.py`) give 40-70x the sample (n=341-569 hazard
+  - **Per-ENCOUNTER rates (`scripts/analysis/device_compare.py`) give 40-70x the sample (n=341-569 hazard
     encounters per 8-ep batch vs 8 distances) BUT deaths are RARE (1-2%/encounter), so a batch still
     holds only ~5-8 death events — v78 vs v88 is p>0.47 on EVERY per-encounter metric too.**
   - **THE RULES THAT FOLLOW:**
-    1. **Judge SIM FIDELITY by direct measurement (`scripts/sim_real_audit.py` coverage / spacing /
+    1. **Judge SIM FIDELITY by direct measurement (`scripts/validate/sim_real_audit.py` coverage / spacing /
        champion's sim-vs-device median). Those are high-power and do NOT depend on noisy episode
        medians. That is what validated the wave-15 ramp, and it still stands.**
     2. **Do NOT rank policies on an 8-episode batch, and do NOT write "REJECTED" from one. Either
@@ -1161,7 +1177,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **★★ RAMP IMPLEMENTED + v88 TRAINED ON IT (2026-07-26). SIM MEASURABLY BETTER, POLICY NOT YET.**
     - **Shipped in BOTH sims as `device_difficulty_ramp` + `difficulty_ramp_table` +
       `double_obstacle_percent` (default OFF). Equivalence subset GREEN 1248/1248.**
-    - **VALIDATION (all three parts, `scripts/sim_real_audit.py`): COVERAGE 17 missing device
+    - **VALIDATION (all three parts, `scripts/validate/sim_real_audit.py`): COVERAGE 17 missing device
       pair-types -> 0 (every "-> Crevasse" compound now exists). DIFFICULTY v78 sim median
       6786 -> 5200 vs its measured device 4425 = the gap closed 1.53x -> 1.18x WITH NO FITTING —
       the first fidelity change ever validated without tuning a knob toward the answer.**
@@ -1185,9 +1201,9 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
       from the game and is not a free parameter.**
   - **NEXT SESSION STARTS HERE:** (1) implement the distance-keyed ramp in both sims (minSpace,
     minSpaceTurns, doubleObstaclePercent, the allow* gates, b2b=2); (2) re-run
-    `scripts/sim_real_audit.py` — coverage and the spacing histogram should close by construction;
+    `scripts/validate/sim_real_audit.py` — coverage and the spacing histogram should close by construction;
     (3) verify DIFFICULTY: v78's sim median should fall from 6786 toward its device 4425 WITHOUT any
-    fitting; (4) only then retrain. Probe: `scripts/probe_generation_statics.py` (standalone, needs
+    fitting; (4) only then retrain. Probe: `scripts/probes/probe_generation_statics.py` (standalone, needs
     fixing for stripped exports) and hook 17j's `s.gen` (works — use this).
 
 - **★★★ STRATEGIC CONCLUSION (2026-07-26, USER-stated, now QUANTIFIED): "the problem is not really the
@@ -1195,7 +1211,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   constraint is the sim's GENERATION LAW, not its death models and not the training recipe. Four
   offline->device inversions in ONE day (v79 -40%, v83 -26%, v86, v87 -29% while +9% offline) is not
   bad luck; it is what happens when you optimise against a world that lacks the situations that kill.**
-- **★★★ NEW STANDING GATE: `scripts/sim_real_audit.py` — run it BEFORE proposing any training arm.**
+- **★★★ NEW STANDING GATE: `scripts/validate/sim_real_audit.py` — run it BEFORE proposing any training arm.**
   It splits the sim-to-real gap into the three parts that were previously conflated:
   1. **COVERAGE** — does the situation EXIST in the sim? (device pair-types with ZERO sim coverage)
   2. **DENSITY** — is the hazard spacing distribution right?
@@ -1239,7 +1255,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
      world never punished.)
   2. **"An obstacle that forces a jump, followed by a crevasse" —** zero sim coverage, see above.
 - **★★ MID->HIGH CREVASSE ("it works but it's not clean; the character often hits the wall which slows
-  it down") — MONITOR BUILT (`scratchpad/crevasse_monitor.py`), and this one is NOT a coverage gap:**
+  it down") — MONITOR BUILT (`experiments/crevasse_monitor.py`), and this one is NOT a coverage gap:**
   level-3 cap graze v78 device 19.5% (8/41) vs HUMAN 0.0% (0/49); v78 bleeds 5.1 velocity units/km to
   grazes vs the human's 0.8. **The SIM ALREADY PUNISHES IT HARDER than the device (30% graze, 15%
   kill) — so this is NOT a missing mechanic and NOT fixable by another sim knob.** The separator is
@@ -1273,7 +1289,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     EXECUTABLE window (turn_exec_early..late), so it is ALREADY FALSE on the LAST frame of a junction
     cell. Reading it there found 3 junctions in 4590 cells (0.1%; truth ~4%) and made post-turn
     analysis silently report ZERO. Mark a cell a junction if ANY frame on it says is_turn.**
-  - **THE METRIC (`scratchpad/wasted_jump.py`): a WASTED jump = a takeoff whose arc (span = 0.0204*v
+  - **THE METRIC (`experiments/wasted_jump.py`): a WASTED jump = a takeoff whose arc (span = 0.0204*v
     - 0.94 cells) lands SHORT of the next must-jump cell -> it cleared nothing, cost ~0.77s airborne
     and an action-locked landing frame. Result — post-turn is where they live, for EVERYONE:**
     | | wasted/km | post-turn share | post-turn lethality |
@@ -1284,7 +1300,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     ~7% of the time. The extra jump is NOT the sin — where it LANDS is.** (Cause of the hedge itself
     is the documented junction obs dropout: the hook's neighbour walk breaks through turns, so
     next/next2_path_level stream -1 and NOBODY can see past a corner.)
-  - **★ ROOT CAUSE (`scratchpad/postturn_obstacles.py`) — P(must-jump obstacle) by cell offset after
+  - **★ ROOT CAUSE (`experiments/postturn_obstacles.py`) — P(must-jump obstacle) by cell offset after
     a junction, DEVICE vs SIM:**
     ```
     DEVICE                    +1: 4.3%  +2:  0.7%  +3: 21.7%  +4: 15.0%  +5: 4.8%
@@ -1352,7 +1368,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 - **★★★ WAVE 14 (2026-07-25) = THE AIRBORNE TRAP: the hole wall is a SIM-GEOMETRY gap, and it is the
   cleanest device-measured find since the turn dead-letter. Two knobs shipped in both sims, equivalence
   GREEN (deterministic 4992/4992 + statistical PASS); v79 = v78's exact 20M recipe + this one mechanism.**
-  - **THE DEATH MODE (`scratchpad/hole_landing_forensic.py`, 1240 device hole crossings / 4 policies):
+  - **THE DEATH MODE (`scripts/analysis/hole_landing_forensic.py`, 1240 device hole crossings / 4 policies):
     12 of v78/v74/v70's 15 device hole deaths happen with the runner ALREADY AIRBORNE — it jumps
     obstacle A, the hole sits INSIDE its jump arc, it cannot re-take-off, and its DESCENDING arc drops
     into the hole. Taking off on the APPROACH cell is FREE on device: 0 deaths in 858 crossings.
@@ -1374,7 +1390,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
       speed / gap-2 tail / gap-1 tail), `d` NEVER exceeded 1.0. FIX = `crevasse_single_cell_prob` 0.675.
   - **⚠️ THE TRAP I NEARLY WALKED INTO (and the measurement that saved it): my first 1-cell model gave
     it the full apex/graze physics on its single cell -> the oracle died 25% MORE (dt2 34->52, mean
-    1038->779). DEVICE SAYS THE OPPOSITE (`scratchpad/crevasse_cells_outcome.py`, n=827): the 1-cell
+    1038->779). DEVICE SAYS THE OPPOSITE (`experiments/crevasse_cells_outcome.py`, n=827): the 1-cell
     form is ~6x SAFER — 1.1% deaths / 0.0% grazes vs the 2-cell 7.0% / 33.7%. And the obvious
     confounder is RULED OUT by a length x level cross-tab: at MATCHED level>=3, 1-cell = 0% deaths /
     0% grazes (n=99) vs 2-cell = 7.0% / 33.7% (n=285). It is the LENGTH, not the height. (The 33.7%
@@ -1393,7 +1409,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **DEVICE BASELINE for the A/B (v78, hook 17f): fresh 8-ep capture at 36->39C = 1055/3235/3953/4300/
     4549/4735/8092/12066, median 4425 (3 of 8 deaths on SINGLE holes = the target mechanic; SECOND
     12k-class run of the project). Pooled with the wave-13 cooled batch (n=12): median 4642.**
-  - **v79 (`scratchpad/train_v79_holetrap.sh` -> runs/ppo_v79_holetrap) = v78's EXACT 20M consolidation
+  - **v79 (`experiments/train_v79_holetrap.sh` -> runs/ppo_v79_holetrap) = v78's EXACT 20M consolidation
     from `ppo_v66_obs64_base` + ONLY this mechanism (consolidation, NOT finetune — the v52/v63/v71c/v73
     erosion lesson). Turn skill VERIFIED PRESERVED mid-flight: @3M PRE% 100.0 / MISS 0.0 /
     P(turn|approach) 0.9859. Gate: `gate_battery.py <ckpt>` (crevasse config is the one to watch — the
@@ -1417,7 +1433,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   conclusion was WRONG. Root cause found in CODE (`reward.py:124`, the reaction_bonus turn branch): the
   dense shaping REWARDS the REACTIVE junction swipe (`prev.is_turn`) — the exact behavior that
   dead-letters under latency — while the latency-robust APPROACH-cell pre-swipe earned ZERO shaping.
-  MECHANISM PROBE (`scratchpad/preswipe_fraction.py`, isolated turn-cfg lat0.7+drop+debounce, n=40 eps):
+  MECHANISM PROBE (`experiments/preswipe_fraction.py`, isolated turn-cfg lat0.7+drop+debounce, n=40 eps):
   v75 AND v74 pre-swipe on 0.0% of junctions (react 61-62%, MISS 38-39% = the reactive swipes that
   dead-letter). The pre-swipe is COMPLETELY ABSENT — not underused — despite the policy HAVING the
   direction obs (next_can_turn_*), the latch (turn_approach_buffer), safe exploration (turn_offjunction_
@@ -1426,7 +1442,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   `turn_buffer_bonus` (reward.py + both sims + train_fast `--turn-buffer-bonus` + equivalence variant
   `turn_bufbonus`) credits a valid-direction pre-swipe on the approach cell — un-gameable (spam eaten by
   debounce, a reactive swipe doesn't latch), same shape as the jump/slide reaction_bonus that WORKS.
-  v76 (`scratchpad/train_v76_bufbonus.sh`) = v75's EXACT recipe + ONLY --turn-buffer-bonus 0.5 = a clean
+  v76 (`experiments/train_v76_bufbonus.sh`) = v75's EXACT recipe + ONLY --turn-buffer-bonus 0.5 = a clean
   A/B (v75 = bonus OFF, 0.0% pre-swipe, median 1033-1110) at matched steps. Read the mechanism early
   (preswipe_fraction at 4/6/8/10M): if PRE% climbs from 0 → the fix works → 20M consol → gate → device.
   DEMOS (the human gi_* swipe buffer) stay in reserve as demo-AUGMENTED RL (DAPG: PPO + an annealed BC
@@ -1498,7 +1514,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 - **★ WAVE 13 (2026-07-14): the two tail walls (flame + turn) diagnosed as ONE root — device action-send
   latency (~1 frame, free in-sim) → the policy reacts ON the obstacle/junction cell instead of PRE-acting
   on the approach cell it already observes.**
-  - **FLAME slide-under = NOT a sim gap (measured, `scratchpad/smoke_slide_lat.py`): a prototyped
+  - **FLAME slide-under = NOT a sim gap (measured, `experiments/smoke_slide_lat.py`): a prototyped
     `slide_send_lat_frames` knob was INERT — the sim ALREADY forces the pre-slide because the must_slide
     death resolves DURING the cell crossing in `_advance`, before the next step's must_slide obs updates
     (an on-cell slide is already fatal in-sim; v74 survivors pre-slide on next_must_slide 100%). The 2
@@ -1511,7 +1527,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     10M finetune). v75 = the UNION: v74's champion recipe (20M consol, rejump 0.46) + turn_send_lat 0.7 +
     drop/debounce → activates the cue (latency punishes late junction swipes, drop makes the approach
     pre-swipe explorable, debounce prices spam). Full 20M consolidation IN FLIGHT
-    (`scratchpad/train_v75_turncue.sh` → runs/ppo_v75_turncue). Gate: gate_battery CREVASSE HARD (v71c
+    (`experiments/train_v75_turncue.sh` → runs/ppo_v75_turncue). Gate: gate_battery CREVASSE HARD (v71c
     device-eroded crevasse; the battery now catches it) → device A/B vs v74.**
     **v75 MID-FLIGHT (14M isolated turn-cfg median 1052 = v71c's 1106 EXACTLY): the predicted_turn cue
     is NOT the breakthrough — pressure(v71a/b)/drop(v71c)/exposure(v71d)/cue(v72,v75) ALL plateau
@@ -1548,7 +1564,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   tail ceiling (v70 also 9338 on a pt-1) = flame slide-under + turn dead-letter are the last two
   walls for BOTH. NEXT: the flame slide-under model (3+ record captures) is now the #1 lever for a
   10k median — the median-band killers are largely closed; the tail is flame+turn.**
-- **★ WAVE 12 TARGET LOCKED (2026-07-09 night, `scratchpad/flame_forensic.py` 466 flame encounters +
+- **★ WAVE 12 TARGET LOCKED (2026-07-09 night, `experiments/flame_forensic.py` 466 flame encounters +
   v70 death-tail decodes): the median killers CONVERGE on ONE root = POST-JUMP ACTION CHAOS.**
   Flame taxonomy (8 deaths/466 = 1.7%/encounter; survivors slide-at-entry 98%, onset med −0.2s):
   5/8 = AIRBORNE-INTO-FLAME (jumped, flame arrived mid-air; incl a flame→flame chain w/ a blind
@@ -1565,7 +1581,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   after touchdown? probe like probe_jump_exec), (b) BC-aux on the human's post-landing action
   timing (the 433 gap-jumps + 152 slides are clean for this), (c) NOT reward shaping (v58/v60/v61
   all failed/gamed). Measure (a) before choosing.
-  **★ (a) DEVICE-MEASURED from existing captures (`scratchpad/landing_lock_forensic.py`, policy
+  **★ (a) DEVICE-MEASURED from existing captures (`experiments/landing_lock_forensic.py`, policy
   captures, n=266 post-landing grounded JUMP attempts): the game EATS 75% OF LANDING-FRAME JUMPS —
   fire rate delay0 25% (50/202), delay1 4% (2/45), delay2 0% (0/17), delay4 2/2. The escalation fits
   a PER-LANDING LOCK DRAW (a locked landing eats ALL retries; an unlocked one fires immediately) —
@@ -1594,7 +1610,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   → equivalence → v73 (v70 recipe + knob) → gate battery → device A/B.**
   **SHIPPED + IN FLIGHT: `post_land_gap_rejump_prob` in both sims (`_frames_since_land` /
   frames_since_land state, lip-guard bypass, prob>0-first rng), equivalence GREEN 4004/4004 +
-  statistical PASS. v73 (`scratchpad/train_v73_landrejump.sh` → runs/ppo_v73_landrejump) LAUNCHED:
+  statistical PASS. v73 (`experiments/train_v73_landrejump.sh` → runs/ppo_v73_landrejump) LAUNCHED:
   v70@20M(obs64) init, 10M @5e-5 cosine, exact v70 mix + the knob at 0.46. Same-day warm-phone v70
   baseline `captures/ab_v70_base_r2.jsonl` (8ep @38°C, median ~2225 — thermally depressed, mechanics
   data only). Gate: gate_battery.py → cooled device A/B.**
@@ -1611,11 +1627,11 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   piece is the cue). `obs.py predicted_turn_obs` (TURN_DEADLINE_CP 0.56, TURN_SEND_FRAMES 1.0):
   approach cell → 1.0 (swipe now = buffered, always safe), junction → deadline margin scaled 0..0.75,
   else 0 — host-derived from streamed fields, hook 17f UNCHANGED. torch `_base_obs` b+12 mirrored.
-  Surgery `scratchpad/surgery_v70_obs64.py` → `runs/ppo_v70_obs64_pturn.zip` (0/400) = v70-exact on
+  Surgery `experiments/surgery_v70_obs64.py` → `runs/ppo_v70_obs64_pturn.zip` (0/400) = v70-exact on
   obs64 = the new deploy artifact for the current pipeline (obs60/62/63 models need their own zips).
   NEXT: equivalence re-run → v72 = v70's EXACT recipe (NO mix changes — the v71c lesson) + obs64 init
   + lat 0.7 + drop/debounce (the cue makes the deadline VISIBLE; the latency makes it BIND) →
-  `scripts/gate_battery.py` (MANDATORY, validated: retro-rejects v71c) → cooled device A/B vs v70.
+  `scripts/validate/gate_battery.py` (MANDATORY, validated: retro-rejects v71c) → cooled device A/B vs v70.
   **v72 VERDICT (equivalence was GREEN 4004/4004; 10M @5e-5 cosine from v70@20M): FAILED — lat-0.7
   ladder 975/882/879, BELOW v71c's 1203 and barely above v70's untrained 846. The predicted_turn cue
   at conservative warm-start LR did not bite (zero-init col + 5e-5 too slow, or the swipe counterfactual
@@ -1628,7 +1644,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   starting with the three-capture forensic (slide timing vs flame pt31/32 entry at speed).**
 - **★★ WAVE 9 (2026-07-09): THE HUMAN-DEMO PAIRED ANALYSIS (USER-directed pivot; the user recorded 13 eps /
   41 km by hand on hook 17c/d — `captures/human_20260708_*.jsonl`, human median 3054 / max 9051 on the
-  EVENING throttled phone). Analyzers: `scratchpad/human_vs_policy.py`, `landing_analysis.py`,
+  EVENING throttled phone). Analyzers: `experiments/human_vs_policy.py`, `landing_analysis.py`,
   `human_death_forensic.py`, `slidegap_survival.py`. FINDINGS (human vs pooled v66 device, n=433/847 jumps):**
   - **(1) TAKEOFF TIMING = the #1 behavioral diff.** Human takeoff cp on the approach cell before a gap is
     LATE and SPEED-ADAPTIVE: med 0.52 @v130-200 → **0.65 @v200+**; the policy is EARLY and FLAT-to-INVERTED
@@ -1658,7 +1674,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **DERIVED PLAN: (a) add `slidegap_prob` (both sims, equivalence-gated) to the v70 consolidation base;
     (b) the takeoff-timing gap is a TRAINING target, not a sim gap — candidate: BC-auxiliary on the 433
     human gap-jumps (state→jump-timing pairs; obs reconstructable from capture fields) or a takeoff-cp
-    prior; (c) v70 (`scratchpad/train_v70_consolidated.sh`, staged: v66-obs62 base, 20M, penalties STRIPPED
+    prior; (c) v70 (`experiments/train_v70_consolidated.sh`, staged: v66-obs62 base, 20M, penalties STRIPPED
     per the v69 signal, all scenario knobs + anchored profiles) is the vehicle — add slidegap before launch.**
   - **★ WAVE 9 IMPLEMENTATION (2026-07-09, same session): ALL SHIPPED + GATED.**
     - **`slidegap_prob` compound (both sims)**: slide obstacle → `slidegap_gap_cells`(2) clear →
@@ -1675,7 +1691,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
       Added end-to-end: obs.py (extra field, `narrow_lane_to_obs` encoding, junction dropout), both sims'
       snapshot, torch `_base_obs` b+11, constants STATE_DEFAULTS, hook **17f** (cachedNext2PathType +
       narrowStrafeDirFor on the 2-ahead cell), equivalence diff sentinel. Surgery
-      `scratchpad/surgery_v66_obs63.py` → `runs/ppo_v66_obs63_n2nl.zip` (0/400 mism) = v66-exact on
+      `experiments/surgery_v66_obs63.py` → `runs/ppo_v66_obs63_n2nl.zip` (0/400 mism) = v66-exact on
       obs63/17f = the deploy artifact for the current pipeline.
     - **⚠️ 17e HOOK BREAKAGE (found by the wave's own capture failure): 17e used an UNDEFINED `readS32`
       → the snapshot threw EVERY frame → ZERO state stream ("device degraded" with a live injector +
@@ -1709,7 +1725,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
       re-forward + force-stop/restart + re-inject (the hook's broadcast thread does not survive its
       client socket erroring). One v70 round-2 ep was lost to it (batch resumed as `ab_v70_r2b`).
   - **★ WAVE 10 (2026-07-09 evening): TURN DEAD-LETTER fix — v71 twin arms IN FLIGHT.** Death decoded
-    frame-exact (`scratchpad/turn_death_forensic.py`, ab_v70_r2b ep0 @4733): the policy turns ONLY on the
+    frame-exact (`experiments/turn_death_forensic.py`, ab_v70_r2b ep0 @4733): the policy turns ONLY on the
     junction cell; phase-unlucky first sighting (cp 0.52 @v209) → TURN write lands cp 0.92, `giR=ON` but
     never consumed → pt-1. v70 never pre-swipes on the approach cell (0/4 junctions in the tail) because
     late junction swipes are FREE in-sim (decision-cp gate 0.56, no latency).
@@ -1718,7 +1734,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     cp < v·dt/cell ≈ 0.35 @v210, so lat ≤ 0.4 NEVER crosses the 0.56 gate. SWEEP (v70@20M, n=96/dose):
     lat 0.4 median 3002 = EXACTLY lat-0 (INERT); 0.7 → 846 (binds, 86/96 turn deaths); 1.0 → 272
     (96/96). The review saved 2×20M inert training steps.** Design doc:
-    `docs/superpowers/specs/2026-07-09-turn-deadletter-fix-design.md`.
+    `docs/design/2026-07-09-turn-deadletter-fix-design.md`.
     Arms (v70 recipe + ONE knob, init v66-obs63, 20M each, concurrent): **v71a lat 0.7** (binding
     pressure w/ survival gradient), **v71b lat 1.0** (device-plausible; pre-swipe or die). Gates:
     standard cfg parity vs v70 + **lat-1.0 stress eval** (junction-reactor floor = 272; a pre-swiper is
@@ -1740,7 +1756,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     **EXECUTED: knobs shipped both sims (`turn_offjunction_drop`/`turn_drop_debounce_s`, sim_env.py
     _attempt_turn + torch mirror w/ turn_debounce tensor), equivalence GREEN 4004/4004 + statistical
     PASS (new `turn_dropdeb` variant: drop/eaten/latch/dead-letter parity). v71b killed @9M (pinned
-    377); **v71c (`scratchpad/train_v71c_latdrop.sh` → runs/ppo_v71c_latdrop) launched** in its slot;
+    377); **v71c (`experiments/train_v71c_latdrop.sh` → runs/ppo_v71c_latdrop) launched** in its slot;
     v71a continues to 20M as the pressure-only control (pinned ~800-900 through 11M = the barrier
     story confirmed). Gate for v71c: standard-cfg parity vs v70 + lat-1.0 stress (junction-reactor
     floor 272) + lat-0.7 (v70 floor 846) → device A/B.
@@ -1749,7 +1765,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     still turn-misses) at NO standard cost (2848/3442 vs v70 3002/3223) — pressure alone climbs the
     barrier SLOWLY. v71c@7M = 1014, @14M = 1106 (reached the control's 20M endpoint 6M early, max 6156,
     Falls 73/96 — but growth flattening: grind, not breakthrough). v71c runs to 20M (keep-best);
-    **v71d (`scratchpad/train_v71d_turndense.sh` → runs/ppo_v71d_turndense) launched IN PARALLEL** =
+    **v71d (`experiments/train_v71d_turndense.sh` → runs/ppo_v71d_turndense) launched IN PARALLEL** =
     v71c + a 12% TURN-DENSE profile (turn_prob 0.6, min_space_between_turns 4; anchor 45→38, gauntlet
     15→10) — the wave-3 curriculum trick aimed at pre-swipe SAMPLING. Endgame: best arm must hold
     standard parity vs v70 AND beat it decisively under lat stress → cooled-phone device A/B vs v70
@@ -1865,7 +1881,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   reward-shaping failed twice (v60/v61) → DEATH-MODEL (jumpgap) → v62 = the targeted death mode FIXED on
   device (re-jump deaths 0/46, frequency 17→5.75/ep) + same-session ≥ v59. USER-driven live-watch loop.**
   - **★ v62 = v59@1.5M + `jumpgap_prob` 0.15 (the GAP→GAP death model). TARGET FIXED ON DEVICE.**
-    Forensic first (`scratchpad/rejump_lethality.py`): device = ~17 landing-frame re-jumps/ep, ~2% lethal
+    Forensic first (`experiments/rejump_lethality.py`): device = ~17 landing-frame re-jumps/ep, ~2% lethal
     each → **35% of device episodes END within 15 frames of a re-jump**; sim (v59 cfg) = 0.8/ep, **0/47
     lethal** — `min_space_between_obstacles: 6` guarantees a clear landing (a jump spans ~2.2-2.8 cells) so
     the blind re-jump was STRUCTURALLY free in-sim = no learning signal (why shaping kept failing). FIX =
@@ -1928,7 +1944,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     offset). Knob committed default-off. Crevasse still the #1 early killer (~600m); UNSOLVED.
   - **★★ 2026-07-08 CREVASSE TAKEOFF-VARIANCE FIX → v59 (the v55 completion). DEVICE-MEASURED + calibrated,
     equivalence GREEN, RETRAIN pending.** Fresh v51 device capture (`captures/v51_crevasse_16z.jsonl`, 6ep,
-    hook 16z, `scratchpad/analyze_crevasse_device.py`): v51 grazes high-ground (level-3, cap ground_height
+    hook 16z, `experiments/analyze_crevasse_device.py`): v51 grazes high-ground (level-3, cap ground_height
     15) crevasse caps **26% (n=19), 0% kill**; level-2 caps **0%** — CONFIRMS the documented ~32%. WHY v55
     FAILED (now decoded): with `crevasse_graze_worldy` alone the cap sits near v51's jump APEX in-sim
     (arc_y~19.2 >> cap 15, and the parabola is FLAT there) → clears 100%; a FIXED `cap_arc_offset` moves the
@@ -1936,12 +1952,12 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     partial rate). FIX = NEW `crevasse_takeoff_std` (both sims): a per-crevasse Gaussian shift of `d`
     (takeoff→cap cells) so the descending-arc clearance SPREADS around the cap top → a FRACTION grazes.
     Gated default-0 (no RNG draw → deterministic-suite stream untouched; follows the jump_exec_lat_jitter
-    pattern, drawn from self._rng / torch.randn(gen)). Calibrated in-sim (`scratchpad/sweep_crevasse_
+    pattern, drawn from self._rng / torch.randn(gen)). Calibrated in-sim (`experiments/sweep_crevasse_
     variance.py`): **offset 0.4 + std 0.2 → v51 grazes 32% @lvl3 / 0% kill / lvl2 1% — matches device**
     (errs slightly harsh = the safe direction). Equivalence **DETERMINISTIC 2873/2873 GREEN** (incl the
     crevasse_graze variant; the std>0 path is matched-distribution → statistical-tier). v59 = v51 + ONLY
     these two knobs, isolated (no dense profiles, 5e-5, per the v48/v52 one-change lesson);
-    `scratchpad/train_v59_crevasse.sh`. MIND v52/v55: v51 is a SHARP optimum, crevasse retrains regressed
+    `experiments/train_v59_crevasse.sh`. MIND v52/v55: v51 is a SHARP optimum, crevasse retrains regressed
     before → gate HARD on device A/B. **SESSION NOTE: during the v51 capture, ep5 hit 10,389m (v51, hook
     16z) — but run-luck: the 6ep set was 1044/2475/5709/6470/6538/10390, median ~6090 (cool phone). NOT
     reliable 10k; the crevasse/hole early-killers still cap the median (ep0 died @1044 on a hole; the 10k
@@ -1972,8 +1988,8 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
     in-sim cost.) FIX = `airborne_action_penalty` (dock JUMP-while-jumping / SLIDE-while-sliding; reward.py
     + torch _shaping + train_fast; equivalence GREEN). **v58 = v57 + penalty 0.15: offline jump-spam 80%→
     27% (PROVEN in-sim). BUT DEVICE spam UNCHANGED: v57 97% / v58 97% — the fix did NOT transfer.**
-    **★ 2026-07-08 DEVICE JUMP-TIMING PROBE (`scripts/probe_jump_timing.py` single-vs-burst n=41 +
-    `scratchpad/probe_airtime_30hz.py` 30Hz n=50): ALL THREE documented hypotheses REFUTED.** (1) airtime =
+    **★ 2026-07-08 DEVICE JUMP-TIMING PROBE (`scripts/probes/probe_jump_timing.py` single-vs-burst n=41 +
+    `experiments/probe_airtime_30hz.py` 30Hz n=50): ALL THREE documented hypotheses REFUTED.** (1) airtime =
     23fr@30Hz = **0.767s** (dist {23:40,24:10}) ≈ the sim's 0.80s (within 1 frame / 4%, inside dr [0.72,0.88]);
     NOT longer. (2) `is_jumping` obs is **FRESH** — liftoff latency 0 frames (single 25/25), NOT TCP-stale.
     (3) NO airborne QUEUEING — burst-of-8/single airborne = **1.00x** median (airborne presses are DROPPED
@@ -1993,7 +2009,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 - **★ EDGE-CASE ACCUMULATION WAVE 2 (2026-07-07 late): the method is now "enumerate + model the edge cases
   that kill early" (USER framing: device variance is RUN-GENERATION luck, not thermal — a run dies when it
   hits an UNMODELLED edge case; the median is capped by how many remain). Edge-case forensic (26 device
-  deaths, `scratchpad/death_edge_cases.py`): CREVASSE strikes EARLIEST (median 610m = #1 median-killer),
+  deaths, `experiments/death_edge_cases.py`): CREVASSE strikes EARLIEST (median 610m = #1 median-killer),
   then HOLE (2080m), NARROW (3037m), JUMP->SLIDE (3916m), TURN dead-letter LATEST (5880m, ends good runs).**
   - **JUMP->SLIDE fix -> v53** (`ppo_v53_jumpslide_best.zip`, @1.7M): device forensic — a slide obstacle
     right after a crevasse/long-hole traps the runner AIRBORNE (0.8s jump airtime) -> dt=3/5. Sim never
@@ -2038,7 +2054,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   (`runs/ppo_v47_obs60_next2.zip`, zero cols @19,20, 0/400 action mism). Isolated retrain (ONE change,
   v47's exact sim cfg, no dense profiles) → v51 best=1.70M. Offline: median 2485 vs baseline 2223 (+11.8%),
   ablation-proven (zeroing next2 cols → reverts to 2233). Device: +108% (above). Scripts:
-  `scratchpad/surgery_v47_next2obst.py`, `train_v51_next2obs.sh`. UNCOMMITTED (per norm).
+  `experiments/surgery_v47_next2obst.py`, `train_v51_next2obs.sh`. UNCOMMITTED (per norm).
 - **TURN FIX v52 = DEVICE-DISPROVEN (2026-07-07).** v51 dies 4/8 on the TURN DEAD-LETTER (pt=−1, at
   3422-8763m). Tried v51 + `turn_send_lat_frames=0.4` ONLY (isolated 2M warm-start, `ppo_v52_turnlat_best`
   = @1.00M; parity GREEN at slat=0.4). Offline it looked +20% under matched latency BUT checkpoints were
@@ -2074,7 +2090,7 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   in-sim, ~0.3-0.5 cells later on device). To make it bite: measure the exact cap-arc offset from
   `captures/v47_16y_arcs.jsonl` + shift the sim cap so v51 grazes ~32% in-sim, THEN retrain. Deferred —
   the graze is NON-FATAL (chronic slowdown, not death; user: "does not die") so lower-priority than the
-  jump→slide DEATH. Calib script: `scratchpad/calib_crevasse_graze.py`.
+  jump→slide DEATH. Calib script: `experiments/calib_crevasse_graze.py`.
 - **(superseded) FIX (A) MID→HIGH CREVASSE GRAZE — original spec (now see the IMPLEMENTED entry above):** "Transition mid→
   high is complicated, the policy does NOT die but takes a hit almost every time" = the chronic high-ground
   cap Stumble (×0.85) I decoded via hook 16y (jump_peak 19.2, cap 15@lvl3, graze iff arc_y<cap_top). v51/
@@ -2134,7 +2150,7 @@ Died Burnt on a flame tower at the end after 180 turns / 34 crevasses / 56 narro
 2320/1872/2368/**10545**/589 — high variance). Edge cases still to model in the SIM: (1) FLAME-TOWER
 slide-under at speed (the 10545 death), (2) multi-hole jump RHYTHM (4-cell must-jump chains — jump-spam
 fails, needs staggered land-then-rejump), (3) narrows-at-speed strict [3,7] band (the 256-net v39 breaks
-the narrow↔crevasse interference but drifts — needs a stable from-scratch train, see `scratchpad/
+the narrow↔crevasse interference but drifts — needs a stable from-scratch train, see `experiments/
 train_gpu_256.sh`), (4) stumble→rejump recovery.
 
 ## Setup
@@ -2146,7 +2162,7 @@ train_gpu_256.sh`), (4) stumble→rejump recovery.
   bodies are native, not readable). All offsets/RVAs below are from it (re-dump if the APK changes).
 
 ## Run it
-`python scripts/setup_device.py` forwards 27042 + state **9999** + action **9998**, then injects.
+`python scripts/device/setup_device.py` forwards 27042 + state **9999** + action **9998**, then injects.
 Inject one-liner (run EXACTLY ONE; the host process must STAY alive — if it exits the in-phone agent
 unloads. ⚠️ Before re-injecting: `pkill` is forbidden — `kill <PID>` the OLD injector first (`ps -eo
 pid,cmd | grep gadget_inject`); stale injectors RE-INJECT after a force-stop+restart → multiple agents,
@@ -2200,20 +2216,20 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   17-30 narrows, 31-32 flame, **33-36 = SingleLevelStepDownCap (zone crevasse, both up/down)**, 37 temple.
   DeathType {Fall1, Tree2, Slide3, **Ledge4**, Burnt5, ...}. MaxRunVelocity **210** (start 100).
 - RVAs (Start/Update/Turn/Jump/Slide/Strafe/CanTurn/IsTurn/GetPosition2D/RunAgain/OnPlay/…): see
-  `docs/CLAUDE_FULL_HISTORY.md` §5 / `docs/OFFSETS.md`.
+  `docs/archive/CLAUDE_FULL_HISTORY.md` §5 / `docs/OFFSETS.md`.
 
 ## Sim + training
 - `src/templerun_rl/sim_env.py` = fast headless model (`TempleRunSim-v0`); obs `obs.py` (**OBS_LEN 30**,
   bools + scalars + cell_progress/lane/narrow_target_lane/**predicted_landing**/next_ground_change_higher
   + **predicted_jump** (velocity-invariant step-up takeoff cue, host-derived) + **next_path_level/
   next2_path_level** (upcoming-altitude direction, hook 16r) + K=4 action history → 58-wide; power-ups
-  REMOVED 2026-07-04); reward `reward.py`; PPO `scripts/train_sim.py` (net 128,128, linger 3).
+  REMOVED 2026-07-04); reward `reward.py`; PPO `scripts/train/train_sim.py` (net 128,128, linger 3).
   Deploy = same obs on the phone via the hook.
 - Sim turn-buffer config: `hook_turn_buffer=true` models the device swipe-queue (turn near a junction lands
   CENTERED, timing-free, `from_buffer` offset 0) + **late gate `turn_buffer_late_cp=0.56`** (swipe past it =
   silent MISS; device-measured CanTurn window end, velocity-INDEPENDENT — v14 turned 46/46 up to v207).
   Warm-start base **`runs/ppo_v14_obs30_leveldir.zip`** (EXACT surgical equivalent of v14, new obs cols
-  zero-init; `scratchpad/surgery_v24_leveldir.py`).
+  zero-init; `experiments/surgery_v24_leveldir.py`).
 - **JUNCTION LEVEL DROPOUT (2026-07-05 night, device-measured):** the hook's PE neighbor walk BREAKS through
   turns → on-junction frames stream `next_path_level=next2_path_level=-1` (178/202), approach frames
   `(lvl,-1)`. Sim `_snapshot` reproduces it (commit f8d7eff). Obs30 finetunes trained pre-fix saw a
@@ -2222,40 +2238,40 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   runs BEFORE env.step; the record holds the POST-step state). And a FIRED turn resets cell_progress → the
   swipe record's cp is POST-turn — don't read "swipe cp" stats off fired turns (artifact; burned us twice).
 - **Jump exec latency (sim, 2026-07-05):** `jump_exec_lat_frames`/`jump_exec_lat_jitter` buffer the JUMP
-  firing. DEVICE-MEASURED (`scripts/probe_jump_exec.py`, 25/25): **exactly 1 frame @10Hz, zero jitter**
+  firing. DEVICE-MEASURED (`scripts/probes/probe_jump_exec.py`, 25/25): **exactly 1 frame @10Hz, zero jitter**
   (uniform with the turn-side 1-frame exec). Constant latency is ABSORBED by policies (window shifts);
   only JITTER creates training pressure (v14 hiMed 2246→130 under 2±1; a predicted_jump pre-aim oracle
   survives). Train at **1±1** (measured mean + TCP obs-staleness variance); harness/replay at 0.
 - **Warm-start recipe that does NOT collapse: `--learning-rate 5e-5`** (new knob; default 3e-4 ALWAYS
   collapses a v14 warm-start regardless of ent). Keep the BEST checkpoint — drift resumes past ~500k-1M.
 - **THE FEEDBACK LOOPS (use before any retrain/deploy):**
-  - **`scripts/gate_battery.py <candidate.zip>` (WAVE 10 lesson, MANDATORY before ANY device A/B):**
+  - **`scripts/validate/gate_battery.py <candidate.zip>` (WAVE 10 lesson, MANDATORY before ANY device A/B):**
     4-config offline battery vs the champion (standard / crevasse-dense / stack-heavy / lat-stress)
     with per-death-type breakdowns; thresholds 0.90x (1.00x lat). VALIDATED: retro-rejects v71c
     (crevasse 0.77 + stacks 0.74 FAIL) exactly matching its device regression — a standard-cfg-only
     gate MISSES skill erosion (crevasses/stacks too sparse there). RED = do not spend phone time.
-  - `scripts/fidelity_scorecard.py --strict` — ~13 phone-free checks vs `captures/device_reference.json`.
+  - `scripts/validate/fidelity_scorecard.py --strict` — ~13 phone-free checks vs `captures/device_reference.json`.
     GREEN required before retrain. (Blind for un-checked mechanics — green ≠ complete.)
-  - `scripts/replay_diff.py <capture>` — policy-free ONE-STEP sim-vs-device transition diff on a real
+  - `scripts/validate/replay_diff.py <capture>` — policy-free ONE-STEP sim-vs-device transition diff on a real
     capture. Great for turns/obstacles; CANNOT test multi-frame mechanics (the crevasse jump arc).
-  - Device eval: `scripts/capture_calib.py <model> --episodes 8 --turn-cooldown 0`.
+  - Device eval: `scripts/device/capture_calib.py <model> --episodes 8 --turn-cooldown 0`.
 - Checkpoints are noisy + late-collapse → **keep the BEST checkpoint, not `_final`**. Registry `runs/MODELS.md`.
 
 ## GPU sim + training (2026-07-06, GPU box — torch port of the sim)
 - **`src/templerun_rl/sim_env_torch.py` = batched-tensor port of sim_env.py** (`TorchTempleRunVecEnv`,
   B envs as [B] tensors, cuda/cpu). The CPU sim stays the REFERENCE — if they disagree, fix the port.
-  **Equivalence gates (run after ANY change to either sim): `scripts/sim_equivalence.py`** (1344
-  deterministic step-exact scenario×config×policy diffs + statistical tier), `scripts/scorecard_torch.py
+  **Equivalence gates (run after ANY change to either sim): `scripts/validate/sim_equivalence.py`** (1344
+  deterministic step-exact scenario×config×policy diffs + statistical tier), `scripts/validate/scorecard_torch.py
   --strict` (the unmodified scorecard via a registry alias; 12/13 PASS — turn.gates oracle-survival is
   threshold-MARGINAL on BOTH sims: true rate 73%cpu/72%torch vs the 70% bar, n=80 seed-batch coin flip),
   + v36 plays both sims to median ratio 1.002 (n=160). Sim steps ~40k/s at B=4096 (65x the SubprocVecEnv).
-- **Training**: `scripts/train_sim_gpu.py` (SB3 over the batched env; recipe-faithful geometry =
+- **Training**: `scripts/train/train_sim_gpu.py` (SB3 over the batched env; recipe-faithful geometry =
   B=256 n_steps=16 batch=64 → ~900 steps/s end-to-end — the PPO optimizer loop is the wall, NOT the env;
   batch=512 gives 5k steps/s but BROKE a from-scratch run — dynamics change, use only with curve
-  validation). `scripts/train_fast.py` = pure-torch GPU-resident PPO (SB3-exact losses, saves normal SB3
+  validation). `scripts/train/train_fast.py` = pure-torch GPU-resident PPO (SB3-exact losses, saves normal SB3
   zips) — **VALIDATED 2026-07-06: 1.29x SB3 at recipe geometry + reproduces from-scratch turns-only
   learning exactly (96/96, median 6238 = SB3's). Use it for new runs.** Quick verdict tool:
-  `scripts/eval_ckpt_torch.py <ckpts...>` (batched device-true-cfg eval).
+  `scripts/validate/eval_ckpt_torch.py <ckpts...>` (batched device-true-cfg eval).
 - **FROM-SCRATCH WALL (measured 2026-07-06): the full task is NOT from-scratch trainable** — flat ~100m
   (the FIRST junction) for 3.4M steps (reference recipe, CPU trainer) AND 6M (torch). Cause: since the
   2026-07-02 fatal-turn remodel, turn-on-straight=death makes turn exploration a needle; every good
@@ -2265,7 +2281,7 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   **per-episode `episode_profiles` mix** (torch sim only: cfg list of {weight, overrides} sampled each
   reset — e.g. 50% standard / 15% turns-only / 12% narrows-from-0 / 12% crevasse-dense / 6% hole-rhythm /
   5% compound) = guaranteed rare-mechanic exposure with zero phase-atrophy. See runs/ppo_mix256 lineage.
-- **256-net path that works: v41 = v36 surgery-widened (scratchpad/surgery_v39_256.py, exact-equivalent
+- **256-net path that works: v41 = v36 surgery-widened (experiments/surgery_v39_256.py, exact-equivalent
   init) + 2M finetune @5e-5 on the v39 recipe → OFFLINE median 2200 vs v36's 1784 (+23%), max 8389, still
   climbing at 2M, NO drift.** v42 = +2M extension. Stop-early workflow: eval checkpoints at 1-2M
   (eval_ckpt_torch) and kill/extend on evidence — training is ~30 min, don't pre-commit to 6M.
@@ -2318,7 +2334,7 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   gap in the REFERENCE sim, not a torch-port defect.** Only v43 held (trained right after the clip gap
   was closed) → closing a real gap converts optimization from poison to fuel; that is the ONLY lever now.
 - **★ CURSE BROKEN — WIDE-GAP LANDING MODEL (2026-07-06 late night, THE session that made offline↔device
-  correlate again). Forensics (`scratchpad/jump_arc.py`, 1600 jumps / 8 captures): 2-cell HoleLongs
+  correlate again). Forensics (`experiments/jump_arc.py`, 1600 jumps / 8 captures): 2-cell HoleLongs
   (pt12/13/15/16) clip 20% on device, concentrated at LOW speed. ROOT CAUSE: the sim only checked
   "airborne at cell entry" — a SHORT arc satisfies that while LANDING inside the far gap cell (device
   clips the far wall → dt4 Ledge). Device jump span = `0.0204*v − 0.94` cells (NEGATIVE intercept; the
@@ -2337,7 +2353,7 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   ALL crevasse ledge cells incl step-DOWN/high-ground. Device vel_y ARCS (hook 16x) confirm step-down
   also needs near-apex at the far cell (pt35 cp0.96 vel_y~4=apex). Offline-validated: apex ON drops the
   early-jumper v47 (4131→3440) but leaves good v36 untouched (1810→1825). v48 = v47 + both crevasse fixes:
-  device crevasse HIT-RATE (slowdown metric, `scratchpad/crevasse_clips.py`) 19%→15% (v36=16%) — the fix
+  device crevasse HIT-RATE (slowdown metric, `experiments/crevasse_clips.py`) 19%→15% (v36=16%) — the fix
   WORKS. BUT v48 overall median 2587 (degradation-confounded — ran ~2.5h into session) and offline≈v47:
   the stumble-penalty GRADIENT IS WEAK (crevasses too sparse in standard training). NEXT (v49): a
   CREVASSE-DENSE episode_profile so the policy gets enough exposure to learn the fine timing + re-eval
@@ -2375,7 +2391,7 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   device narrows-at-speed (is [3,7] too strict at speed?) + flame slide-under. NEW config knobs this
   session (all default-OFF, equivalence-gated): wide_gap_landing_model/_span_a/_span_b/_land_grace,
   crevasse_apex_all, turn_send_lat_frames. Hook 16x = +vel_x/y/z. UNCOMMITTED (per norm).**
-- **`scripts/trajectory_diff.py` (NEW, multi-frame comparator — the cheap sim-vs-game tool replay_diff
+- **`scripts/validate/trajectory_diff.py` (NEW, multi-frame comparator — the cheap sim-vs-game tool replay_diff
   couldn't be): reconstructs the track from a capture + replays recorded actions through the sim.
   VELOCITY half WORKS (sim-vs-device vel MAE 0.5-1.4 = physics/curve/clip are FAITHFUL). Death-locator
   half is BUGGY (reports constant "sim dies @~90" every ep = track-reconstruction alignment artifact,
@@ -2390,7 +2406,7 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
   check/merge its worktree branch. Iteration loop: model gap → 3-min train → 1-min offline gate →
   8-ep phone eval → capture forensics → repeat. Device serial on the GPU box = 3f80a3a (Redmi Note 7,
   screen brightness 0 + keep-awake set; game restart drops the hook → kill old injector PID, re-run
-  scripts/setup_device.py).
+  scripts/device/setup_device.py).
 - **SPEED (2026-07-06 final): minibatch A/B PROVED bs512 quality == bs64** (same recipe/warm-start,
   1M-step arms: medians 3675/3830/3498 within noise — the earlier "bs512 broke from-scratch" was the
   from-scratch WALL confound, not bs). **+ CUDA-graph minibatch capture in train_fast.py (--cuda-graph;
@@ -2489,7 +2505,7 @@ android:write_settings allow` + `settings put system screen_off_timeout 21474836
 - **JUNCTION LEVEL DROPOUT found + fixed** (see Sim section) = why obs30 retrains looked worse on device.
   v31 (v27 recipe + dropout + 0.56 gate) trained; in-sim clean turns WITH dropout. NOTE: in-training
   EvalCallback env ≠ training env (no buffer flags) → its curve says "collapse" when device-true eval says
-  healthy. Judge checkpoints with `scratchpad/eval_swipe_deaths.py` (device-true cfg, deaths by mechanic).
+  healthy. Judge checkpoints with `experiments/eval_swipe_deaths.py` (device-true cfg, deaths by mechanic).
 - **NEXT WALL @v200+ (both v14 long runs died on it): chained-jump blindness** — a jump spans ~2.75 cells,
   obs lookahead = 1 cell → lands blind into TreeJump (3738m, 5462m deaths). Lever: next2-obstacle obs
   (hook 2-ahead walk device-verified readable on straights; breaks only through turns = dropout above).

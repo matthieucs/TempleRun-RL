@@ -18,7 +18,7 @@ dependencies = [
 train = ["stable-baselines3", "tensorboard"]
 tools = ["frida==17.14.0", "frida-tools", "lief==0.17.6"]
 
-# The scripts/ helpers are run directly (e.g. `python scripts/train.py`), not as console entry points.
+# The scripts/ helpers are run directly (e.g. `python scripts/train/train.py`), not as console entry points.
 
 [tool.setuptools.packages.find]
 where = ["src"]

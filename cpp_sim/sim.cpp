@@ -7,7 +7,7 @@
  * same rng draw order and the same "check prob > 0 FIRST, only then draw"
  * gating, so a disabled feature consumes no random numbers.
  *
- * Gate: scripts/sim_equivalence.py --backend cpp  (deterministic tier must be
+ * Gate: scripts/validate/sim_equivalence.py --backend cpp  (deterministic tier must be
  * step-exact against sim_env.py).
  *
  * Build (GCC 4.6.3 / MinGW, no C++11 stdlib):

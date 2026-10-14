@@ -63,18 +63,18 @@ backups/
 *.dll
 *.pyd
 
-# scratchpad: KEEP the analysis tools (*.py), the training recipes (*.sh) and the
-# sim configs (*_cfg.json) — they are how every arm in CLAUDE.md is reproduced.
-# DROP the rollout/eval data dumps.
-scratchpad/*.jsonl
-scratchpad/*.json
-!scratchpad/*_cfg*.json
-scratchpad/*.err
-scratchpad/*.out
-scratchpad/*.pt
-scratchpad/*.html
-scratchpad/*.bak.py
-scratchpad/_t.cpp
+# scratchpad/ = local working area only (videos, dumps, throwaway scripts); never committed.
+# The research archive lives in experiments/ (tools, recipes, sim configs); drop its data dumps.
+scratchpad/
+experiments/*.jsonl
+experiments/*.json
+!experiments/*_cfg*.json
+experiments/*.err
+experiments/*.out
+experiments/*.pt
+experiments/*.html
+experiments/*.bak.py
+*.so
 
 # --- champion weights: re-included from the runs/ + *.zip ban above ---
 !models/*.zip

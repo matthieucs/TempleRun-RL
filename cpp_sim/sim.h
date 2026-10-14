@@ -3,7 +3,7 @@
  *
  * Everything is plain C so ctypes can drive it (see cpp_sim/cpp_vec_env.py).
  * The Python CPU sim (sim_env.py) is the SPECIFICATION; this is a transcription
- * of it, not a re-derivation.  scripts/sim_equivalence.py --backend cpp is the
+ * of it, not a re-derivation.  scripts/validate/sim_equivalence.py --backend cpp is the
  * acceptance gate.
  *
  * CONFIG MODEL

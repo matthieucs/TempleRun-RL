@@ -2,7 +2,7 @@
 
 GOAL: byte-identical *mechanics* to ``sim_env.py`` (the device-calibrated reference), at
 GPU-batched throughput. The CPU sim stays the source of truth: every mechanic here mirrors
-its exact order of operations, and ``scripts/sim_equivalence.py`` diffs the two step-by-step
+its exact order of operations, and ``scripts/validate/sim_equivalence.py`` diffs the two step-by-step
 on fixed tracks + statistically on procedural rollouts. If the two ever disagree, the CPU
 sim wins — fix THIS file.
 
@@ -1621,7 +1621,7 @@ class TorchTempleRunVecEnv(VecEnv):
         # ⚠️ THIS SIM IS RETIRED AND ALREADY DRIFTS FROM THE C++ TRAINER AND THE CPU REFERENCE -- the
         # span above is FLAT, missing LAND_SPAN_LEVEL_SCALED (2026-07-27), so landing_hazard AND this
         # column are wrong by a whole cell at crevasses. The column is mirrored only to keep the obs
-        # WIDTH right. Do not judge a policy here: use scripts/eval_cpp.py.
+        # WIDTH right. Do not judge a policy here: use scripts/validate/eval_cpp.py.
         return out
 
     def _full_obs(self) -> torch.Tensor:
