@@ -45,7 +45,7 @@ python scripts/train/train_fast.py \
   --airborne-action-penalty 0.08 --strafe-penalty 0.05 --turn-buffer-bonus 0.5 \
   --turn-explore-prob 0.5 --turn-explore-anneal-frac 0.5 \
   --curriculum-max-start-dist 5000 --turn-approach-buffer --stepdown-bonus-gate --landing-hazard-penalty 0.30 --stepdown-jump-penalty 8.0 --stack-margin-penalty 8.0 --stepdown-explore-prob 0.5 --stepdown-explore-anneal-frac 0.5 \
-  --sim-config "$(cat configs/v120_world.json)" \
+  --sim-config "$(cat configs/sim_world.json)" \
   --ckpt-every 2000000 \
   --out runs/ppo_sw_d8.0
 echo "SW8.0 DONE"

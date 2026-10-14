@@ -26,15 +26,8 @@
   The bar at the bottom lights up each command the policy sends: turn ↰, tilt, jump ↑, slide ↓, turn ↱.</i>
 </p>
 
+
 ---
-
-## 📣 News
-
-- **[2026-10-14]** 🏆 **New record: 16,782 m** on the device (policy `v120`), passing 10 km after about 5 minutes.
-  Recorded with `scripts/device/record_overlay.py`; the GIF above is taken from that run.
-- **[2026-07-31]** 📦 Pretrained policies `v120` and `v133` released in [`models/`](models/MODELS.md), trained
-  with a C++ simulator that runs about 27k steps/s.
-- **[2026-07-06]** 🎯 **10,000 m reached for the first time** on the real game.
 
 ## ✨ Overview
 
@@ -43,11 +36,10 @@
 - 🔌 **No root, no pixels.** A [Frida](https://frida.re) gadget injected into the APK reads the game state
   directly from memory (player, track cells, obstacles, turns) and executes actions by calling the game's
   own methods. Both go over TCP at 30 Hz; the policy acts at 10 Hz.
-- 🧪 **Sim-to-real.** Training happens in a headless simulator of the track generator and runner physics,
-  **calibrated against device captures** (jump arcs, turn windows, crevasse ledges, input latency).
-  A C++ port, checked step for step against the Python reference, trains 10M steps in about 6 minutes.
-- 🤖 **The network decides everything.** The phone-side hook only translates actions, for example routing a
-  turn through the game's own swipe queue. It contains no hand-written playing rules.
+- 🧪 **Sim-to-real.** Training happens in a headless simulator built from the game's reverse-engineered
+  internals (track generation, obstacles, runner physics) and **calibrated on measurements from the real
+  phone** (jump arcs, turn windows, crevasse ledges, input latency). A fast C++ version of the simulator
+  trains 10M steps in about 6 minutes.
 
 ```
   Android phone (arm64, no root)                Host (this repo)
@@ -59,21 +51,11 @@
         adb forward maps the phone's 9999 / 9998 / 27042 to 127.0.0.1
 ```
 
-## 🏆 Pretrained Policies
+## 🏆 Pretrained Policy
 
-Stable-Baselines3 PPO, MLP `[512, 512]`, observation width 67. Distances are **measured on the device**:
-
-| Policy | Device runs | Median | Best | ≥ 10 km |
-|---|:---:|:---:|:---:|:---:|
-| [`ppo_v120_obs67_base.zip`](models/) **(champion)** | 14 | **4,736 m** | **16,782 m** † | 1 / 14 |
-| [`ppo_v133_sdonly_10002432_steps.zip`](models/) | 16 | 4,708 m | 12,007 m | **2 / 16** |
-
-<sub>† From the 2026-10-14 record session (20 attempts, separate from the 14-run benchmark). The older
-benchmark medians are pessimistic: the capture harness stopped episodes at 4,000 frames, which cut off a
-v120 run that was still alive at 15,454 m. Details in [`models/MODELS.md`](models/MODELS.md).</sub>
-
-`v133` is `v120`'s training world plus one fix: it no longer jumps pointlessly at mid-to-low step-downs
-(100% → 0% over 154 step-downs). Distance is a statistical tie.
+| Policy | Device runs | Median | Best |
+|---|:---:|:---:|:---:|
+| [`templerun_runner_v1.zip`](models/MODELS.md) | 14 | 4,736 m | **16,782 m** |
 
 ## 🚀 Quick Start
 
@@ -102,16 +84,16 @@ the in-game agent unloads.
 python scripts/device/setup_device.py --serial <your-serial>
 ```
 
-### 3. Watch a pretrained policy play
+### 3. Watch the policy play
 
 ```bash
-python scripts/device/capture_calib.py models/ppo_v120_obs67_base.zip --episodes 5 --turn-cooldown 0 --max-steps 8000
+python scripts/device/capture_calib.py models/templerun_runner_v1.zip --episodes 5 --turn-cooldown 0 --max-steps 8000
 ```
 
 ### 4. Record a video with the action overlay
 
 ```bash
-python scripts/device/record_overlay.py models/ppo_v120_obs67_base.zip \
+python scripts/device/record_overlay.py models/templerun_runner_v1.zip \
     --serial <your-serial> --episodes 1 --out-dir videos/ --max-steps 8000
 ```
 
@@ -120,64 +102,46 @@ action, then draws the command bar onto the video (`ffmpeg` required).
 
 ## 🔬 Training
 
-Training runs in the simulator, not on the phone. The phone is only used to **measure** fidelity and to
-evaluate finished policies.
+Training runs in the simulator, not on the phone. The phone is only used to **measure** how the real game
+behaves and to evaluate finished policies.
+
+> [!NOTE]
+> The C++ simulator (`cpp_sim/`) was developed and tested on **Windows** only. It has not been
+> validated on Linux or macOS.
 
 ```bash
-# build the C++ simulator (once, and after any sim change)
-CXX=g++ sh cpp_sim/build.sh
+# build the C++ simulator (once, and after any change to it)
+sh cpp_sim/build.sh
 
-# gate: the C++ port must match the Python reference step for step
-python scripts/validate/sim_equivalence.py --backend cpp --det-only
-python cpp_sim/test_rng_order.py
+# fine-tune the shipped policy for 10M steps
+bash configs/train.sh
 
-# train v133's exact recipe, starting from the shipped v120 weights
-bash configs/train_v133.sh
-
-# evaluate on the phone
-python scripts/device/capture_calib.py runs/ppo_next_final.zip --episodes 8 --turn-cooldown 0 \
+# evaluate the result on the phone
+python scripts/device/capture_calib.py runs/templerun_runner_next_final.zip --episodes 8 --turn-cooldown 0 \
     --out captures/next_device.jsonl
 ```
 
 <details>
-<summary><b>Full training command and why each setting matters</b></summary>
+<summary><b>What the main training settings do</b></summary>
 
-```bash
-python scripts/train/train_fast.py \
-  --backend cpp \
-  --init-from models/ppo_v120_obs67_base.zip \
-  --timesteps 10000000 \
-  --net-arch 512,512 --action-history-len 4 --frame-stack 1 \
-  --num-envs 256 --n-steps 16 --batch-size 512 --cuda-graph \
-  --turn-linger 3 \
-  --ent-coef 0.03 --ent-coef-final 0.005 --ent-schedule cosine \
-  --learning-rate 1.2e-4 --lr-schedule cosine --lr-final 5e-6 \
-  --narrow-hold-bonus 0.18 --aim-center-weight 1.0 \
-  --slide-jump-penalty 0.0 --idle-action-penalty 0.0 \
-  --airborne-action-penalty 0.08 --strafe-penalty 0.05 \
-  --landing-hazard-penalty 0.30 \
-  --stepdown-jump-penalty 8.0 --stepdown-explore-prob 0.5 --stepdown-explore-anneal-frac 0.5 \
-  --turn-buffer-bonus 0.5 --turn-explore-prob 0.5 --turn-explore-anneal-frac 0.5 \
-  --curriculum-max-start-dist 5000 --turn-approach-buffer --stepdown-bonus-gate \
-  --sim-config "$(cat configs/v120_world.json)" \
-  --ckpt-every 2000000 --out runs/ppo_next
-```
+The full command is in [`configs/train.sh`](configs/train.sh); the simulated world is
+[`configs/sim_world.json`](configs/sim_world.json).
 
 | Flag | Why |
 |---|---|
-| `--backend cpp` | 7× the PyTorch sim (26–28k vs 3.7k steps/s) |
+| `--backend cpp` | about 7× faster than the Python simulator (26–28k vs 3.7k steps/s) |
 | `--num-envs 256 --n-steps 16` | keep `num_envs × n_steps = 4096`; widening `num_envs` alone is faster but much worse |
-| `--landing-hazard-penalty 0.30` | penalizes a jump whose arc lands on a hazard (the fix behind v111) |
-| `--stepdown-jump-penalty 8.0 --stepdown-explore-prob 0.5` | removes the pointless step-down jump (v133). Both halves are needed: at a 100% jump rate the alternative is never sampled |
-| `--turn-explore-prob 0.5` | guided exploration for the early turn swipe, which fixed turns being missed under latency |
-| `--timesteps 10000000` | a measured ceiling: 20–25M runs plateaued or did worse on the device |
+| `--landing-hazard-penalty 0.30` | penalizes a jump whose arc lands on a hazard |
+| `--stepdown-jump-penalty 8.0 --stepdown-explore-prob 0.5` | removes pointless jumps when the ground steps down. Both are needed: if the policy always jumps, it never tries the alternative |
+| `--turn-explore-prob 0.5` | guided exploration for swiping early before a turn, which stops turns from being missed because of input lag |
+| `--timesteps 10000000` | a measured ceiling: 20–25M-step runs did no better on the phone |
 
 </details>
 
 <details>
 <summary><b>Judging a candidate</b></summary>
 
-Device distances vary a lot (v133 ranged from 1,506 to 12,007 m), so an 8-run median detects a real
+Device distances vary a lot (one policy ranged from 1,506 to 12,007 m), so an 8-run median detects a real
 20% gain only about 11% of the time. Judge **per-encounter rates** instead: one batch has ~400 hazards,
 ~60 crevasses and ~900 jumps.
 
@@ -188,27 +152,24 @@ python scripts/analysis/takeoff_timing.py    captures/next_device.jsonl  # creva
 python scripts/analysis/stepdown_forensic.py captures/next_device.jsonl
 ```
 
-Before using phone time, check that the training world matches the device: score the current champion in
-the sim and compare it to its own device median (`scripts/analysis/hole_landing_sim.py`).
-
 </details>
 
 ## 📁 Repository Layout
 
 ```
-src/templerun_rl/     the package: env, TCP clients, observation, reward, Python sim (the reference spec)
-cpp_sim/              C++ simulator used for training (~27k steps/s) + its Python vec-env wrapper
+src/templerun_rl/     the package: env, TCP clients, observation, reward, Python simulator
+cpp_sim/              fast C++ simulator used for training (Windows) + its Python wrapper
 frida/                temple_run_hook.js (in-game agent) and gadget_inject.py
-models/               shipped policies + MODELS.md
-configs/              the v120 sim world and the v120 / v133 training recipes
+models/               the shipped policy
+configs/              training recipe and simulated world
 scripts/
   device/             phone bring-up, capture, evaluation, screen recording + overlay
   train/              trainers (train_fast.py = C++ / GPU path)
-  validate/           sim-vs-device fidelity checks, sim equivalence, checkpoint evaluation
-  analysis/           forensics on device captures (deaths, jumps, crevasses, chains)
+  validate/           simulator-vs-device fidelity checks, checkpoint evaluation
+  analysis/           analysis of device captures (deaths, jumps, crevasses, chains)
   probes/             one-off device measurements (turn window, jump latency, …)
-experiments/          archived research: per-version recipes, sim configs and one-off studies
-docs/                 setup, gadget, offsets, sim contract; docs/archive/ = full project history
+experiments/          archived research: past recipes, configs and one-off studies
+docs/                 setup, gadget, offsets, simulator spec; docs/archive/ = full project history
 tools/                build_gadget_apk.py (APK patcher)
 ```
 

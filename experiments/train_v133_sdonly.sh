@@ -34,7 +34,7 @@
 set -euo pipefail
 python scripts/train/train_fast.py \
   --backend cpp \
-  --init-from runs/ppo_v111_obs66_slh.zip \
+  --init-from runs/ppo_v120_obs67_base.zip \
   --timesteps 10000000 \
   --net-arch 512,512 --action-history-len 4 --frame-stack 1 \
   --num-envs 256 --n-steps 16 --batch-size 512 --cuda-graph \
@@ -44,8 +44,8 @@ python scripts/train/train_fast.py \
   --narrow-hold-bonus 0.18 --aim-center-weight 1.0 --slide-jump-penalty 0.0 --idle-action-penalty 0.0 \
   --airborne-action-penalty 0.08 --strafe-penalty 0.05 --turn-buffer-bonus 0.5 \
   --turn-explore-prob 0.5 --turn-explore-anneal-frac 0.5 \
-  --curriculum-max-start-dist 5000 --turn-approach-buffer --stepdown-bonus-gate --landing-hazard-penalty 0.30 \
-  --sim-config "$(cat configs/v120_world.json)" \
+  --curriculum-max-start-dist 5000 --turn-approach-buffer --stepdown-bonus-gate --landing-hazard-penalty 0.30 --stepdown-jump-penalty 8.0 --stepdown-explore-prob 0.5 --stepdown-explore-anneal-frac 0.5 \
+  --sim-config "$(cat configs/sim_world.json)" \
   --ckpt-every 2000000 \
-  --out runs/ppo_v120_chaincoast
-echo "V120 DONE"
+  --out runs/ppo_v133_sdonly
+echo "V133 DONE"

@@ -6,18 +6,22 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
 
 ## ⚡ CURRENT STATE (2026-10-14) — START HERE
 
-- **NEW DEVICE RECORD 16,782 m (v120 `models/ppo_v120_obs67_base.zip`, hook clean-17k, phone e4de25a1 =
+- **NEW DEVICE RECORD 16,782 m (v120 `models/templerun_runner_v1.zip`, hook clean-17k, phone e4de25a1 =
   Redmi Note 12 `topaz`).** 20-attempt record session, one run per scrcpy recording, keep-best:
   2252..9668 m then 16,782 (10 km crossed at frame 3102, ~5 min). Died Burnt-type 7 on a flame tower at v210.
   README GIF = `assets/demo_10k.gif` (overlay video around the 10 km banner).
 - **REPO REORGANIZED (branch `repo-cleanup`):** `scratchpad/` (research) -> `experiments/`;
   `scripts/` -> `scripts/{device,train,validate,analysis,probes}/`; recipes + world -> `configs/`
-  (`_v120_cfg.json` -> `configs/v120_world.json`); AGENTS.md / OVERNIGHT_LOG / CLAUDE_FULL_HISTORY ->
+  (`_v120_cfg.json` -> `configs/sim_world.json`); AGENTS.md / OVERNIGHT_LOG / CLAUDE_FULL_HISTORY ->
   `docs/archive/`. Paths below were rewritten accordingly. Scripts find siblings via a 3-line
   "repo bootstrap" `sys.path` header. `scratchpad/` is now local-only (gitignored).
 - **⚠️ PRE-EXISTING (found during cleanup, NOT caused by it): the C++/Python equivalence gate is RED at
   4dfe4db** — `sim_equivalence --backend cpp --det-only` 0/7488, `test_rng_order` 0/60, all on
   `dist_next_must_jump` (Python streams it, C++ returns 0). Fix before trusting a new C++-trained arm.
+- **SHIPPED SURFACE RENAMED:** v120 obs67 = `models/templerun_runner_v1.zip` (only shipped model; v133 +
+  v120 obs66 zips removed from models/, still in git history). Recipe = `configs/train.sh` (v133's flags,
+  fine-tunes runner_v1), world = `configs/sim_world.json` (was _v120_cfg.json). v120/v133 recipes now in
+  `experiments/`. README/MODELS.md carry NO vXXX names (user request); keep vXXX only here + experiments/.
 - **USB on e4de25a1 drops (cable/port, not vibration).** Temple Run's VIBRATE appop set to `ignore`.
 
 ## ⚡ CURRENT STATE (2026-07-31)
@@ -67,8 +71,8 @@ actions over TCP — no screen-scraping, no synthetic input). Full history: `doc
   - **⚠️ IT READ PARITY IN SIM (+1.2%, t=0.73). That verdict was WORTHLESS because the sim
     reproduces this killer at 2.2% vs the device's 24.3%. ⇒ WHEN THE SIM DOES NOT REPRODUCE THE
     DEATH MODE AN ARM TARGETS, ITS SIM VERDICT CARRIES NO INFORMATION — go to the phone.**
-  - **RECIPE: v111's exact recipe + `chain_coast_kill_prob` 0.5 (`configs/v120_world.json`,
-    `configs/train_v120.sh`). v111 stays the obs65 fallback.**
+  - **RECIPE: v111's exact recipe + `chain_coast_kill_prob` 0.5 (`configs/sim_world.json`,
+    `experiments/train_v120_chaincoast.sh`). v111 stays the obs65 fallback.**
   - **⚠️ CAPTURE HYGIENE, cost me a false "2/8": never leave two `capture_calib` processes on one
     stream -- they double-log the SAME physical runs (batch B eps1-3 were identical to batch A
     eps5-7 to the decimal). And `death_type` persists on the trailing frames, so aggregate on
