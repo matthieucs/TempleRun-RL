@@ -10,12 +10,9 @@
 </p>
 
 <p align="center">
+  <a href="https://www.matscharffe.com/projects/temple-run-rl"><img src="https://img.shields.io/badge/Technical_Note-matscharffe.com-F78100?style=plastic&logo=google-chrome&logoColor=white" alt="Technical note"></a>
   <img src="https://img.shields.io/badge/record-16%2C782%20m-success?style=plastic" alt="Record 16,782 m">
-  <img src="https://img.shields.io/badge/Python-3.12+-3776AB?style=plastic&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/PyTorch-EE4C2C?style=plastic&logo=pytorch&logoColor=white" alt="PyTorch">
-  <img src="https://img.shields.io/badge/Stable--Baselines3-PPO-8A2BE2?style=plastic" alt="SB3 PPO">
-  <img src="https://img.shields.io/badge/Frida-gadget-EF6456?style=plastic" alt="Frida">
-  <img src="https://img.shields.io/badge/Android-arm64-3DDC84?style=plastic&logo=android&logoColor=white" alt="Android">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=plastic" alt="MIT"></a>
 </p>
 
